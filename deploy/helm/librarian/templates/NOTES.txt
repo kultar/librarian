@@ -1,0 +1,22 @@
+librarian is running.
+
+A2A endpoint for agents (in-cluster):
+  http://{{ include "librarian.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.a2aPort }}/
+  Agent card: /.well-known/agent-card.json
+
+Approval pages for people: {{ .Values.publicUrl | default "(set publicUrl so Slack links work)" }}
+{{- if not .Values.oauth2Proxy.enabled }}
+
+WARNING: oauth2Proxy is disabled, so approval links are protected only by their one-time
+token. Enable oauth2Proxy (sign-in through your identity provider) for shared deployments.
+{{- end }}
+{{- if gt (int .Values.replicaCount) 1 }}
+{{- if not (hasPrefix "postgresql" (toString (.Values.config.database_url | default ""))) }}
+
+WARNING: replicaCount > 1 needs Postgres (config.database_url: postgresql+asyncpg://...).
+{{- end }}
+{{- end }}
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "librarian.fullname" . }} {{ .Values.service.a2aPort }}
+  curl -s localhost:{{ .Values.service.a2aPort }}/.well-known/agent-card.json

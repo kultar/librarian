@@ -394,3 +394,15 @@ async def test_pages_can_be_split_from_the_a2a_listener(
     with caplog.at_level("WARNING"):
         create_app(librarian, caller_keys=KEYS, surface="all")
     assert "forge identity headers" in caplog.text
+
+
+def test_card_advertises_a2a_url_separately_from_pages(librarian: Librarian) -> None:
+    from librarian.server import build_agent_card
+
+    assert build_agent_card(librarian).supported_interfaces[0].url == (
+        "https://librarian.example.test/"
+    )
+    librarian.settings.a2a_url = "http://librarian.agents.svc:8080"
+    assert build_agent_card(librarian).supported_interfaces[0].url == (
+        "http://librarian.agents.svc:8080/"
+    )

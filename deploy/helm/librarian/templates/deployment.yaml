@@ -1,0 +1,183 @@
+{{- $git := .Values.registry.gitSync -}}
+{{- $proxy := .Values.oauth2Proxy -}}
+{{- if and $git.enabled (not $git.repo) -}}
+{{- fail "registry.gitSync.repo is required when registry.gitSync.enabled is true" -}}
+{{- end -}}
+{{- if and $proxy.enabled (not $proxy.existingSecret) -}}
+{{- fail "oauth2Proxy.existingSecret is required when oauth2Proxy.enabled is true" -}}
+{{- end -}}
+{{- if and $proxy.enabled (not .Values.publicUrl) -}}
+{{- fail "publicUrl is required when oauth2Proxy.enabled is true (it is the OAuth redirect host)" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "librarian.fullname" . }}
+  labels:
+    {{- include "librarian.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if and .Values.persistence.enabled (has "ReadWriteOnce" .Values.persistence.accessModes) }}
+  strategy:
+    type: Recreate        # a ReadWriteOnce volume can only be mounted by one pod at a time
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "librarian.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include "librarian.config" . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "librarian.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "librarian.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if $git.enabled }}
+      initContainers:
+        # Populate the registry before librarian starts; the sidecar keeps it current.
+        - name: git-sync-init
+          image: {{ $git.image }}
+          args: [--repo={{ $git.repo }}, --ref={{ $git.ref }}, --root=/git, --link=current, --one-time]
+          {{- with $git.credentialsSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - {name: git, mountPath: /git}
+            - {name: tmp, mountPath: /tmp}
+      {{- end }}
+      containers:
+        - name: librarian
+          image: {{ include "librarian.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [serve, --config, /etc/librarian/config.yaml]
+          ports:
+            - {name: a2a, containerPort: 8080, protocol: TCP}
+            - {name: pages, containerPort: 8081, protocol: TCP}
+          env:
+            - {name: PYDANTIC_AI_NO_BANNER, value: "1"}
+            {{- if and .Values.otel.enabled .Values.otel.endpoint }}
+            - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ .Values.otel.endpoint | quote }}}
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: a2a}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: a2a}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/librarian, readOnly: true}
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+            {{- if $git.enabled }}
+            - {name: git, mountPath: /git, readOnly: true}
+            {{- end }}
+        {{- if $git.enabled }}
+        - name: git-sync
+          image: {{ $git.image }}
+          args: [--repo={{ $git.repo }}, --ref={{ $git.ref }}, --root=/git, --link=current, --period={{ $git.period }}]
+          {{- with $git.credentialsSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml $git.resources | nindent 12 }}
+          volumeMounts:
+            - {name: git, mountPath: /git}
+            - {name: tmp, mountPath: /tmp}
+        {{- end }}
+        {{- if $proxy.enabled }}
+        # Approvers' sign-in. Forwards to the pages listener, which only listens on
+        # 127.0.0.1, so identity headers can only ever come from here.
+        - name: oauth2-proxy
+          image: {{ $proxy.image }}
+          args:
+            - --http-address=0.0.0.0:4180
+            - --upstream=http://127.0.0.1:8081/
+            - --provider={{ $proxy.provider }}
+            {{- with $proxy.oidcIssuerUrl }}
+            - --oidc-issuer-url={{ . }}
+            {{- end }}
+            - --redirect-url={{ trimSuffix "/" .Values.publicUrl }}/oauth2/callback
+            {{- range $proxy.emailDomains }}
+            - --email-domain={{ . }}
+            {{- end }}
+            - --pass-user-headers=true
+            - --reverse-proxy=true
+            - --skip-provider-button=true
+            - --cookie-secure=true
+            - --skip-auth-route=GET=^/healthz$
+            {{- range $proxy.extraArgs }}
+            - {{ . }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ $proxy.existingSecret }}
+          ports:
+            - {name: proxy, containerPort: 4180, protocol: TCP}
+          readinessProbe:
+            httpGet: {path: /ping, port: proxy}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml $proxy.resources | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "librarian.fullname" . }}
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "librarian.fullname" .) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+        {{- if $git.enabled }}
+        - name: git
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

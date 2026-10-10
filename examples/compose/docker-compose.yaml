@@ -1,0 +1,30 @@
+# librarian + LiteLLM: the `fetch` skill plans through an OpenAI-compatible gateway.
+#
+#   export ANTHROPIC_API_KEY=...        # or configure another provider in litellm.yaml
+#   docker compose up -d
+#   python ../client/ask_librarian.py ask "How many APIs does APIs.guru track?"
+services:
+  librarian:
+    image: ghcr.io/kultar/librarian:latest
+    build: ../..
+    ports: ["8080:8080"]
+    command: [serve, --config, /config/librarian.yaml]
+    environment:
+      LIBRARIAN_MODEL_API_KEY: sk-librarian-local     # LiteLLM key for librarian
+    volumes:
+      - ./librarian.yaml:/config/librarian.yaml:ro
+      - ./registry:/data/registry
+      - librarian-data:/data/.librarian
+    depends_on: [litellm]
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: [--config, /config/litellm.yaml, --port, "4000"]
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
+      LITELLM_MASTER_KEY: sk-librarian-local
+    volumes:
+      - ./litellm.yaml:/config/litellm.yaml:ro
+
+volumes:
+  librarian-data:

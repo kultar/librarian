@@ -161,7 +161,12 @@ class Librarian:
         )
         self.publisher = publisher if publisher is not None else _default_publisher(settings)
         model = planner_model if planner_model is not None else _model_from_settings(settings)
-        self.planner = Planner(model, settings.max_calls_per_fetch) if model is not None else None
+        mode = settings.planner_output
+        if mode == "auto":
+            mode = "prompted" if settings.model_base_url else "tool"
+        self.planner = (
+            Planner(model, settings.max_calls_per_fetch, mode) if model is not None else None
+        )
 
     def load(self) -> None:
         self.registry.load()

@@ -126,6 +126,10 @@ class Settings(BaseSettings):
     port: int = 8080
     # Where approvers' browsers reach the credential/approval pages (used in links).
     public_url: str = "http://127.0.0.1:8080"
+    # The A2A endpoint advertised in the agent card (where agents connect). Defaults
+    # to public_url; set it when agents and people reach librarian at different
+    # addresses (e.g. in-cluster Service vs. SSO-protected ingress).
+    a2a_url: str | None = None
     # Serve the human pages (/credentials, /approvals) on their own listener.
     # Required with approvers.mode=trusted_header: identity headers must only be
     # accepted from the auth proxy, so the pages listener should be reachable only
@@ -168,6 +172,10 @@ class Settings(BaseSettings):
     model_base_url: str | None = None
     model_api_key: SecretStr | None = None
     max_calls_per_fetch: int = 8
+    # How the planner gets structured answers: "tool" (forced output tool), "native"
+    # (provider JSON mode) or "prompted" (JSON in the reply). "auto" = prompted when
+    # going through an OpenAI-compatible gateway (model_base_url), else tool.
+    planner_output: Literal["auto", "tool", "native", "prompted"] = "auto"
 
     rate_limit_per_minute: int = 60
     request_timeout_seconds: float = 30

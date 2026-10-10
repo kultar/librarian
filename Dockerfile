@@ -10,22 +10,20 @@ RUN uv sync --frozen --no-dev --extra aws --extra postgres --extra otel
 
 FROM python:3.12-slim
 RUN useradd --uid 10001 --create-home librarian \
-    && mkdir -p /data/registry /data/secrets \
+    && mkdir -p /data/registry /data/.librarian/secrets \
     && chown -R librarian:librarian /data \
-    && chmod 700 /data/secrets
-WORKDIR /app
+    && chmod 700 /data/.librarian /data/.librarian/secrets
 COPY --from=build --chown=librarian:librarian /app /app
+# No LIBRARIAN_* variables here: environment variables override the config file,
+# so image defaults would silently win over a deployment's config. Instead the
+# process runs in /data, where the built-in relative defaults (registry/,
+# .librarian/secrets, .librarian/librarian.db) land on the volume.
 ENV PATH="/app/.venv/bin:$PATH" \
-    LIBRARIAN_HOST=0.0.0.0 \
-    LIBRARIAN_PORT=8080 \
-    LIBRARIAN_REGISTRY_DIR=/data/registry \
-    LIBRARIAN_SECRETS_DIR=/data/secrets \
-    LIBRARIAN_STATE_DIR=/data \
-    LIBRARIAN_DATABASE_URL=sqlite+aiosqlite:////data/librarian.db \
     PYDANTIC_AI_NO_BANNER=1
+WORKDIR /data
 USER librarian
 VOLUME ["/data"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"
 ENTRYPOINT ["librarian"]
-CMD ["serve"]
+CMD ["serve", "--host", "0.0.0.0"]

@@ -156,3 +156,38 @@ async def test_planner_can_only_propose_writes(
     model, seen = scripted([ToolCallPart("describe_api", {"api": "tracker"})])
     await Planner(model).fetch("x", librarian.registry, librarian.executor, reader)
     assert "addComment" not in str(tool_results(seen[-1])[0].content)  # type: ignore[attr-defined]
+
+
+async def test_prompted_output_mode_parses_json_text(
+    librarian: Librarian, router: Router, secrets_store: FileSecretStore
+) -> None:
+    from pydantic_ai.messages import TextPart
+
+    calls = 0
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        assert not info.output_tools  # prompted mode: no forced output tool
+        return ModelResponse(parts=[TextPart('{"summary": "All good.", "unresolved": null}')])
+
+    planner = Planner(FunctionModel(respond), output_mode="prompted")
+    outcome = await planner.fetch(
+        "status?", librarian.registry, librarian.executor, Caller(agent="a")
+    )
+    assert outcome.answer.summary == "All good." and calls == 1
+
+
+def test_gateway_models_default_to_prompted_output(librarian: Librarian) -> None:
+    from librarian.config import Settings
+    from librarian.service import Librarian as Lib
+
+    settings = Settings(
+        model="claude-sonnet-5-5",
+        model_base_url="http://litellm:4000/v1",
+        database_url=None,
+        registry_dir=librarian.settings.registry_dir,
+    )
+    lib = Lib(settings)
+    assert lib.planner is not None
+    assert "Prompted" in type(lib.planner.agent._output_type).__name__  # pyright: ignore[reportPrivateUsage]

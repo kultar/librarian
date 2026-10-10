@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, ModelRetry, RunContext
+from pydantic_ai import Agent, ModelRetry, NativeOutput, PromptedOutput, RunContext
 from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
@@ -73,11 +73,25 @@ class FetchOutcome:
     proposed_writes: list[WriteRequest] = field(default_factory=list[WriteRequest])
 
 
-def build_agent(model: Model | str) -> Agent[PlannerDeps, FetchAnswer]:
+OutputMode = Literal["tool", "native", "prompted"]
+
+
+def build_agent(
+    model: Model | str, output_mode: OutputMode = "tool"
+) -> Agent[PlannerDeps, FetchAnswer]:
+    # "tool" forces an output-tool call (best with native providers); "prompted"
+    # asks for JSON in the reply and validates it, which works through any
+    # OpenAI-compatible gateway (some reject forced tool use); "native" uses the
+    # provider's structured-output mode.
+    output: Any = {
+        "tool": FetchAnswer,
+        "native": NativeOutput(FetchAnswer),
+        "prompted": PromptedOutput(FetchAnswer),
+    }[output_mode]
     agent = Agent(
         model,
         deps_type=PlannerDeps,
-        output_type=FetchAnswer,
+        output_type=output,
         instructions=INSTRUCTIONS,
         name="librarian-planner",
     )
@@ -214,8 +228,10 @@ def build_agent(model: Model | str) -> Agent[PlannerDeps, FetchAnswer]:
 
 
 class Planner:
-    def __init__(self, model: Model | str, max_calls: int = 8) -> None:
-        self.agent = build_agent(model)
+    def __init__(
+        self, model: Model | str, max_calls: int = 8, output_mode: OutputMode = "tool"
+    ) -> None:
+        self.agent = build_agent(model, output_mode)
         self.max_calls = max_calls
 
     async def fetch(

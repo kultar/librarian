@@ -16,7 +16,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.3)**. Expect breaking changes.
+> Status: **alpha (v0.4)**. Expect breaking changes.
 
 ## Why
 
@@ -53,6 +53,10 @@ pip install librarian-a2a            # the CLI and import are `librarian`
 docker pull ghcr.io/kultar/librarian
 helm install librarian ./deploy/helm/librarian   # see deploy/helm/librarian/README.md
 ```
+
+Integrations (any A2A client, LiteLLM, kagent): [docs/integrations.md](docs/integrations.md).
+Example client: [examples/client](examples/client/ask_librarian.py). librarian + LiteLLM in
+Docker Compose: [examples/compose](examples/compose).
 
 ## Quick start
 
@@ -255,12 +259,14 @@ uv run pytest
   AWS Secrets Manager; field selection and pagination styles; OpenTelemetry
 - **v0.3** ✅: writes behind human approval; grants (approve-and-allow-similar, config grants for
   autonomous agents); agent owners; planner write proposals; grants/approvals CLI
-- **v0.4**: Helm chart; Vault/GCP/Azure secret stores; verified caller identity and delegated
-  principals (OAuth token exchange); OIDC for approvers; per-API approver routing in Slack;
-  better operation search for very large APIs
-- **v0.5**: saved **recipes** (successful plans replayed without the LLM); learning instance
-  details (e.g. Jira custom fields); drift detection
-- **v1.0**: community registry with signed entries; per-user OAuth
+- **v0.4** ✅: Helm chart (oauth2-proxy sign-in, git-sync registry, hardened pod), separate
+  pages listener, registry overlay, release workflow (GHCR, PyPI), example client, LiteLLM compose
+- **v0.5**: verified principals: signed tokens from your identity provider instead of asserted
+  names, making requester approval safe
+- **v0.6**: better at big APIs: operation search for 500+ operation APIs, saved **recipes**
+  (successful plans replayed without the LLM), learning instance details (e.g. Jira custom fields)
+- **Later**: Vault/GCP/Azure secret stores; per-user OAuth; per-API approver routing in Slack;
+  community registry with signed entries
 
 ## License
 

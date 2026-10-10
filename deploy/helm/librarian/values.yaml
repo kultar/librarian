@@ -14,6 +14,10 @@ replicaCount: 1
 # https://librarian.example.com. Usually the host of `ingress.pages`.
 publicUrl: ""
 
+# A2A endpoint advertised in the agent card. Defaults to the in-cluster Service URL; set it
+# to the a2a ingress URL if agents connect from outside the cluster.
+a2aUrl: ""
+
 # librarian configuration (see examples/librarian.yaml). Listener settings, paths and the
 # approver header names are managed by the chart; everything else is yours.
 # Put secrets (Slack token, model key, GitHub token) in `envFrom`, not here.

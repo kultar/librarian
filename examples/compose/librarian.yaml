@@ -1,0 +1,6 @@
+host: 0.0.0.0
+public_url: http://localhost:8080
+# Plan with whatever model LiteLLM serves under this name.
+model: claude-sonnet-5-5
+model_base_url: http://litellm:4000/v1
+max_calls_per_fetch: 6

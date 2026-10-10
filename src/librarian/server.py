@@ -49,6 +49,7 @@ from a2a.types import (
 )
 from opentelemetry import propagate, trace
 from pydantic import ValidationError
+from pydantic_ai.exceptions import AgentRunError
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -144,7 +145,7 @@ def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) 
         provider=AgentProvider(organization="librarian", url="https://github.com/kultar/librarian"),
         supported_interfaces=[
             AgentInterface(
-                url=settings.public_url.rstrip("/") + RPC_PATH,
+                url=(settings.a2a_url or settings.public_url).rstrip("/") + RPC_PATH,
                 protocol_binding="JSONRPC",
                 protocol_version="1.0",
             )
@@ -253,6 +254,21 @@ class LibrarianExecutor(AgentExecutor):
             return
         except (LibrarianError, ValidationError, ValueError) as exc:
             await updater.failed(updater.new_agent_message([new_text_part(f"Error: {exc}")]))
+            return
+        except AgentRunError as exc:
+            log.warning("planner failed: %s", exc)
+            await updater.failed(
+                updater.new_agent_message([new_text_part(f"Planner/model error: {str(exc)[:500]}")])
+            )
+            return
+        except Exception:
+            # Never surface an unexpected crash as a protocol error: fail the task cleanly.
+            log.exception("skill %s failed", skill)
+            await updater.failed(
+                updater.new_agent_message(
+                    [new_text_part("Internal error in the librarian (details in its logs).")]
+                )
+            )
             return
 
         await updater.add_artifact([new_data_part(json_safe(result))], name=f"{skill}-result")

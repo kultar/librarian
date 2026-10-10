@@ -1,0 +1,118 @@
+id: apisguru
+name: APIs.guru
+description: 'Wikipedia for Web APIs. Repository of API definitions in OpenAPI format.
+
+  **Warning**: If you want to be notified about changes in advance please join our
+  [Slack channel](https://join.slack.com/t/mermade/shared_invite/zt-g78g7xir-MLE_CTCcXCdfJfG3CJe9qA).
+
+  Client sample: [[Demo]](https://apis.guru/simple-ui) [[Repo]](https://github.com/APIs-guru/simple-ui)'
+base_url: https://api.apis.guru/v2
+status: provisional
+auth:
+  type: none
+credential:
+  create_url: null
+  scopes: []
+  instructions: ''
+  validation_operation: null
+operations:
+- id: getProviders
+  method: GET
+  path: /providers.json
+  summary: List all providers
+  parameters: []
+  access: read
+  read_basis: method
+  accepts_body: false
+- id: getProvider
+  method: GET
+  path: /{provider}.json
+  summary: List all APIs for a particular provider
+  parameters:
+  - name: provider
+    in: path
+    required: true
+    type: string
+    description: ''
+  access: read
+  read_basis: method
+  accepts_body: false
+- id: getServices
+  method: GET
+  path: /{provider}/services.json
+  summary: List all serviceNames for a particular provider
+  parameters:
+  - name: provider
+    in: path
+    required: true
+    type: string
+    description: ''
+  access: read
+  read_basis: method
+  accepts_body: false
+- id: getAPI
+  method: GET
+  path: /specs/{provider}/{api}.json
+  summary: Retrieve one version of a particular API
+  parameters:
+  - name: provider
+    in: path
+    required: true
+    type: string
+    description: ''
+  - name: api
+    in: path
+    required: true
+    type: string
+    description: ''
+  access: read
+  read_basis: method
+  accepts_body: false
+- id: getServiceAPI
+  method: GET
+  path: /specs/{provider}/{service}/{api}.json
+  summary: Retrieve one version of a particular API with a serviceName.
+  parameters:
+  - name: provider
+    in: path
+    required: true
+    type: string
+    description: ''
+  - name: service
+    in: path
+    required: true
+    type: string
+    description: ''
+  - name: api
+    in: path
+    required: true
+    type: string
+    description: ''
+  access: read
+  read_basis: method
+  accepts_body: false
+- id: listAPIs
+  method: GET
+  path: /list.json
+  summary: List all APIs
+  parameters: []
+  access: read
+  read_basis: method
+  accepts_body: false
+- id: getMetrics
+  method: GET
+  path: /metrics.json
+  summary: Get basic metrics
+  parameters: []
+  access: read
+  read_basis: method
+  accepts_body: false
+source:
+  kind: openapi
+  url: https://api.apis.guru/v2/openapi.yaml
+  fetched_at: '2026-10-10T15:23:14.051369Z'
+owners:
+  channel: null
+  approver_group: null
+notes: Learned automatically from https://api.apis.guru/v2/openapi.yaml.
+updated_at: '2026-10-10T15:23:14.051459Z'
