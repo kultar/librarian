@@ -26,6 +26,7 @@ services:
     environment: {<<: *env, LIBRARIAN_PUBLIC_URL: "http://localhost:18101"}
   librarian-b:
     <<: *librarian
+    pull_policy: never        # uses the image librarian-a builds; never try a registry
     depends_on:
       librarian-a: {condition: service_started}
       postgres: {condition: service_healthy}
