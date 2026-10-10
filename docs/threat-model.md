@@ -79,6 +79,11 @@ high-value target. This document lists what we defend against, how, and what is 
   and dead after use. Pages are `no-store`, `no-referrer`, framed-denied, CSP-restricted.
 - `token` mode trusts link possession (local/dev). Use `trusted_header` mode behind an auth proxy
   (e.g. oauth2-proxy) with an approver group in shared deployments.
+- In `trusted_header` mode the identity headers must only ever come from the proxy. Set
+  `pages_port`: the pages then get their own listener (bound to `127.0.0.1` by default, reachable
+  only by a proxy sidecar) and the A2A listener, which agents reach directly, does not serve them
+  at all. Without this, any client that can reach the A2A port could forge identity headers;
+  librarian logs a warning in that configuration. The Helm chart wires this up for you.
 
 ### T6. Malicious or broken registry entries
 - Strict validation: unknown fields rejected, absolute/protocol-relative paths rejected, base URLs

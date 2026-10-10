@@ -124,7 +124,15 @@ class Settings(BaseSettings):
 
     host: str = "127.0.0.1"
     port: int = 8080
+    # Where approvers' browsers reach the credential/approval pages (used in links).
     public_url: str = "http://127.0.0.1:8080"
+    # Serve the human pages (/credentials, /approvals) on their own listener.
+    # Required with approvers.mode=trusted_header: identity headers must only be
+    # accepted from the auth proxy, so the pages listener should be reachable only
+    # by the proxy (e.g. bound to 127.0.0.1 behind an oauth2-proxy sidecar), while
+    # agents use the A2A listener, which then does not serve the pages at all.
+    pages_host: str = "127.0.0.1"
+    pages_port: int | None = None
 
     registry_dir: Path = Path("registry")
     # Where credentials live: "file" (secrets_dir) or "aws" (Secrets Manager, `aws`

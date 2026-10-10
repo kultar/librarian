@@ -50,7 +50,7 @@ def serve(
     """Run the A2A server."""
     import uvicorn
 
-    from librarian.server import create_app
+    from librarian.server import create_app, create_pages_app
 
     logging.basicConfig(level=log_level.upper(), format="%(levelname)s %(name)s: %(message)s")
     from librarian.telemetry import asgi_middleware, setup_telemetry
@@ -59,15 +59,28 @@ def serve(
     if settings.otel_enabled:
         setup_telemetry(settings.otel_service_name)
     librarian = Librarian(settings)
-    app_: Any = create_app(librarian)
+    separate = settings.pages_port is not None
+    app_: Any = create_app(librarian, surface="a2a" if separate else "all")
     if settings.otel_enabled:
         app_ = asgi_middleware(app_)
-    uvicorn.run(
-        app_,
-        host=host or settings.host,
-        port=port or settings.port,
-        log_level=log_level,
+    main = uvicorn.Config(
+        app_, host=host or settings.host, port=port or settings.port, log_level=log_level
     )
+    if not separate:
+        uvicorn.Server(main).run()
+        return
+    pages = uvicorn.Config(
+        create_pages_app(librarian),
+        host=settings.pages_host,
+        port=settings.pages_port or 8081,
+        log_level=log_level,
+        lifespan="off",
+    )
+
+    async def both() -> None:
+        await asyncio.gather(uvicorn.Server(main).serve(), uvicorn.Server(pages).serve())
+
+    asyncio.run(both())
 
 
 @app.command()

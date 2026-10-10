@@ -16,7 +16,7 @@ import contextlib
 import hmac
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, Literal
 
 from a2a.helpers.proto_helpers import (
     get_data_parts,
@@ -436,8 +436,36 @@ async def _caller_keys(librarian: Librarian) -> dict[str, str]:
     return keys
 
 
-def create_app(librarian: Librarian, caller_keys: dict[str, str] | None = None) -> Starlette:
-    """Build the ASGI app. `caller_keys` overrides keys loaded from settings (tests)."""
+Surface = Literal["all", "a2a", "pages"]
+
+
+def create_pages_app(librarian: Librarian) -> Starlette:
+    """Only the human pages, for a separate listener behind the auth proxy.
+
+    It has no lifespan of its own: the A2A app's lifespan starts the librarian.
+    """
+
+    async def healthz(_: Request) -> Response:
+        return JSONResponse({"status": "ok"})
+
+    return Starlette(
+        routes=[
+            *credential_routes(librarian.broker, librarian.settings.approvers),
+            *approval_routes(librarian.approvals, librarian.settings.approvers),
+            Route("/healthz", healthz, methods=["GET"]),
+        ]
+    )
+
+
+def create_app(
+    librarian: Librarian,
+    caller_keys: dict[str, str] | None = None,
+    surface: Surface = "all",
+) -> Starlette:
+    """Build the ASGI app. `caller_keys` overrides keys loaded from settings (tests).
+
+    `surface="a2a"` leaves out the human pages (serve them with `create_pages_app`).
+    """
     card = build_agent_card(
         librarian, require_auth=bool(librarian.settings.callers) or bool(caller_keys)
     )
@@ -464,10 +492,19 @@ def create_app(librarian: Librarian, caller_keys: dict[str, str] | None = None) 
     routes = [
         *create_agent_card_routes(card),
         *create_jsonrpc_routes(handler, RPC_PATH, context_builder=CallerContextBuilder()),
-        *credential_routes(librarian.broker, librarian.settings.approvers),
-        *approval_routes(librarian.approvals, librarian.settings.approvers),
         Route("/healthz", healthz, methods=["GET"]),
     ]
+    if surface == "all":
+        if librarian.settings.approvers.mode == "trusted_header":
+            log.warning(
+                "approvers.mode=trusted_header but the approval pages share the A2A listener: "
+                "anyone who can reach it could forge identity headers. Set pages_port and put "
+                "the pages listener behind the auth proxy only."
+            )
+        routes += [
+            *credential_routes(librarian.broker, librarian.settings.approvers),
+            *approval_routes(librarian.approvals, librarian.settings.approvers),
+        ]
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncGenerator[None]:

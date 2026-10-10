@@ -361,3 +361,36 @@ async def test_write_end_to_end_over_a2a(
             ],
         )
         assert denied.final == TaskState.TASK_STATE_REJECTED
+
+
+async def test_pages_can_be_split_from_the_a2a_listener(
+    librarian: Librarian, caplog: pytest.LogCaptureFixture
+) -> None:
+    from librarian.calls import Caller
+    from librarian.server import create_pages_app
+
+    entry = librarian.registry.get("tracker")
+    assert entry is not None
+    request = await librarian.broker.open(entry, Caller(agent="a"), "missing")
+    path = f"/credentials/{request.id}?t={librarian.broker.token_for(request)}"
+    forged = {"X-Auth-Request-Email": "admin@x.test", "X-Auth-Request-Groups": "api-approvers"}
+
+    a2a_only = create_app(librarian, caller_keys=KEYS, surface="a2a")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=a2a_only), base_url="http://lib"
+    ) as client:
+        # Agents can reach this listener; it must not serve pages, whatever headers they send.
+        assert (await client.get(path, headers=forged)).status_code == 404
+        assert (await client.get("/.well-known/agent-card.json")).status_code == 200
+
+    pages = create_pages_app(librarian)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=pages), base_url="http://lib"
+    ) as client:
+        assert (await client.get(path)).status_code == 200
+        assert (await client.post("/", json={})).status_code in (404, 405)  # no A2A here
+
+    librarian.settings.approvers.mode = "trusted_header"
+    with caplog.at_level("WARNING"):
+        create_app(librarian, caller_keys=KEYS, surface="all")
+    assert "forge identity headers" in caplog.text
