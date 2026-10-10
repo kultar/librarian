@@ -325,6 +325,7 @@ async def test_approval_page_shows_request_and_approves(librarian: Librarian) ->
     assert page.status_code == 200
     assert "addComment" in page.text and "&lt;script&gt;" in page.text  # escaped body
     assert "Approve and allow similar" in page.text
+    assert "kim@x.test" in page.text  # the requester is shown
     done = client.post(
         f"/approvals/{approval.id}",
         data={"t": token, "action": "once"},

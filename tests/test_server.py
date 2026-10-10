@@ -287,3 +287,77 @@ async def test_execute_select_over_a2a(
         ],
     )
     assert outcome.data[-1]["data"] == {"key": "ABC-1", "fields": {"summary": "s"}}
+
+
+async def test_write_end_to_end_over_a2a(
+    librarian: Librarian, router: Router, secrets_store: FileSecretStore
+) -> None:
+    from librarian.config import CallerKey
+
+    await secrets_store.put("tracker/write", "write-key")
+    router.add(
+        "POST", f"{BASE}/v1/issues/PAY-1/comments", lambda r: httpx.Response(201, json={"id": 9})
+    )
+    librarian.settings.callers = [
+        CallerKey(
+            agent="agent-a",
+            key_ref="librarian/callers/agent-a",
+            write_apis=["tracker"],
+            owner="ops@x.test",
+        )
+    ]
+    app = create_app(librarian, caller_keys=KEYS)
+    app.state.caller_keys.update(KEYS)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url=librarian.settings.public_url,
+        headers={"Authorization": "Bearer key-a"},
+    ) as http:
+        outcome = await send(
+            librarian,
+            http,
+            [
+                new_data_part(
+                    {
+                        "skill": "write",
+                        "api": "tracker",
+                        "operation": "addComment",
+                        "args": {"key": "PAY-1"},
+                        "body": {"body": "Fixed in 2.3"},
+                        "reason": "close the loop with the customer",
+                    }
+                )
+            ],
+        )
+        assert outcome.final == TaskState.TASK_STATE_AUTH_REQUIRED
+        assert any("waiting for human approval" in t for t in outcome.texts)
+        approval = next(iter(librarian.approvals._approvals.values()))  # pyright: ignore[reportPrivateUsage]
+        assert approval.requesters == ["ops@x.test"]  # the owner stands in
+        await librarian.approvals.approve(approval.id, "ops@x.test")
+
+        client = await a2a_client(librarian, http)
+        task = await client.get_task(GetTaskRequest(id=outcome.task_id))
+        for _ in range(200):
+            if task.status.state == TaskState.TASK_STATE_COMPLETED:
+                break
+            await asyncio.sleep(0.02)
+            task = await client.get_task(GetTaskRequest(id=outcome.task_id))
+        assert task.status.state == TaskState.TASK_STATE_COMPLETED
+        data = [d for a in task.artifacts for d in get_data_parts(a.parts)][-1]
+        assert data["how"] == "approved" and data["result"]["data"] == {"id": 9}
+
+        denied = await send(
+            librarian,
+            http,
+            [
+                new_data_part(
+                    {
+                        "skill": "write",
+                        "api": "tracker",
+                        "operation": "renameProject",
+                        "args": {"p": "x"},
+                    }
+                )
+            ],
+        )
+        assert denied.final == TaskState.TASK_STATE_REJECTED

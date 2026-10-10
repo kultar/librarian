@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from librarian.cli import app
+from tests.conftest import Router
+from tests.test_state import replica
+from tests.test_writes import KIM, approve_when_open, comment
+
+
+@pytest.fixture
+def state(tmp_path: Path, router: Router, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("LIBRARIAN_REGISTRY_DIR", str(tmp_path / "registry"))
+    monkeypatch.setenv("LIBRARIAN_SECRETS_DIR", str(tmp_path / "secrets"))
+    monkeypatch.setenv("LIBRARIAN_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/state.db")
+    monkeypatch.setenv("LIBRARIAN_AUDIT_FILE", str(tmp_path / "audit.jsonl"))
+    return tmp_path
+
+
+def test_grants_list_and_revoke(state: Path, router: Router) -> None:
+    async def make_grant() -> None:
+        lib = replica(state, router)
+        await lib.start()
+        await lib.secrets.put("tracker/write", "w")
+        import httpx
+
+        router.add(
+            "POST",
+            "https://api.example.test/v1/issues/PAY-1/comments",
+            lambda r: httpx.Response(201, json={}),
+        )
+        task = asyncio.create_task(lib.write(comment(), KIM))
+        await approve_when_open(lib, remember=True, pin=["key"])
+        await asyncio.wait_for(task, 5)
+        await lib.aclose()
+
+    asyncio.run(make_grant())
+    runner = CliRunner()
+    listed = runner.invoke(app, ["grants", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert "notes-bot → tracker.addComment" in listed.output
+    grant_id = listed.output.split()[0]
+    revoked = runner.invoke(app, ["grants", "revoke", grant_id, "--by", "ops@x.test"])
+    assert revoked.exit_code == 0 and "revoked" in revoked.output
+    assert runner.invoke(app, ["grants", "list"]).output.strip() == ""
+    assert "revoked" in runner.invoke(app, ["grants", "list", "--all"]).output
+    assert runner.invoke(app, ["grants", "revoke", "nope"]).exit_code == 1

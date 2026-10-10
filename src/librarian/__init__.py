@@ -1,3 +1,3 @@
 """librarian: an A2A agent that learns APIs on demand and serves them read-only."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

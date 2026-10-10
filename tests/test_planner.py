@@ -120,3 +120,39 @@ async def test_identical_calls_are_made_once(
     )
     assert len(router.requests) == 1
     assert len(outcome.results) == 1
+
+
+async def test_planner_can_only_propose_writes(
+    librarian: Librarian, router: Router, secrets_store: FileSecretStore
+) -> None:
+    await secrets_store.put("tracker/write", "w")
+    writer = Caller(agent="agent-a", principal="kim@x.test", write_apis=("tracker",))
+    model, seen = scripted(
+        [
+            ToolCallPart("describe_api", {"api": "tracker", "filter_text": "comment"}),
+            ToolCallPart(
+                "propose_write",
+                {
+                    "api": "tracker",
+                    "operation": "addComment",
+                    "args": {"key": "PAY-1"},
+                    "body": {"body": "done"},
+                    "reason": "user asked",
+                },
+            ),
+            ToolCallPart("propose_write", {"api": "tracker", "operation": "renameProject"}),
+        ]
+    )
+    outcome = await Planner(model).fetch(
+        "comment done on PAY-1", librarian.registry, librarian.executor, writer
+    )
+    assert [w.operation for w in outcome.proposed_writes] == ["addComment"]
+    assert router.requests == []  # nothing was written
+    results = tool_results(seen[-1])
+    assert "propose only" in str(results[0].content)  # type: ignore[attr-defined]
+    assert isinstance(results[2], RetryPromptPart)  # renameProject is not writable
+
+    reader = Caller(agent="reader")
+    model, seen = scripted([ToolCallPart("describe_api", {"api": "tracker"})])
+    await Planner(model).fetch("x", librarian.registry, librarian.executor, reader)
+    assert "addComment" not in str(tool_results(seen[-1])[0].content)  # type: ignore[attr-defined]

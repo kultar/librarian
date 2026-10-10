@@ -43,6 +43,21 @@ callers: []
 #    key_ref: librarian/callers/release-notes-agent
 #    apis: ["jira", "github-*"]        # glob patterns; default ["*"]
 #    can_onboard: false
+#    write_apis: ["jira"]              # may request writes (each needs approval or a grant)
+#    owner: ops@example.com            # stands in as requester for autonomous agents
+
+# Writes: who approves, how long approvals stay open, and standing grants.
+writes:
+  approvers: requester_or_group        # requester | group | requester_or_group
+  approval_expire_hours: 24
+  rate_limit_per_minute: 10
+  grants: []
+#    - agent: triage-bot
+#      api: jira
+#      operation: addLabel
+#      pinned_args: {}
+#      max_uses_per_day: 50
+#      notify_owner: true
 
 notifier:
   type: log                            # log | slack | webhook

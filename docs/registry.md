@@ -42,6 +42,25 @@ operations:
     accepts_body: true
 ```
 
+## Writes
+
+```yaml
+status: verified                  # writes are never allowed on provisional entries
+write_auth:                       # separate credential for writes (same shapes as `auth`)
+  type: basic
+  secret_ref: jira/write
+operations:
+  - id: addComment
+    method: POST
+    path: /rest/api/3/issue/{issueIdOrKey}/comment
+    access: write
+    writable: true                # opt in; every call still needs approval or a grant
+    accepts_body: true
+    rememberable: true            # default true; always false for DELETE
+    parameters:
+      - {name: issueIdOrKey, in: path}
+```
+
 ## Pagination
 
 Declare it on the entry (default for every operation) or per operation. Without it, `Link:

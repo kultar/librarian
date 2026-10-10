@@ -1,6 +1,6 @@
 # librarian
 
-**An A2A agent that learns APIs on demand and gives other agents safe, read-only, audited access to them.**
+**An A2A agent that learns APIs on demand and gives other agents safe, audited access to them: reads freely within policy, writes only with human approval.**
 
 Agents shouldn't each carry their own Jira token, GitHub token and API client. With librarian,
 agents ask one specialist, over [A2A](https://a2a-protocol.org), for the data they need. The
@@ -16,7 +16,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.1)**. Read-only by design. Expect breaking changes.
+> Status: **alpha (v0.3)**. Expect breaking changes.
 
 ## Why
 
@@ -36,6 +36,7 @@ credential out.
 | `execute` | Run one read operation: `{"skill":"execute","api":"jira","operation":"getIssue","args":{"issueIdOrKey":"ABC-1"}}`. Optional `select` (dotted paths, e.g. `["fields.summary"]`) and `max_pages` | No |
 | `capabilities` | List APIs and read operations: `{"skill":"capabilities","query":"issues"}` | No |
 | `onboard` | Learn an API: `{"skill":"onboard","api":"jira","spec_url":"https://..."}` or `"base_url"` to auto-discover | No |
+| `write` | Change data, with human approval or a grant: `{"skill":"write","api":"jira","operation":"addComment","args":{...},"body":{...},"reason":"why"}` | No |
 | `fetch` | Plain language: *"open bugs assigned to the payments team"* (only when a model is configured) | Yes |
 
 Results are A2A artifacts with the data plus **provenance**: which API and operation, the URL
@@ -149,6 +150,50 @@ updates in place and the outcome is posted in the thread. The key itself never g
 
 No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 
+## Writes
+
+Reads are the default; writes are opt-in at every level:
+
+1. A reviewer marks the operation `writable: true` on a **verified** entry and sets a separate
+   write credential (`write_auth`). The approver adding a key can also tick *"allow approved
+   writes with this key"*.
+2. The agent is allowed to request writes on that API (`write_apis` in its caller config).
+3. Each write is **approved by a human** for that exact request, or matches a **grant**.
+
+The approval card (Slack) shows the operation, arguments and full body. On the approval page the
+approver can **approve once**, **approve and allow similar writes** (a grant for that agent and
+operation, with the argument values they choose kept fixed, an expiry and an optional use cap), or
+**deny**. DELETE operations can only ever be approved once. The task waits in `AUTH_REQUIRED` and
+completes on its own after the decision.
+
+Who may approve (`writes.approvers`): the **requester** (the person the agent acts for, or the
+agent's `owner`), the **approver group**, or either (default). Approvers sign in through your
+SSO proxy (`approvers.mode: trusted_header`); agents can never approve.
+
+**Autonomous agents** (no person behind them) get an `owner`, who stands in as requester. For
+unattended work, configure bounded grants:
+
+```yaml
+callers:
+  - agent: triage-bot
+    key_ref: librarian/callers/triage-bot
+    owner: ops@example.com
+    write_apis: ["jira"]
+writes:
+  approvers: requester_or_group
+  grants:
+    - agent: triage-bot
+      api: jira
+      operation: addLabel
+      pinned_args: {}                  # e.g. {issueIdOrKey: PAY-1}; {} allows any issue
+      max_uses_per_day: 50
+      notify_owner: true               # FYI to the channel on each use
+```
+
+An agent with no owner and no person can only be approved by the approver group; if no one could
+approve, the write is refused immediately. `librarian grants list|revoke` and `librarian approvals
+list` manage it all; revoking is the kill switch.
+
 ## The registry
 
 One YAML file per API, normally in a git repo you review by pull request. Onboarded entries start
@@ -157,7 +202,7 @@ as **provisional**:
 - GET/HEAD operations are reads and usable immediately.
 - POST operations that look like searches are marked `unknown` and blocked until a human sets
   `access: read` + `read_basis: reviewed` **and** the entry is `verified`.
-- Everything else is a write and is always refused in v0.1.
+- Everything else is a write: refused unless a reviewer enables it (see [Writes](#writes)).
 
 **Review loop.** With `publish.type: github`, every learned API is also opened as a pull request
 against your registry repo, with a review checklist and the operations that need a decision. Run a
@@ -200,12 +245,14 @@ uv run pytest
 - **v0.2** ✅: durable state (SQLite/Postgres) and stable approval links; per-agent API
   allowlists; 401 vs 403 handling; DNS-rebinding-proof SSRF guard; GitHub review PRs + hot reload;
   AWS Secrets Manager; field selection and pagination styles; OpenTelemetry
-- **v0.3**: Helm chart; Vault/GCP/Azure secret stores; verified caller identity and delegated
+- **v0.3** ✅: writes behind human approval; grants (approve-and-allow-similar, config grants for
+  autonomous agents); agent owners; planner write proposals; grants/approvals CLI
+- **v0.4**: Helm chart; Vault/GCP/Azure secret stores; verified caller identity and delegated
   principals (OAuth token exchange); OIDC for approvers; per-API approver routing in Slack;
   better operation search for very large APIs
-- **v0.4**: saved **recipes** (successful plans replayed without the LLM); learning instance
+- **v0.5**: saved **recipes** (successful plans replayed without the LLM); learning instance
   details (e.g. Jira custom fields); drift detection
-- **v1.0**: community registry with signed entries; per-user OAuth; writes behind human approval
+- **v1.0**: community registry with signed entries; per-user OAuth
 
 ## License
 

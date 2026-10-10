@@ -209,6 +209,7 @@ def _approval_form(approval: WriteApproval, token: str, error: str | None) -> st
         ),
         ("Agent", e(approval.agent)),
         ("On behalf of", e(approval.principal or "nobody (autonomous agent)")),
+        ("Requester", e(", ".join(approval.requesters) or "none (approver group decides)")),
     ]
     if approval.summary:
         rows.append(("What it does", e(approval.summary)))

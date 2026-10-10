@@ -59,6 +59,15 @@ operations:
     path: /rest/api/3/field
     summary: All fields, including custom field ids and names (e.g. customfield_10020 = Sprint)
     access: read
+  - id: addComment
+    method: POST
+    path: /rest/api/3/issue/{issueIdOrKey}/comment
+    summary: Add a comment to an issue (write; needs approval or a grant)
+    access: write
+    writable: true            # takes effect once the entry is verified and write_auth is set
+    accepts_body: true
+    parameters:
+      - {name: issueIdOrKey, in: path}
   - id: createIssue
     method: POST
     path: /rest/api/3/issue

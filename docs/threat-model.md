@@ -23,17 +23,31 @@ high-value target. This document lists what we defend against, how, and what is 
 
 ## Threats and mitigations
 
-### T1. A caller gets the librarian to modify data
-- The policy engine (`policy.py`, no LLM) only allows operations marked `access: read`.
-- `read` by method is limited to GET/HEAD by model validation; a POST can only be a read after a
-  human marks it `read_basis: reviewed` **and** the entry is `verified`.
-- The planner's `describe_api` never even shows write operations to the model.
-- **Defense in depth:** use read-only scoped credentials wherever the API supports them.
+### T1. Unauthorized or unintended writes
+- Reads and writes are separate paths. `execute` and `fetch` can never write; only the `write`
+  skill can, and only for operations a reviewer marked `writable: true` on a **verified** entry.
+  Auto-learned (provisional) entries can never be written to.
+- Writes use a **separate write credential** (`write_auth`); the read path never holds it.
+- Every write needs a human approval for that exact request (bound by a fingerprint of agent,
+  principal, operation, arguments and body) or a matching **grant**. Agents cannot approve
+  anything; approvals come only from the approval page.
+- Grants are bounded: one agent, one operation, pinned argument values, expiry, use caps, and
+  revocable at once (`librarian grants revoke`). DELETE approvals can never become grants.
+- Writes are sent exactly once and never follow redirects (a 307/308 would replay the write).
+  `Idempotency-Key` is forwarded and idempotent retries return the first result.
+- The planner can only *propose* writes; proposals go back to the calling agent.
+- Per-agent `write_apis` allowlists and a separate, lower write rate limit.
+- **Residual risk:** with `writes.approvers: requester`, the requester is the principal the
+  calling agent *asserts* (verified principals are on the roadmap). A compromised agent colluding
+  with an insider could name that insider as principal. Use `group` approval for sensitive APIs.
+- **Residual risk:** a grant allows any request body for its operation. Pin the arguments that
+  matter and prefer short expiries.
+- **Defense in depth:** scope credentials (read key read-only; write key only what is needed).
 
 ### T2. Prompt injection through API responses or requests
 - The LLM can only *propose* calls; every call passes the same deterministic policy.
 - Tool results are truncated and labelled as untrusted in the planner instructions.
-- **Residual risk:** within read-only policy, injected text could steer the planner to read *other*
+- **Residual risk:** injected text could steer the planner to read *other*
   data the same caller is allowed to read and include it in the answer. Per-agent API allowlists
   bound this to what the caller could already read through `execute`.
 
@@ -78,13 +92,13 @@ high-value target. This document lists what we defend against, how, and what is 
 ### T8. Caller impersonation
 - Per-agent bearer keys, compared in constant time.
 - Per-agent API allowlists (glob patterns) are enforced by the policy engine and also hide
-  disallowed APIs from discovery (`capabilities`, planner tools). Onboarding is a separate
-  per-agent permission. The `principal` a caller asserts is recorded
-  for audit but **not verified** in v0.1. Verified delegation (token exchange) is on the roadmap.
+  disallowed APIs from discovery (`capabilities`, planner tools). Onboarding and writes are
+  separate per-agent permissions.
+- The `principal` a caller asserts is recorded for audit (and used for requester approval) but
+  is **not verified** yet. Verified delegation (OAuth token exchange) is on the roadmap.
 
-## Out of scope (v0.1)
+## Out of scope
 
-- Writes of any kind.
 - Multi-tenant isolation inside one librarian (run one per trust domain).
 - Protection against a malicious operator or a compromised host.
 - Waiting tasks resume after a restart only if the caller re-sends; pending credential requests

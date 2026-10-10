@@ -11,6 +11,7 @@ from typing import Annotated, Any
 
 import typer
 
+from librarian.approvals import ApprovalError
 from librarian.calls import Caller, CallRequest
 from librarian.config import Settings
 from librarian.executor import CredentialMissing, PolicyDenied
@@ -25,6 +26,10 @@ app = typer.Typer(
 )
 registry_app = typer.Typer(help="Inspect and validate the registry.", no_args_is_help=True)
 app.add_typer(registry_app, name="registry")
+grants_app = typer.Typer(help="List and revoke write grants.", no_args_is_help=True)
+app.add_typer(grants_app, name="grants")
+approvals_app = typer.Typer(help="Inspect write approvals.", no_args_is_help=True)
+app.add_typer(approvals_app, name="approvals")
 
 ConfigOption = Annotated[
     Path | None, typer.Option("--config", "-c", help="YAML config file", exists=True)
@@ -191,6 +196,82 @@ def registry_validate(config: ConfigOption = None) -> None:
 def _run(coro: object) -> None:
     try:
         asyncio.run(coro)  # type: ignore[arg-type]
-    except (LibrarianError, PolicyDenied, CredentialMissing) as exc:
+    except (LibrarianError, PolicyDenied, CredentialMissing, ApprovalError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+
+@grants_app.command("list")
+def grants_list(
+    all_: Annotated[bool, typer.Option("--all", help="Include expired/revoked grants")] = False,
+    config: ConfigOption = None,
+) -> None:
+    """Standing write permissions (from approvals and from config)."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        await librarian.start()
+        try:
+            for g in librarian.approvals.grants(include_inactive=all_):
+                limits = []
+                if g.max_uses is not None:
+                    limits.append(f"{g.uses}/{g.max_uses} uses")
+                if g.max_uses_per_day is not None:
+                    limits.append(f"{g.max_uses_per_day}/day")
+                if g.expires_at is not None:
+                    limits.append(f"until {g.expires_at:%Y-%m-%d %H:%M}")
+                state = "revoked" if g.revoked else "active"
+                typer.echo(
+                    f"{g.id}  {state:<8} {g.agent} → {g.api}.{g.operation} "
+                    f"pinned={g.pinned_args or '{}'} ({', '.join(limits) or 'no limits'}; "
+                    f"by {g.created_by}, {g.source})"
+                )
+        finally:
+            await librarian.aclose()
+
+    _run(run())
+
+
+@grants_app.command("revoke")
+def grants_revoke(
+    grant_id: str,
+    by: Annotated[str, typer.Option(help="Who is revoking (for the audit log)")] = "cli",
+    config: ConfigOption = None,
+) -> None:
+    """Revoke a grant at once (the kill switch for an agent's unattended writes)."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        await librarian.start()
+        try:
+            grant = await librarian.approvals.revoke_grant(grant_id, by)
+        finally:
+            await librarian.aclose()
+        note = (
+            " (config grants come back on restart: remove them from the config)"
+            if (grant.source == "config")
+            else ""
+        )
+        typer.echo(f"revoked {grant.id}: {grant.agent} → {grant.api}.{grant.operation}{note}")
+
+    _run(run())
+
+
+@approvals_app.command("list")
+def approvals_list(config: ConfigOption = None) -> None:
+    """Pending write approvals."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        await librarian.start()
+        try:
+            for a in librarian.approvals.pending():
+                typer.echo(
+                    f"{a.id}  {a.agent} → {a.api}.{a.operation} args={a.request.args} "
+                    f"for={a.principal or '-'} expires {a.expires_at:%Y-%m-%d %H:%M}"
+                )
+                typer.echo(f"    {librarian.approvals.link(a)}")
+        finally:
+            await librarian.aclose()
+
+    _run(run())

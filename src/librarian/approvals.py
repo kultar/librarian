@@ -257,6 +257,12 @@ class ApprovalBroker:
 
     # -- approvals -----------------------------------------------------------------
 
+    def pending(self) -> list[WriteApproval]:
+        return sorted(
+            (a for a in self._approvals.values() if a.state is ApprovalState.PENDING),
+            key=lambda a: a.created_at,
+        )
+
     def find_executed(self, caller: Caller, idempotency_key: str) -> WriteApproval | None:
         return next(
             (
