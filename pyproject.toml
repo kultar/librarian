@@ -1,0 +1,70 @@
+[project]
+name = "librarian"
+version = "0.1.0"
+description = "An A2A agent that learns APIs on demand and gives other agents safe, read-only, audited access to them."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "kultar", email = "kultar@kultar.net" }
+]
+requires-python = ">=3.12"
+keywords = ["a2a", "agents", "api", "openapi", "llm", "pydantic-ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+]
+dependencies = [
+    "a2a-sdk[http-server]>=1.2.2",
+    "httpx>=0.28.1",
+    "pydantic>=2.14.0",
+    "pydantic-ai-slim[anthropic,openai]>=2.55.0",
+    "pydantic-settings>=2.15.0",
+    "python-multipart>=0.0.32",
+    "pyyaml>=6.0.3",
+    "typer>=0.27.3",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+librarian = "librarian.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.11.28,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.0",
+    "types-pyyaml>=6.0.12.20260906",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "RUF", "SIM", "PTH"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "ASYNC110"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+# The A2A SDK's protobuf types are only partially typed.
+reportUnknownMemberType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownVariableType = "none"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

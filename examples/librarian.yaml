@@ -1,0 +1,49 @@
+# Example configuration. Every key can also be set as an environment variable:
+# LIBRARIAN_<KEY>, nested with "__" (e.g. LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN).
+# Environment variables win over this file.
+
+host: 127.0.0.1
+port: 8080
+public_url: http://127.0.0.1:8080     # how approvers' browsers reach the secure page
+
+registry_dir: registry
+secrets_dir: .librarian/secrets        # file secret store (0600 files)
+# audit_file: .librarian/audit.jsonl   # default: JSON lines on stdout
+
+# The `fetch` skill (plain-language requests). Leave unset to run without an LLM.
+# model: anthropic:claude-sonnet-5-5   # uses ANTHROPIC_API_KEY
+# Or any OpenAI-compatible gateway, e.g. LiteLLM:
+# model: claude-sonnet-5-5
+# model_base_url: http://litellm:4000/v1
+# model_api_key: set-via-LIBRARIAN_MODEL_API_KEY
+max_calls_per_fetch: 8
+
+rate_limit_per_minute: 60              # per calling agent, per API
+request_timeout_seconds: 30
+max_response_bytes: 2000000
+allow_provisional: true                # serve auto-learned (unreviewed) entries, GET/HEAD only
+allow_private_networks: false          # SSRF guard for onboarding + provisional entries
+onboarding_enabled: true
+credential_wait_seconds: 900           # how long a task waits for an approver
+
+# Calling agents and the secret holding each one's bearer key.
+# Empty = open server (local use only).
+callers: []
+#  - agent: release-notes-agent
+#    key_ref: callers/release-notes-agent
+
+notifier:
+  type: log                            # log | slack | webhook
+  remind_after_hours: 4
+  expire_after_hours: 24
+  slack:
+    channel: "#api-access-requests"
+    # approver_group: S0123ABCD        # Slack user-group ID for @mentions
+    # bot_token: set-via-LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN
+  # webhook_url: https://hooks.example.com/librarian
+
+approvers:
+  mode: token                          # token (local) | trusted_header (behind an auth proxy)
+  # user_header: X-Auth-Request-Email
+  # groups_header: X-Auth-Request-Groups
+  # group: api-approvers

@@ -1,0 +1,62 @@
+# Hand-written example entry for Jira Cloud. Replace your-site, then review the
+# operations against Atlassian's current REST v3 docs before marking it verified.
+id: jira
+name: Jira Cloud
+description: Issues, projects, users and search for a Jira Cloud site.
+base_url: https://your-site.atlassian.net
+status: provisional
+auth:
+  type: basic
+  secret_ref: jira/readonly
+credential:
+  create_url: https://id.atlassian.com/manage-profile/security/api-tokens
+  scopes: [read:jira-work, read:jira-user]
+  instructions: >-
+    Jira API tokens act with their user's full permissions. Create the token on a dedicated
+    service account that only has Browse permissions, and paste it as email:token.
+  validation_operation: getCurrentUser
+owners:
+  channel: "#atlassian-admins"
+operations:
+  - id: getCurrentUser
+    method: GET
+    path: /rest/api/3/myself
+    summary: The user the credential belongs to (used to test new keys)
+    access: read
+  - id: getIssue
+    method: GET
+    path: /rest/api/3/issue/{issueIdOrKey}
+    summary: Get one issue by id or key
+    access: read
+    parameters:
+      - {name: issueIdOrKey, in: path}
+      - {name: fields, in: query, description: Comma-separated list of fields to return}
+      - {name: expand, in: query}
+  - id: searchIssues
+    method: GET
+    path: /rest/api/3/search/jql
+    summary: Search issues with JQL
+    access: read
+    parameters:
+      - {name: jql, in: query, required: true, description: "JQL, e.g. project = PAY AND statusCategory != Done"}
+      - {name: fields, in: query}
+      - {name: maxResults, in: query, type: integer}
+      - {name: nextPageToken, in: query}
+  - id: getProject
+    method: GET
+    path: /rest/api/3/project/{projectIdOrKey}
+    summary: Get a project
+    access: read
+    parameters:
+      - {name: projectIdOrKey, in: path}
+  - id: getFields
+    method: GET
+    path: /rest/api/3/field
+    summary: All fields, including custom field ids and names (e.g. customfield_10020 = Sprint)
+    access: read
+  - id: createIssue
+    method: POST
+    path: /rest/api/3/issue
+    summary: Create an issue (write; always refused in v0.1)
+    access: write
+    accepts_body: true

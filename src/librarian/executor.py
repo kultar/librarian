@@ -1,0 +1,317 @@
+"""Executes approved calls against real APIs.
+
+Security properties enforced here (in addition to the policy engine):
+- the URL is built from the registry entry; callers can never supply a host
+- only same-origin redirects are followed, and credentials are re-attached only there
+- responses are size-capped before parsing
+- secret values are injected at the last moment and never returned or logged
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import time
+from typing import Any
+from urllib.parse import quote, urlencode, urljoin, urlsplit
+
+import httpx
+
+from librarian.audit import AuditEvent, AuditSink
+from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance
+from librarian.net import BlockedAddress, check_url
+from librarian.policy import PolicyEngine
+from librarian.registry.models import (
+    ApiEntry,
+    ApiKeyAuth,
+    BasicAuth,
+    BearerAuth,
+    EntryStatus,
+    NoAuth,
+    Operation,
+    ParamLocation,
+)
+from librarian.secrets import SecretStore
+
+MAX_REDIRECTS = 3
+USER_AGENT = "librarian/0.1 (+https://github.com/kultar/librarian)"
+
+
+class PolicyDenied(Exception):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class CredentialMissing(Exception):
+    """The API needs a credential that is not in the secret store."""
+
+    def __init__(self, entry: ApiEntry, reason: str = "missing") -> None:
+        super().__init__(f"no usable credential for {entry.id!r} ({reason})")
+        self.entry = entry
+        self.reason = reason
+
+
+class Executor:
+    def __init__(
+        self,
+        policy: PolicyEngine,
+        secrets: SecretStore,
+        audit: AuditSink,
+        *,
+        client: httpx.AsyncClient | None = None,
+        timeout_seconds: float = 30.0,
+        max_response_bytes: int = 2_000_000,
+        allow_private_provisional: bool = False,
+    ) -> None:
+        self.policy = policy
+        self.secrets = secrets
+        self.audit = audit
+        self.client = client or httpx.AsyncClient(
+            timeout=timeout_seconds, follow_redirects=False, headers={"User-Agent": USER_AGENT}
+        )
+        self.max_response_bytes = max_response_bytes
+        # Provisional entries come from agent-supplied specs, so by default they
+        # may only reach public addresses. Verified entries were human-reviewed.
+        self.allow_private_provisional = allow_private_provisional
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
+
+    async def execute(self, request: CallRequest, caller: Caller) -> CallResult:
+        decision = self.policy.check(request, caller)
+        if not decision.allowed or decision.entry is None or decision.operation is None:
+            await self.audit.record(
+                AuditEvent(
+                    event="denied",
+                    caller=caller.agent,
+                    principal=caller.principal,
+                    api=request.api,
+                    operation=request.operation,
+                    detail=decision.reason,
+                )
+            )
+            raise PolicyDenied(decision.reason)
+
+        entry, op = decision.entry, decision.operation
+        secret = await self._resolve_secret(entry)
+        started = time.monotonic()
+        url, headers, query = _build_request(entry, op, request.args)
+        secret_query = _auth_query(entry, secret)
+        _apply_auth_headers(entry, secret, headers)
+
+        pages: list[Any] = []
+        total_bytes = 0
+        truncated = False
+        status_code = 0
+        content_type = ""
+        next_url: str | None = url
+        next_query: dict[str, ArgValue] | None = query
+        page_count = 0
+
+        while next_url is not None and page_count < request.max_pages:
+            response, body, cut = await self._send(
+                entry, op, next_url, next_query, secret_query, headers, request.body
+            )
+            page_count += 1
+            status_code = response.status_code
+            content_type = response.headers.get("content-type", "")
+            total_bytes += len(body)
+            truncated = truncated or cut
+            pages.append(_decode(body, content_type, cut))
+            if not response.is_success or cut:
+                break
+            next_url = _next_link(response, entry)
+            next_query = None  # the next link already carries its own query
+
+        ok = 200 <= status_code < 300
+        provenance = Provenance(
+            api=entry.id,
+            api_status=entry.status,
+            operation=op.id,
+            method=op.method,
+            url=_redact(url, query, entry),
+            caller=caller.agent,
+            principal=caller.principal,
+            credential_ref=entry.secret_ref,
+            pages=page_count,
+        )
+        await self.audit.record(
+            AuditEvent(
+                event="call",
+                caller=caller.agent,
+                principal=caller.principal,
+                api=entry.id,
+                operation=op.id,
+                status_code=status_code,
+                bytes=total_bytes,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                extra={"pages": page_count, "truncated": truncated},
+            )
+        )
+        if status_code in (401, 403) and not isinstance(entry.auth, NoAuth):
+            raise CredentialMissing(entry, reason=f"rejected with HTTP {status_code}")
+        data = pages[0] if len(pages) == 1 else pages
+        return CallResult(
+            status_code=status_code,
+            ok=ok,
+            data=data,
+            truncated=truncated,
+            content_type=content_type,
+            provenance=provenance,
+        )
+
+    async def _resolve_secret(self, entry: ApiEntry) -> str | None:
+        ref = entry.secret_ref
+        if ref is None:
+            return None
+        value = await self.secrets.get(ref)
+        if value is None:
+            raise CredentialMissing(entry)
+        return value
+
+    async def _send(
+        self,
+        entry: ApiEntry,
+        op: Operation,
+        url: str,
+        query: dict[str, ArgValue] | None,
+        secret_query: dict[str, str],
+        headers: dict[str, str],
+        body: dict[str, Any] | None,
+    ) -> tuple[httpx.Response, bytes, bool]:
+        method = op.method
+        current = url
+        params: dict[str, ArgValue] = {**(query or {}), **secret_query}
+        for _ in range(MAX_REDIRECTS + 1):
+            _assert_same_origin(entry, current)
+            if entry.status is not EntryStatus.VERIFIED and not self.allow_private_provisional:
+                try:
+                    await check_url(current, allow_private=False)
+                except BlockedAddress as exc:
+                    raise PolicyDenied(f"provisional API {entry.id!r}: {exc}") from exc
+            request = self.client.build_request(
+                method,
+                current,
+                params=params or None,
+                headers=headers,
+                json=body if body is not None else None,
+            )
+            response = await self.client.send(request, stream=True)
+            try:
+                if response.is_redirect:
+                    location = response.headers.get("location", "")
+                    target = urljoin(current, location)
+                    if not _same_origin(entry, target):
+                        # Do not follow (and do not leak credentials) off-origin.
+                        return response, b"", False
+                    current = target
+                    params = dict(secret_query)  # redirect target carries its own query
+                    if response.status_code in (301, 302, 303):
+                        method, body = "GET", None
+                    continue
+                payload, cut = await _read_capped(response, self.max_response_bytes)
+                return response, payload, cut
+            finally:
+                await response.aclose()
+        raise PolicyDenied(f"too many redirects calling {entry.id!r}")
+
+
+def _build_request(
+    entry: ApiEntry, op: Operation, args: dict[str, ArgValue]
+) -> tuple[str, dict[str, str], dict[str, ArgValue]]:
+    path = op.path
+    query: dict[str, ArgValue] = {}
+    headers: dict[str, str] = {"Accept": "application/json"}
+    for param in op.parameters:
+        if param.name not in args:
+            continue
+        value = args[param.name]
+        if param.location is ParamLocation.PATH:
+            path = path.replace("{" + param.name + "}", quote(str(value), safe=""))
+        elif param.location is ParamLocation.QUERY:
+            query[param.name] = value
+        else:
+            headers[param.name] = (
+                ",".join(map(str, value)) if isinstance(value, list) else str(value)
+            )
+    url = entry.base_url + path
+    _assert_same_origin(entry, url)
+    return url, headers, query
+
+
+def _apply_auth_headers(entry: ApiEntry, secret: str | None, headers: dict[str, str]) -> None:
+    auth = entry.auth
+    if secret is None or isinstance(auth, NoAuth):
+        return
+    if isinstance(auth, BearerAuth):
+        headers["Authorization"] = f"Bearer {secret}"
+    elif isinstance(auth, BasicAuth):
+        headers["Authorization"] = "Basic " + base64.b64encode(secret.encode()).decode()
+    elif auth.location == "header":
+        headers[auth.name] = secret
+
+
+def _auth_query(entry: ApiEntry, secret: str | None) -> dict[str, str]:
+    auth = entry.auth
+    if secret is not None and isinstance(auth, ApiKeyAuth) and auth.location == "query":
+        return {auth.name: secret}
+    return {}
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urlsplit(url)
+    return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port
+
+
+def _same_origin(entry: ApiEntry, url: str) -> bool:
+    return _origin(url) == _origin(entry.base_url)
+
+
+def _assert_same_origin(entry: ApiEntry, url: str) -> None:
+    if not _same_origin(entry, url):
+        raise PolicyDenied(f"refusing request outside {entry.base_url}")
+
+
+async def _read_capped(response: httpx.Response, limit: int) -> tuple[bytes, bool]:
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.aiter_bytes():
+        remaining = limit - size
+        if len(chunk) > remaining:
+            chunks.append(chunk[:remaining])
+            return b"".join(chunks), True
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks), False
+
+
+def _decode(body: bytes, content_type: str, truncated: bool) -> Any:
+    text = body.decode("utf-8", errors="replace")
+    if "json" in content_type and not truncated and text:
+        try:
+            return json.loads(text)
+        except ValueError:
+            return text
+    return text
+
+
+def _next_link(response: httpx.Response, entry: ApiEntry) -> str | None:
+    link = response.links.get("next")
+    if not link:
+        return None
+    target = urljoin(str(response.url), link.get("url", ""))
+    return target if _same_origin(entry, target) else None
+
+
+def _redact(url: str, query: dict[str, ArgValue], entry: ApiEntry) -> str:
+    if not query:
+        return url
+    flat: list[tuple[str, str]] = []
+    for key, value in query.items():
+        values = value if isinstance(value, list) else [value]
+        flat.extend((key, str(v)) for v in values)
+    auth = entry.auth
+    if isinstance(auth, ApiKeyAuth) and auth.location == "query":
+        flat = [(k, "REDACTED" if k == auth.name else v) for k, v in flat]
+    return f"{url}?{urlencode(flat)}"

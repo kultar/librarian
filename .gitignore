@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.pyright/
+
+# librarian local state: secrets, audit logs. Never commit these.
+.librarian/
+*.jsonl
+
+# local registry used while experimenting (the community registry lives in examples/ and registry/)
+/registry/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store

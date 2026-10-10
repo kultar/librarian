@@ -1,0 +1,20 @@
+# Slack app for librarian credential requests.
+# api.slack.com/apps → Create New App → From an app manifest → paste this → Install.
+# Then set LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN to the Bot User OAuth Token (xoxb-...).
+display_information:
+  name: librarian
+  description: Asks approvers for read-only API access on behalf of agents.
+  background_color: "#2b3a55"
+features:
+  bot_user:
+    display_name: librarian
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write          # post and update request cards
+      - chat:write.public   # post in public channels without being invited
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

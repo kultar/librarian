@@ -1,0 +1,317 @@
+"""Credential requests: asking a human for access, out of band.
+
+When a call needs a credential that does not exist (or was rejected), the
+broker opens one request per API (deduplicated), notifies approvers with a
+one-time link, and lets waiting tasks block until someone acts. Secret values
+enter only through the secure web page, straight into the secret store.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import logging
+import secrets
+import uuid
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+
+from pydantic import BaseModel, Field
+
+from librarian.audit import AuditEvent, AuditSink
+from librarian.calls import Caller
+from librarian.registry.models import ApiEntry, EntryStatus, NoAuth
+from librarian.registry.store import Registry
+from librarian.secrets import SecretStore
+
+log = logging.getLogger(__name__)
+
+
+class RequestState(StrEnum):
+    PENDING = "pending"
+    FULFILLED = "fulfilled"
+    DENIED = "denied"
+    EXPIRED = "expired"
+
+
+class CredentialRequest(BaseModel):
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    api: str
+    api_name: str
+    host: str
+    secret_ref: str
+    auth_type: str
+    reason: str  # "missing" or "rejected with HTTP 401"
+    scopes: list[str] = Field(default_factory=list[str])
+    create_url: str | None = None
+    instructions: str = ""
+    requested_by: list[str] = Field(default_factory=list[str])  # "agent (for principal)"
+    waiting: int = 0
+    state: RequestState = RequestState.PENDING
+    resolved_by: str | None = None
+    resolution_note: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    expires_at: datetime
+    reminded: bool = False
+    # Notifier bookkeeping (e.g. Slack channel + message ts), never secrets.
+    notifier_ref: dict[str, str] = Field(default_factory=dict[str, str])
+    channel: str | None = None
+    approver_group: str | None = None
+
+
+class Notifier:
+    """Base notifier: logs only. Subclasses deliver to Slack, webhooks, etc."""
+
+    async def opened(self, request: CredentialRequest, link: str) -> None:
+        log.warning(
+            "credential needed for %s (%s); approve at %s", request.api, request.reason, link
+        )
+
+    async def updated(self, request: CredentialRequest) -> None:
+        log.info(
+            "credential request %s for %s: %d waiting", request.id, request.api, request.waiting
+        )
+
+    async def closed(self, request: CredentialRequest) -> None:
+        log.info(
+            "credential request %s for %s %s by %s",
+            request.id,
+            request.api,
+            request.state,
+            request.resolved_by,
+        )
+
+
+Validator = Callable[[ApiEntry], Awaitable[str | None]]
+"""Checks a freshly provided credential; returns an error message or None."""
+
+
+class CredentialBroker:
+    def __init__(
+        self,
+        registry: Registry,
+        secrets_store: SecretStore,
+        notifier: Notifier,
+        audit: AuditSink,
+        *,
+        public_url: str,
+        signing_key: bytes,
+        expire_after: timedelta = timedelta(hours=24),
+        remind_after: timedelta = timedelta(hours=4),
+        default_channel: str | None = None,
+        default_approver_group: str | None = None,
+    ) -> None:
+        self.registry = registry
+        self.secrets = secrets_store
+        self.notifier = notifier
+        self.audit = audit
+        self.public_url = public_url.rstrip("/")
+        self._signing_key = signing_key
+        self.expire_after = expire_after
+        self.remind_after = remind_after
+        self.default_channel = default_channel
+        self.default_approver_group = default_approver_group
+        self.validator: Validator | None = None
+        self._requests: dict[str, CredentialRequest] = {}
+        self._events: dict[str, asyncio.Event] = {}
+        self._used_tokens: set[str] = set()
+        self._lock = asyncio.Lock()
+
+    # -- opening and waiting -------------------------------------------------
+
+    def pending_for(self, api_id: str) -> CredentialRequest | None:
+        return next(
+            (
+                r
+                for r in self._requests.values()
+                if r.api == api_id and r.state is RequestState.PENDING
+            ),
+            None,
+        )
+
+    def get(self, request_id: str) -> CredentialRequest | None:
+        return self._requests.get(request_id)
+
+    def all(self) -> list[CredentialRequest]:
+        return sorted(self._requests.values(), key=lambda r: r.created_at, reverse=True)
+
+    async def open(self, entry: ApiEntry, caller: Caller, reason: str) -> CredentialRequest:
+        """Open (or join) the pending request for this API."""
+        if isinstance(entry.auth, NoAuth) or entry.secret_ref is None:
+            raise ValueError(f"API {entry.id!r} does not use a credential")
+        who = caller.agent + (f" (for {caller.principal})" if caller.principal else "")
+        async with self._lock:
+            existing = self.pending_for(entry.id)
+            if existing is not None:
+                existing.waiting += 1
+                if who not in existing.requested_by:
+                    existing.requested_by.append(who)
+                request, is_new = existing, False
+            else:
+                request = CredentialRequest(
+                    api=entry.id,
+                    api_name=entry.name,
+                    host=entry.host,
+                    secret_ref=entry.secret_ref,
+                    auth_type=entry.auth.type,
+                    reason=reason,
+                    scopes=list(entry.credential.scopes),
+                    create_url=entry.credential.create_url,
+                    instructions=entry.credential.instructions,
+                    requested_by=[who],
+                    waiting=1,
+                    expires_at=datetime.now(UTC) + self.expire_after,
+                    channel=entry.owners.channel or self.default_channel,
+                    approver_group=entry.owners.approver_group or self.default_approver_group,
+                )
+                self._requests[request.id] = request
+                self._events[request.id] = asyncio.Event()
+                is_new = True
+        if is_new:
+            await self.audit.record(
+                AuditEvent(
+                    event="credential_request",
+                    caller=caller.agent,
+                    principal=caller.principal,
+                    api=entry.id,
+                    detail=reason,
+                )
+            )
+            await self.notifier.opened(request, self.link(request))
+        else:
+            await self.notifier.updated(request)
+        return request
+
+    async def wait(self, request_id: str, max_wait: float | None = None) -> CredentialRequest:
+        """Block until the request is resolved, expired, or `max_wait` seconds pass."""
+        request = self._requests[request_id]
+        event = self._events[request_id]
+        remaining = (request.expires_at - datetime.now(UTC)).total_seconds()
+        limit = remaining if max_wait is None else min(max_wait, remaining)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=max(limit, 0))
+        except TimeoutError:
+            await self._expire_if_due(request)
+        finally:
+            if request.waiting > 0:
+                request.waiting -= 1
+        return request
+
+    async def _expire_if_due(self, request: CredentialRequest) -> None:
+        if request.state is RequestState.PENDING and datetime.now(UTC) >= request.expires_at:
+            await self._close(request, RequestState.EXPIRED, None, "no one responded in time")
+
+    async def sweep(self) -> None:
+        """Send reminders and expire stale requests; call periodically."""
+        now = datetime.now(UTC)
+        for request in list(self._requests.values()):
+            if request.state is not RequestState.PENDING:
+                continue
+            if now >= request.expires_at:
+                await self._close(request, RequestState.EXPIRED, None, "no one responded in time")
+            elif not request.reminded and now - request.created_at >= self.remind_after:
+                request.reminded = True
+                await self.notifier.updated(request)
+
+    # -- one-time links ------------------------------------------------------
+
+    def link(self, request: CredentialRequest) -> str:
+        return f"{self.public_url}/credentials/{request.id}?t={self.token_for(request)}"
+
+    def token_for(self, request: CredentialRequest) -> str:
+        message = f"{request.id}:{request.created_at.isoformat()}".encode()
+        return hmac.new(self._signing_key, message, hashlib.sha256).hexdigest()[:40]
+
+    def check_token(self, request: CredentialRequest, token: str) -> bool:
+        if not token or token in self._used_tokens:
+            return False
+        if request.state is not RequestState.PENDING:
+            return False
+        if datetime.now(UTC) >= request.expires_at:
+            return False
+        return hmac.compare_digest(self.token_for(request), token)
+
+    # -- resolving -------------------------------------------------------------
+
+    async def provide_value(self, request_id: str, value: str, approver: str) -> str | None:
+        """Store a pasted secret, validate it, and resolve. Returns an error or None."""
+        request = self._require_pending(request_id)
+        value = value.strip()
+        if not value:
+            return "The key was empty."
+        await self.secrets.put(request.secret_ref, value)
+        return await self._validate_and_resolve(request, approver, "new key added")
+
+    async def use_existing(self, request_id: str, existing_ref: str, approver: str) -> str | None:
+        """Point the API at an existing secret, validate it, and resolve."""
+        request = self._require_pending(request_id)
+        if existing_ref not in await self.secrets.list_names():
+            return f"No secret named {existing_ref!r} exists."
+        entry = self.registry.get(request.api)
+        if entry is None:
+            return f"API {request.api!r} is no longer in the registry."
+        if existing_ref != entry.secret_ref:
+            auth = entry.auth.model_copy(update={"secret_ref": existing_ref})
+            await self.registry.save(entry.model_copy(update={"auth": auth}))
+            request.secret_ref = existing_ref
+        return await self._validate_and_resolve(request, approver, f"using existing {existing_ref}")
+
+    async def deny(self, request_id: str, approver: str) -> None:
+        request = self._require_pending(request_id)
+        await self.registry.set_status(request.api, EntryStatus.BLOCKED)
+        await self._close(request, RequestState.DENIED, approver, "access denied by approver")
+
+    async def _validate_and_resolve(
+        self, request: CredentialRequest, approver: str, note: str
+    ) -> str | None:
+        entry = self.registry.get(request.api)
+        if entry is not None and self.validator is not None:
+            problem = await self.validator(entry)
+            if problem is not None:
+                return f"The credential was saved but did not work: {problem}"
+        validated = (
+            entry is not None
+            and self.validator is not None
+            and (entry.credential.validation_operation is not None)
+        )
+        await self._close(
+            request,
+            RequestState.FULFILLED,
+            approver,
+            f"{note}; " + ("tested OK" if validated else "not tested (no validation operation)"),
+        )
+        return None
+
+    def _require_pending(self, request_id: str) -> CredentialRequest:
+        request = self._requests.get(request_id)
+        if request is None or request.state is not RequestState.PENDING:
+            raise LookupError("this request is no longer pending")
+        return request
+
+    async def _close(
+        self,
+        request: CredentialRequest,
+        state: RequestState,
+        approver: str | None,
+        note: str,
+    ) -> None:
+        request.state = state
+        request.resolved_by = approver
+        request.resolution_note = note
+        self._used_tokens.add(self.token_for(request))
+        self._events[request.id].set()
+        await self.audit.record(
+            AuditEvent(
+                event="credential_resolved",
+                api=request.api,
+                caller=approver,
+                detail=f"{state}: {note}",
+            )
+        )
+        await self.notifier.closed(request)
+
+
+def new_signing_key() -> bytes:
+    return secrets.token_bytes(32)
