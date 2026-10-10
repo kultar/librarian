@@ -17,6 +17,9 @@ credential:
   validation_operation: getCurrentUser
 owners:
   channel: "#atlassian-admins"
+discovery:
+  # Learn this site's custom field names (customfield_10020 -> Sprint) for the planner.
+  - {operation: getFields, key: id, value: name, key_prefix: customfield_}
 operations:
   - id: getCurrentUser
     method: GET

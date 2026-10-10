@@ -270,6 +270,7 @@ def _operations(spec: Json) -> list[Operation]:
                         method=method.upper(),
                         path=path,
                         summary=summary[:2000],
+                        tags=[str(t)[:60] for t in _list(op.get("tags"))][:20],
                         parameters=params,
                         access=access,
                         accepts_body=accepts_body,

@@ -14,7 +14,7 @@ import hmac
 import logging
 import secrets
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol
@@ -151,6 +151,9 @@ class CredentialBroker:
         self.default_channel = default_channel
         self.default_approver_group = default_approver_group
         self.validator: Validator | None = None
+        # Called (in the background) after a credential works, e.g. to run discovery.
+        self.after_fulfilled: Callable[[str], Coroutine[Any, Any, None]] | None = None
+        self._background: set[asyncio.Task[None]] = set()
         self._requests: dict[str, CredentialRequest] = {}
         self._events: dict[str, asyncio.Event] = {}
         self._used_tokens: set[str] = set()
@@ -405,6 +408,10 @@ class CredentialBroker:
             approver,
             f"{note}; " + ("tested OK" if validated else "not tested (no validation operation)"),
         )
+        if self.after_fulfilled is not None:
+            task = asyncio.create_task(self.after_fulfilled(request.api))
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
         return None
 
     async def _require_pending(self, request_id: str) -> CredentialRequest:

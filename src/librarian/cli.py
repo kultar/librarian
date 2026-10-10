@@ -167,17 +167,72 @@ def ask(
 
     async def run() -> None:
         librarian = Librarian(settings)
-        librarian.load()
+        await librarian.start()  # durable state: saved recipes, credentials, approvals
         try:
             outcome = await librarian.fetch(intent, Caller(agent="cli"))
         finally:
             await librarian.aclose()
+        if outcome.recipe:
+            typer.echo(f"(answered from saved recipe {outcome.recipe}, no model call)")
         typer.echo(outcome.answer.summary)
         if outcome.answer.unresolved:
             typer.echo(f"\nUnresolved: {outcome.answer.unresolved}")
         for result in outcome.results:
             p = result.provenance
             typer.echo(f"  - {p.api}.{p.operation} → HTTP {result.status_code} ({p.url})")
+
+    _run(run())
+
+
+@app.command()
+def discover(api: str, config: ConfigOption = None) -> None:
+    """Run an API's discovery reads (e.g. Jira custom field names) into its glossary."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        librarian.load()
+        try:
+            count = await librarian.discover(api)
+        finally:
+            await librarian.aclose()
+        typer.echo(f"{api}: {count} glossary entries")
+
+    _run(run())
+
+
+recipes_app = typer.Typer(help="Saved plans replayed without the LLM.", no_args_is_help=True)
+app.add_typer(recipes_app, name="recipes")
+
+
+@recipes_app.command("list")
+def recipes_list(config: ConfigOption = None) -> None:
+    """Saved recipes, most used first."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        await librarian.start()
+        try:
+            for r in sorted(librarian.recipes.values(), key=lambda r: -r.uses):
+                steps = ", ".join(f"{s.api}.{s.operation}" for s in r.steps)
+                typer.echo(f"{r.id}  uses={r.uses:<4} '{r.template}' -> {steps}")
+        finally:
+            await librarian.aclose()
+
+    _run(run())
+
+
+@recipes_app.command("delete")
+def recipes_delete(recipe_id: str, config: ConfigOption = None) -> None:
+    """Forget a recipe (the planner will be used again for such requests)."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        await librarian.start()
+        try:
+            await librarian.delete_recipe(recipe_id)
+        finally:
+            await librarian.aclose()
+        typer.echo(f"deleted {recipe_id}")
 
     _run(run())
 

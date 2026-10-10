@@ -195,6 +195,8 @@ class Settings(BaseSettings):
     model_base_url: str | None = None
     model_api_key: SecretStr | None = None
     max_calls_per_fetch: int = 8
+    # Save successful plain-language plans as templates and replay them without the LLM.
+    recipes_enabled: bool = True
     # How the planner gets structured answers: "tool" (forced output tool), "native"
     # (provider JSON mode) or "prompted" (JSON in the reply). "auto" = prompted when
     # going through an OpenAI-compatible gateway (model_base_url), else tool.

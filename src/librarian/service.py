@@ -9,9 +9,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.models import Model
 
 from librarian import telemetry
@@ -23,10 +24,13 @@ from librarian.credentials import CredentialBroker, CredentialRequest, Notifier,
 from librarian.executor import CredentialMissing, Executor, PolicyDenied
 from librarian.notifiers import SlackNotifier, WebhookNotifier
 from librarian.openapi import SpecError, discover_spec, entry_from_spec, fetch_spec
-from librarian.planner import FetchOutcome, Planner
+from librarian.opsearch import rank
+from librarian.planner import FetchAnswer, FetchOutcome, Planner
 from librarian.policy import PolicyEngine
 from librarian.publish import GitHubPublisher, Publisher, PublishError
-from librarian.registry.models import Access, ApiEntry, EntryStatus
+from librarian.recipes import Recipe, recipe_summary
+from librarian.recipes import learn as learn_recipe
+from librarian.registry.models import Access, ApiEntry, EntryStatus, Operation
 from librarian.registry.store import Registry
 from librarian.secrets import (
     AwsSecretsManagerStore,
@@ -35,6 +39,7 @@ from librarian.secrets import (
     FileSecretStore,
     SecretStore,
 )
+from librarian.shaping import get_path
 from librarian.state import StateStore, make_engine
 
 log = logging.getLogger(__name__)
@@ -133,6 +138,7 @@ class Librarian:
             store=self.state,
         )
         self.broker.validator = self._validate_credential
+        self.broker.after_fulfilled = self._discover_quietly
         self.approvals = ApprovalBroker(
             self.notifier,
             self.audit,
@@ -160,6 +166,7 @@ class Librarian:
             ],
         )
         self.publisher = publisher if publisher is not None else _default_publisher(settings)
+        self.recipes: dict[str, Recipe] = {}
         model = planner_model if planner_model is not None else _model_from_settings(settings)
         mode = settings.planner_output
         if mode == "auto":
@@ -180,6 +187,9 @@ class Librarian:
             if restored:
                 log.info("restored %d pending credential request(s)", restored)
             await self.approvals.restore()
+            for data in await self.state.list_docs("recipe", "active"):
+                recipe = Recipe.model_validate_json(data)
+                self.recipes[recipe.id] = recipe
         key = await self._signing_key()
         self.broker.set_signing_key(key)
         self.approvals.set_signing_key(key)
@@ -229,14 +239,81 @@ class Librarian:
         caller: Caller,
         on_auth_required: AuthRequiredHook | None = None,
     ) -> FetchOutcome:
+        replayed = await self._replay_recipe(intent, caller, on_auth_required)
+        if replayed is not None:
+            return replayed
         if self.planner is None:
             raise LibrarianError("the fetch skill is disabled: no model is configured")
         for _attempt in range(2):
             try:
-                return await self.planner.fetch(intent, self.registry, self.executor, caller)
+                outcome = await self.planner.fetch(intent, self.registry, self.executor, caller)
             except CredentialMissing as missing:
                 await self._await_credential(missing, caller, on_auth_required)
+                continue
+            except UsageLimitExceeded as exc:
+                raise LibrarianError(
+                    "the planner used up its step budget without an answer; try a narrower "
+                    "request, or raise max_calls_per_fetch"
+                ) from exc
+            await self._learn_recipe(intent, outcome)
+            return outcome
         raise LibrarianError("credential still not usable after it was provided")
+
+    # -- recipes ---------------------------------------------------------------------
+
+    async def _replay_recipe(
+        self, intent: str, caller: Caller, on_auth_required: AuthRequiredHook | None
+    ) -> FetchOutcome | None:
+        if not self.settings.recipes_enabled:
+            return None
+        for recipe in sorted(self.recipes.values(), key=lambda r: -r.uses):
+            values = recipe.match(intent)
+            if values is None:
+                continue
+            requests = recipe.calls(values)
+            if not all(caller.may_use(r.api) for r in requests):
+                continue
+            results: list[CallResult] = []
+            try:
+                for request in requests:
+                    results.append(await self.execute(request, caller, on_auth_required))
+            except PolicyDenied:
+                continue  # e.g. the registry changed; let the planner handle it
+            recipe.uses += 1
+            await self._save_recipe(recipe)
+            return FetchOutcome(
+                answer=FetchAnswer(summary=recipe_summary(recipe, results)),
+                results=results,
+                requests=requests,
+                recipe=recipe.id,
+            )
+        return None
+
+    async def _learn_recipe(self, intent: str, outcome: FetchOutcome) -> None:
+        if not self.settings.recipes_enabled or len(self.recipes) >= 500:
+            return
+        recipe = learn_recipe(intent, outcome.results, outcome.requests)
+        if recipe is None:
+            return
+        if any(
+            r.template == recipe.template and r.steps == recipe.steps for r in self.recipes.values()
+        ):
+            return
+        self.recipes[recipe.id] = recipe
+        await self._save_recipe(recipe)
+        await self.audit.record(
+            AuditEvent(event="recipe_learned", detail=f"{recipe.id}: {recipe.template}")
+        )
+
+    async def _save_recipe(self, recipe: Recipe) -> None:
+        if self.state is not None:
+            await self.state.save_doc("recipe", recipe.id, "active", recipe.model_dump_json())
+
+    async def delete_recipe(self, recipe_id: str) -> None:
+        if self.recipes.pop(recipe_id, None) is None:
+            raise LibrarianError(f"unknown recipe {recipe_id!r}")
+        if self.state is not None:
+            await self.state.save_doc("recipe", recipe_id, "deleted", "{}")
 
     async def write(
         self,
@@ -335,6 +412,11 @@ class Librarian:
             else [e for e in self.registry.all() if e.status is not EntryStatus.BLOCKED]
         )
         entries = [e for e in entries if caller.may_use(e.id)]
+
+        def read_ops(entry: ApiEntry) -> list[Operation]:
+            reads = [op for op in entry.operations if op.access is Access.READ]
+            return rank(entry, query, reads, limit=20) if query else reads[:50]
+
         return [
             {
                 "api": e.id,
@@ -343,10 +425,9 @@ class Librarian:
                 "status": e.status.value,
                 "base_url": e.base_url,
                 "read_operations": [
-                    {"operation": op.id, "summary": op.summary[:160]}
-                    for op in e.operations
-                    if op.access is Access.READ
-                ][:50],
+                    {"operation": op.id, "summary": op.summary[:160]} for op in read_ops(e)
+                ],
+                "total_read_operations": sum(1 for op in e.operations if op.access is Access.READ),
                 "credential_ready": None if e.secret_ref is None else "unknown",
             }
             for e in entries
@@ -421,6 +502,54 @@ class Librarian:
             )
         )
         return OnboardResult(entry, path, reads, review, review_url, review_error)
+
+    async def discover(self, api_id: str) -> int:
+        """Run an API's discovery reads and store what they teach as its glossary."""
+        entry = self.registry.get(api_id)
+        if entry is None:
+            raise LibrarianError(f"unknown API {api_id!r}")
+        if not entry.discovery:
+            return 0
+        glossary: dict[str, str] = {}
+        for item in entry.discovery:
+            result = await self.executor.execute(
+                CallRequest(api=entry.id, operation=item.operation, max_pages=5), SYSTEM_CALLER
+            )
+            if not result.ok:
+                raise LibrarianError(
+                    f"discovery {item.operation} returned HTTP {result.status_code}"
+                )
+            data: Any = get_path(result.data, item.items_path) if item.items_path else result.data
+            for record in data if isinstance(data, list) else []:
+                if not isinstance(record, dict):
+                    continue
+                fields = cast(dict[str, Any], record)
+                key, name = fields.get(item.key), fields.get(item.value)
+                if key is None or name is None:
+                    continue
+                key_text = str(key)[:100]
+                if item.key_prefix and not key_text.startswith(item.key_prefix):
+                    continue
+                glossary[key_text] = str(name)[:200]
+                if len(glossary) >= 5000:
+                    break
+        current = self.registry.get(api_id) or entry
+        data_out = current.model_dump(mode="json", by_alias=True)
+        data_out["glossary"] = glossary
+        await self.registry.save(ApiEntry.model_validate(data_out))
+        await self.audit.record(
+            AuditEvent(event="discovery", api=api_id, detail=f"{len(glossary)} glossary entries")
+        )
+        return len(glossary)
+
+    async def _discover_quietly(self, api_id: str) -> None:
+        entry = self.registry.get(api_id)
+        if entry is None or not entry.discovery:
+            return
+        try:
+            await self.discover(api_id)
+        except (LibrarianError, PolicyDenied, CredentialMissing, httpx.HTTPError) as exc:
+            log.warning("discovery for %s failed: %s", api_id, exc)
 
     # -- credentials ------------------------------------------------------------
 

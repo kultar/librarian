@@ -20,6 +20,7 @@ from pydantic_ai.usage import UsageLimits
 
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, WriteRequest
 from librarian.executor import Executor, PolicyDenied
+from librarian.opsearch import rank, tokens
 from librarian.registry.models import Access, EntryStatus
 from librarian.registry.store import Registry
 
@@ -59,6 +60,7 @@ class PlannerDeps:
     executor: Executor
     caller: Caller
     results: list[CallResult] = field(default_factory=list[CallResult])
+    requests: list[CallRequest] = field(default_factory=list[CallRequest])
     # Identical calls within one fetch reuse the first result.
     cache: dict[str, CallResult] = field(default_factory=dict[str, CallResult])
     # Writes the model suggested. Never executed by the planner: the calling agent
@@ -71,6 +73,8 @@ class FetchOutcome:
     answer: FetchAnswer
     results: list[CallResult]
     proposed_writes: list[WriteRequest] = field(default_factory=list[WriteRequest])
+    requests: list[CallRequest] = field(default_factory=list[CallRequest])
+    recipe: str | None = None  # set when answered from a saved recipe (no LLM)
 
 
 OutputMode = Literal["tool", "native", "prompted"]
@@ -122,20 +126,21 @@ def build_agent(
     def describe_api(
         ctx: RunContext[PlannerDeps], api: str, filter_text: str = ""
     ) -> dict[str, Any]:
-        """List an API's read operations (optionally filtered by keywords) with parameters."""
+        """List an API's operations relevant to `filter_text` (best matches first), with
+        parameters. Big APIs have hundreds of operations: always describe what you need."""
         entry = ctx.deps.registry.get(api)
         if entry is None or not ctx.deps.caller.may_use(api):
             raise ModelRetry(f"unknown API {api!r}; use search_apis first")
-        words = {w for w in filter_text.lower().split() if w}
-        ops: list[dict[str, Any]] = []
         can_write = ctx.deps.caller.may_write(api) and entry.write_auth is not None
-        for op in entry.operations:
-            is_write = op.access is Access.WRITE and op.writable and can_write
-            if op.access is not Access.READ and not is_write:
-                continue
-            text = f"{op.id} {op.path} {op.summary}".lower()
-            if words and not any(w in text for w in words):
-                continue
+        usable = [
+            op
+            for op in entry.operations
+            if op.access is Access.READ or (op.access is Access.WRITE and op.writable and can_write)
+        ]
+        chosen = rank(entry, filter_text, usable, limit=15) if filter_text.strip() else usable[:40]
+        ops: list[dict[str, Any]] = []
+        for op in chosen:
+            is_write = op.access is Access.WRITE
             ops.append(
                 {
                     "operation": op.id,
@@ -155,9 +160,18 @@ def build_agent(
                     ],
                 }
             )
-            if len(ops) >= 40:
-                break
-        return {"api": entry.id, "name": entry.name, "operations": ops, "notes": entry.notes[:500]}
+        result: dict[str, Any] = {
+            "api": entry.id,
+            "name": entry.name,
+            "operations": ops,
+            "notes": entry.notes[:500],
+            "total_operations": len(usable),
+        }
+        if len(usable) > len(ops) and not filter_text.strip():
+            result["hint"] = "Only some operations are shown: call again with filter_text."
+        if entry.glossary:
+            result["glossary"] = _glossary_excerpt(entry.glossary, filter_text)
+        return result
 
     @agent.tool
     async def call_api(
@@ -190,6 +204,7 @@ def build_agent(
                 raise ModelRetry(f"call refused by policy: {exc.reason}") from exc
             ctx.deps.cache[key] = result
             ctx.deps.results.append(result)
+            ctx.deps.requests.append(request)
         payload = json.dumps({"status": result.status_code, "data": result.data}, default=str)
         if len(payload) > MAX_TOOL_RESULT_CHARS:
             payload = payload[:MAX_TOOL_RESULT_CHARS] + "...(truncated)"
@@ -227,6 +242,17 @@ def build_agent(
     return agent
 
 
+def _glossary_excerpt(
+    glossary: dict[str, str], filter_text: str, limit: int = 40
+) -> dict[str, str]:
+    """Instance-specific names (e.g. customfield_10020 -> Sprint) relevant to the request."""
+    wanted = set(tokens(filter_text))
+    relevant = {
+        key: name for key, name in glossary.items() if not wanted or wanted & set(tokens(name))
+    }
+    return dict(list(relevant.items())[:limit])
+
+
 class Planner:
     def __init__(
         self, model: Model | str, max_calls: int = 8, output_mode: OutputMode = "tool"
@@ -244,5 +270,8 @@ class Planner:
             usage_limits=UsageLimits(request_limit=self.max_calls + 4),
         )
         return FetchOutcome(
-            answer=result.output, results=deps.results, proposed_writes=deps.proposed_writes
+            answer=result.output,
+            results=deps.results,
+            proposed_writes=deps.proposed_writes,
+            requests=deps.requests,
         )

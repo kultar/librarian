@@ -130,6 +130,7 @@ class Operation(StrictModel):
     method: str
     path: str = Field(min_length=1, max_length=2048)
     summary: str = Field(default="", max_length=2000)
+    tags: list[str] = Field(default_factory=list[str], max_length=20)
     parameters: list[Parameter] = Field(default_factory=list[Parameter])
     access: Access = Access.UNKNOWN
     read_basis: ReadBasis | None = None
@@ -237,6 +238,20 @@ class CredentialGuidance(StrictModel):
     validation_operation: str | None = None  # a cheap read used to test a new credential
 
 
+class Discovery(StrictModel):
+    """A read that teaches the librarian instance-specific names.
+
+    Example (Jira): operation getFields, key "id", value "name", key_prefix
+    "customfield_" fills the glossary with customfield_10020 -> Sprint.
+    """
+
+    operation: str
+    items_path: str | None = None  # where the list is; None = the response itself
+    key: str = "id"
+    value: str = "name"
+    key_prefix: str | None = None  # keep only keys starting with this
+
+
 class SpecSource(StrictModel):
     kind: Literal["openapi", "manual", "inferred"] = "manual"
     url: str | None = None
@@ -263,6 +278,9 @@ class ApiEntry(StrictModel):
     credential: CredentialGuidance = Field(default_factory=CredentialGuidance)
     operations: list[Operation] = Field(default_factory=list[Operation])
     pagination: Pagination | None = None  # default for all operations
+    discovery: list[Discovery] = Field(default_factory=list[Discovery], max_length=10)
+    # Instance-specific names learned by discovery (id -> human name), shown to the planner.
+    glossary: dict[str, str] = Field(default_factory=dict[str, str])
     source: SpecSource = Field(default_factory=SpecSource)
     owners: Owners = Field(default_factory=Owners)
     notes: str = Field(default="", max_length=8000)
@@ -304,6 +322,12 @@ class ApiEntry(StrictModel):
                     f"secret_ref {auth.secret_ref!r} uses the reserved prefix "
                     f"{RESERVED_SECRET_PREFIX!r} (internal secrets)"
                 )
+        for item in self.discovery:
+            found = self.operation(item.operation)
+            if found is None or found.access is not Access.READ:
+                raise ValueError(f"discovery operation {item.operation!r} must be a read operation")
+        if len(self.glossary) > 5000:
+            raise ValueError("glossary is limited to 5000 entries")
         validation = self.credential.validation_operation
         if validation is not None:
             op = self.operation(validation)

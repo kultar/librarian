@@ -16,7 +16,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.5)**. Expect breaking changes.
+> Status: **alpha (v0.6)**. Expect breaking changes.
 
 ## Why
 
@@ -148,6 +148,20 @@ Set `otel_enabled: true` (install the `otel` extra; the Docker image has it) and
   `librarian.api.call.duration`, `librarian.policy.denials`, `librarian.credential.requests`.
 
 The JSONL audit log is separate and always on.
+
+## Big APIs
+
+- **Operation search.** Requests are matched to operations with BM25 ranking over operation ids
+  (split into words: `getIssueWatchers` -> issue, watch), tags, paths and summaries. On Jira's
+  620-operation API, "who is watching an issue" finds `getIssueWatchers` first.
+- **Glossary.** Registry entries can declare `discovery` reads that teach instance-specific
+  names, e.g. Jira's `/field` maps `customfield_10020` to "Sprint". They run after a credential
+  is approved (or `librarian discover <api>`), and the planner sees the relevant entries.
+- **Recipes.** A successful plain-language request is saved as a template: "Is PAY-1 open?"
+  becomes `Is {p0} open`, and "Is PAY-7 open?" later replays the same calls **without the LLM**
+  (still policy-checked, with the caller's permissions). Plans whose later calls use values from
+  earlier results are never saved. `librarian recipes list|delete`; `recipes_enabled: false`
+  turns it off.
 
 ## Verified principals
 
@@ -288,8 +302,8 @@ uv run pytest
   pages listener, registry overlay, release workflow (GHCR, PyPI), example client, LiteLLM compose
 - **v0.5** ✅: verified principals (signed tokens from your identity provider; optional and
   required modes); claimed principals no longer count as requesters once verification is on
-- **v0.6**: better at big APIs: operation search for 500+ operation APIs, saved **recipes**
-  (successful plans replayed without the LLM), learning instance details (e.g. Jira custom fields)
+- **v0.6** ✅: big APIs: ranked operation search, discovery-built glossary (e.g. Jira custom
+  fields), recipes replayed without the LLM
 - **Later**: Vault/GCP/Azure secret stores; per-user OAuth; per-API approver routing in Slack;
   community registry with signed entries
 

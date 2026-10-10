@@ -42,6 +42,20 @@ operations:
     accepts_body: true
 ```
 
+## Discovery and glossary
+
+```yaml
+discovery:                       # reads that teach instance-specific names
+  - operation: getFields          # must be a read operation of this entry
+    items_path: null              # where the list is (null = the response itself)
+    key: id
+    value: name
+    key_prefix: customfield_      # keep only matching keys
+glossary: {}                      # filled by discovery: {customfield_10020: Sprint, ...}
+```
+
+Operations may also carry `tags` (taken from the OpenAPI spec) to improve search.
+
 ## Writes
 
 ```yaml
