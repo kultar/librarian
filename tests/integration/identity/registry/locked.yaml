@@ -1,0 +1,8 @@
+# An API whose credential is missing, to exercise the credential page's group check.
+id: locked
+name: Locked echo
+base_url: http://httpbin:8080
+status: verified
+auth: {type: bearer, secret_ref: locked/read}
+operations:
+  - {id: whoami, method: GET, path: /bearer, access: read}

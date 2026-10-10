@@ -1,0 +1,20 @@
+host: 0.0.0.0
+port: 8080
+pages_host: 127.0.0.1          # only the oauth2-proxy (same network namespace) can reach it
+pages_port: 8081
+public_url: http://localhost:4180
+registry_dir: /registry
+approvers:
+  mode: trusted_header
+  user_header: X-Forwarded-Email
+  groups_header: X-Forwarded-Groups
+  group: api-approvers
+principals:
+  mode: required
+  issuers:
+    - {issuer: "http://localhost:8180/realms/lib", audience: librarian, claim: email}
+callers:
+  - agent: agent-a
+    key_ref: librarian/callers/agent-a
+    write_apis: [echo]
+writes: {approvers: requester}

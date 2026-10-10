@@ -18,9 +18,17 @@ from typing import Any
 import httpx
 import pytest
 
+from tests.integration.conftest import wait_until_up
+
 pytestmark = pytest.mark.skipif(
     not os.environ.get("LIBRARIAN_INTEGRATION"), reason="set LIBRARIAN_INTEGRATION=1"
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def stack_up() -> None:
+    wait_until_up("http://localhost:18101/healthz", "http://localhost:18102/healthz")
+
 
 A, B = "http://localhost:18101", "http://localhost:18102"
 COMPOSE = Path(__file__).parent / "replicas" / "docker-compose.yaml"

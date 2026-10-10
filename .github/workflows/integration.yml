@@ -1,0 +1,34 @@
+name: integration
+
+# Real services in Docker (Postgres, LocalStack, Keycloak, oauth2-proxy). Heavier than CI,
+# so it runs on demand and weekly.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  stack:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: replicas, project: libint, test: test_replicas.py}
+          - {name: identity, project: libid, test: test_identity.py}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen --all-extras
+      - name: Start ${{ matrix.name }} stack
+        run: docker compose -p ${{ matrix.project }} -f tests/integration/${{ matrix.name }}/docker-compose.yaml up -d --build --wait --wait-timeout 300
+      - name: Test
+        run: LIBRARIAN_INTEGRATION=1 uv run pytest tests/integration/${{ matrix.test }} -v
+      - name: Logs on failure
+        if: failure()
+        run: docker compose -p ${{ matrix.project }} -f tests/integration/${{ matrix.name }}/docker-compose.yaml logs --tail 200

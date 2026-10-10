@@ -1,0 +1,59 @@
+# Keycloak (real OIDC) + oauth2-proxy + librarian sharing one network namespace, like the
+# Helm chart's sidecar layout: approval pages listen on 127.0.0.1 behind the proxy.
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: [start-dev, --import-realm]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: "8180"
+      KC_HOSTNAME: http://localhost:8180
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./realm.json:/opt/keycloak/data/import/realm.json:ro
+    ports:
+      - "8180:8180"     # Keycloak (same URL inside and outside, so the issuer matches)
+      - "4180:4180"     # oauth2-proxy: approval pages for people
+      - "18201:8080"    # librarian A2A for agents
+    healthcheck:
+      test: [CMD-SHELL, "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 3s
+      retries: 60
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+    network_mode: service:keycloak
+    depends_on: {keycloak: {condition: service_healthy}}
+    command:
+      - --http-address=0.0.0.0:4180
+      - --upstream=http://127.0.0.1:8081/
+      - --provider=oidc
+      - --oidc-issuer-url=http://localhost:8180/realms/lib
+      - --client-id=oauth2-proxy
+      - --client-secret=proxy-secret
+      - --cookie-secret=0123456789abcdef0123456789abcdef
+      - --cookie-secure=false
+      - --email-domain=*
+      - --pass-user-headers=true
+      - --redirect-url=http://localhost:4180/oauth2/callback
+      - --skip-provider-button=true
+      - --scope=openid email profile
+
+  librarian:
+    build: ../../..
+    image: librarian:integration
+    network_mode: service:keycloak
+    depends_on: {keycloak: {condition: service_healthy}}
+    command: [serve, --config, /config/config.yaml]
+    environment:
+      LIBRARIAN_SECRET_LIBRARIAN_CALLERS_AGENT_A: key-a
+      LIBRARIAN_SECRET_ECHO_READ: read-1
+      LIBRARIAN_SECRET_SERVICE_ECHO_WRITE_TOKEN: w-identity
+      LIBRARIAN_DATABASE_URL: ""
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - ./registry:/registry:ro
+
+  httpbin:
+    image: mccutchen/go-httpbin:latest

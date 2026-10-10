@@ -1,0 +1,27 @@
+# A verified test API (go-httpbin) used by the integration stacks.
+id: echo
+name: Echo
+description: go-httpbin, a request echo service used as a safe test target.
+base_url: http://httpbin:8080
+status: verified
+auth: {type: bearer, secret_ref: echo/read}
+write_auth: {type: bearer, secret_ref: "service/echo#write_token"}
+credential:
+  validation_operation: whoami
+owners: {approver_group: api-approvers}
+operations:
+  - {id: whoami, method: GET, path: /bearer, access: read, summary: Checks the bearer token}
+  - id: getAnything
+    method: GET
+    path: /anything/{key}
+    access: read
+    summary: Echo a read
+    parameters: [{name: key, in: path}]
+  - id: postComment
+    method: POST
+    path: /anything/comments/{key}
+    access: write
+    writable: true
+    accepts_body: true
+    summary: Echo a write
+    parameters: [{name: key, in: path}]

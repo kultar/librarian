@@ -1,0 +1,32 @@
+{
+  "realm": "lib",
+  "enabled": true,
+  "sslRequired": "none",
+  "groups": [{"name": "api-approvers"}],
+  "users": [
+    {"username": "kim", "email": "kim@example.com", "emailVerified": true, "enabled": true,
+     "firstName": "Kim", "lastName": "Approver",
+     "credentials": [{"type": "password", "value": "kim-pass", "temporary": false}],
+     "groups": ["/api-approvers"]},
+    {"username": "eve", "email": "eve@example.com", "emailVerified": true, "enabled": true,
+     "firstName": "Eve", "lastName": "Other",
+     "credentials": [{"type": "password", "value": "eve-pass", "temporary": false}]}
+  ],
+  "clients": [
+    {"clientId": "oauth2-proxy", "enabled": true, "publicClient": false,
+     "secret": "proxy-secret", "standardFlowEnabled": true,
+     "redirectUris": ["http://localhost:4180/oauth2/callback"],
+     "protocolMappers": [
+       {"name": "groups", "protocol": "openid-connect",
+        "protocolMapper": "oidc-group-membership-mapper",
+        "config": {"claim.name": "groups", "full.path": "false", "id.token.claim": "true",
+                   "access.token.claim": "true", "userinfo.token.claim": "true"}}]},
+    {"clientId": "agent", "enabled": true, "publicClient": false, "secret": "agent-secret",
+     "standardFlowEnabled": false, "directAccessGrantsEnabled": true,
+     "protocolMappers": [
+       {"name": "librarian-audience", "protocol": "openid-connect",
+        "protocolMapper": "oidc-audience-mapper",
+        "config": {"included.custom.audience": "librarian", "access.token.claim": "true",
+                   "id.token.claim": "false"}}]}
+  ]
+}
