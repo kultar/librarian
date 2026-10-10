@@ -249,6 +249,8 @@ class LibrarianExecutor(AgentExecutor):
                 "read_operations": outcome.read_operations,
                 "needs_review": outcome.needs_review,
                 "auth": outcome.entry.auth.type,
+                "review_url": outcome.review_url,
+                "review_error": outcome.review_error,
             }
         if skill == "fetch":
             intent = command.get("intent")
@@ -420,9 +422,18 @@ def create_app(librarian: Librarian, caller_keys: dict[str, str] | None = None) 
 
 
 async def _sweep_forever(librarian: Librarian) -> None:
+    """Housekeeping: pick up registry changes, send reminders, expire requests."""
+    ticks = 0
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(15)
+        ticks += 1
         try:
-            await librarian.broker.sweep()
+            if librarian.registry.reload_if_changed():
+                log.info("registry reloaded: %d APIs", len(librarian.registry.all()))
         except Exception:
-            log.exception("credential sweep failed")
+            log.exception("registry reload failed")
+        if ticks % 4 == 0:
+            try:
+                await librarian.broker.sweep()
+            except Exception:
+                log.exception("credential sweep failed")

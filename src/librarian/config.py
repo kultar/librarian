@@ -41,6 +41,17 @@ class ApproverSettings(BaseModel):
     group: str | None = None
 
 
+class PublishSettings(BaseModel):
+    """Where learned entries are proposed for human review."""
+
+    type: Literal["none", "github"] = "none"
+    repo: str | None = None  # owner/name
+    base_branch: str = "main"
+    directory: str = "registry"
+    token: SecretStr | None = None  # needs contents:write + pull_requests:write on the repo
+    api_url: str = "https://api.github.com"
+
+
 class CallerKey(BaseModel):
     """A calling agent and the secret reference holding its API key."""
 
@@ -111,6 +122,7 @@ class Settings(BaseSettings):
     callers: list[CallerKey] = Field(default_factory=list[CallerKey])
 
     notifier: NotifierSettings = Field(default_factory=NotifierSettings)
+    publish: PublishSettings = Field(default_factory=PublishSettings)
     approvers: ApproverSettings = Field(default_factory=ApproverSettings)
 
     @classmethod

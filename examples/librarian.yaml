@@ -44,6 +44,14 @@ notifier:
     # bot_token: set-via-LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN
   # webhook_url: https://hooks.example.com/librarian
 
+# Propose learned APIs for human review as GitHub pull requests.
+publish:
+  type: none                           # none | github
+  # repo: acme/api-registry
+  # base_branch: main
+  # directory: registry
+  # token: set-via-LIBRARIAN_PUBLISH__TOKEN
+
 approvers:
   mode: token                          # token (local) | trusted_header (behind an auth proxy)
   # user_header: X-Auth-Request-Email

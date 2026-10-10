@@ -100,3 +100,21 @@ async def test_save_roundtrip(tmp_path: Path) -> None:
     reloaded = Registry(tmp_path)
     reloaded.load()
     assert reloaded.get("tracker") == api
+
+
+async def test_registry_reloads_only_on_change(tmp_path: Path) -> None:
+    import os
+
+    write_entries(tmp_path, TRACKER)
+    registry = Registry(tmp_path)
+    registry.load()
+    assert not registry.reload_if_changed()
+    await registry.save(registry.get("tracker").model_copy(update={"name": "Renamed"}))  # type: ignore[union-attr]
+    assert not registry.reload_if_changed()  # our own write
+    write_entries(tmp_path, {**TRACKER, "id": "wiki", "name": "Wiki"})
+    assert registry.reload_if_changed()  # e.g. git-sync pulled a merged PR
+    assert registry.get("wiki") is not None
+    (tmp_path / "wiki.yaml").unlink()
+    os.utime(tmp_path)
+    assert registry.reload_if_changed()
+    assert registry.get("wiki") is None

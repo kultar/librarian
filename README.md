@@ -140,6 +140,23 @@ as **provisional**:
   `access: read` + `read_basis: reviewed` **and** the entry is `verified`.
 - Everything else is a write and is always refused in v0.1.
 
+**Review loop.** With `publish.type: github`, every learned API is also opened as a pull request
+against your registry repo, with a review checklist and the operations that need a decision. Run a
+[git-sync](https://github.com/kubernetes/git-sync) sidecar (or any process that updates the
+registry directory) and merged changes such as `status: verified` are picked up automatically:
+the registry hot-reloads when files change.
+
+```yaml
+publish:
+  type: github
+  repo: acme/api-registry          # token needs contents:write + pull_requests:write
+  directory: registry
+  # token: set via LIBRARIAN_PUBLISH__TOKEN
+```
+
+When learning an API, the librarian also looks for a cheap "who am I" read (`/me`, `/myself`,
+`/user`, ...) and uses it to test every new credential.
+
 Validate in CI with `uv run librarian registry validate`. Format reference:
 [docs/registry.md](docs/registry.md). Example: [`examples/registry/jira.yaml`](examples/registry/jira.yaml).
 

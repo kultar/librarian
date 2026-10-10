@@ -162,6 +162,9 @@ def entry_from_spec(
         )
     if auth_note:
         notes.append(auth_note)
+    validation = None if isinstance(auth, NoAuth) else guess_validation_operation(operations)
+    if validation is not None:
+        notes.append(f"New credentials are tested with `{validation}`.")
     return ApiEntry(
         id=api_id,
         name=(name or str(info.get("title") or api_id))[:200],
@@ -169,11 +172,35 @@ def entry_from_spec(
         base_url=resolved_base,
         status=EntryStatus.PROVISIONAL,
         auth=auth,
-        credential=CredentialGuidance(scopes=scopes[:50]),
+        credential=CredentialGuidance(scopes=scopes[:50], validation_operation=validation),
         operations=operations,
         source=SpecSource(kind="openapi", url=spec_url, fetched_at=datetime.now(UTC)),
         notes="\n".join(notes)[:8000],
     )
+
+
+# Paths that usually return the identity behind a credential: cheap, always
+# allowed for a valid key, and a 401 when the key is bad.
+_WHOAMI = re.compile(
+    r"/(me|myself|whoami|self|viewer|current[_-]?user|user|account|session|auth/test|"
+    r"users/(me|self|current))/?$",
+    re.I,
+)
+
+
+def guess_validation_operation(operations: list[Operation]) -> str | None:
+    """Pick a cheap read that proves a credential works, if the spec has one."""
+    candidates = [
+        op
+        for op in operations
+        if op.method == "GET"
+        and op.access is Access.READ
+        and not any(p.required for p in op.parameters)
+        and _WHOAMI.search(op.path)
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda op: (len(op.path), op.path)).id
 
 
 def _dict(value: Any) -> Json:

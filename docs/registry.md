@@ -58,7 +58,9 @@ operations:
 ## Lifecycle
 
 1. **Onboard**: `librarian learn <id> --spec-url ...` (or the `onboard` A2A skill) writes a
-   provisional entry. Search-like POSTs are listed in `notes` for review.
+   provisional entry. Search-like POSTs are listed in `notes` for review. With publishing
+   configured, a pull request with a review checklist is opened automatically.
 2. **Review**: a human checks base URL, auth, and any operations to promote, then sets
-   `status: verified` in a pull request.
+   `status: verified` in the pull request. Once merged and synced, the running librarian
+   hot-reloads the file.
 3. **Block**: denying a credential request sets `status: blocked` so agents stop asking.

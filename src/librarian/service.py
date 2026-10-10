@@ -22,6 +22,7 @@ from librarian.notifiers import SlackNotifier, WebhookNotifier
 from librarian.openapi import SpecError, discover_spec, entry_from_spec, fetch_spec
 from librarian.planner import FetchOutcome, Planner
 from librarian.policy import PolicyEngine
+from librarian.publish import GitHubPublisher, Publisher, PublishError
 from librarian.registry.models import Access, ApiEntry, EntryStatus
 from librarian.registry.store import Registry
 from librarian.secrets import ChainSecretStore, EnvSecretStore, FileSecretStore, SecretStore
@@ -53,6 +54,8 @@ class OnboardResult:
     path: Path
     read_operations: int
     needs_review: int
+    review_url: str | None = None
+    review_error: str | None = None
 
 
 class Librarian:
@@ -66,6 +69,7 @@ class Librarian:
         notifier: Notifier | None = None,
         http_client: httpx.AsyncClient | None = None,
         planner_model: Model | str | None = None,
+        publisher: Publisher | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry or Registry(settings.registry_dir)
@@ -103,6 +107,7 @@ class Librarian:
             store=self.state,
         )
         self.broker.validator = self._validate_credential
+        self.publisher = publisher if publisher is not None else _default_publisher(settings)
         model = planner_model if planner_model is not None else _model_from_settings(settings)
         self.planner = Planner(model, settings.max_calls_per_fetch) if model is not None else None
 
@@ -249,6 +254,14 @@ class Librarian:
         path = await self.registry.save(entry)
         reads = sum(1 for op in entry.operations if op.access is Access.READ)
         review = sum(1 for op in entry.operations if op.access is Access.UNKNOWN)
+        review_url = review_error = None
+        if self.publisher is not None:
+            try:
+                review_url = await self.publisher.publish(entry, caller.agent)
+            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+                # Onboarding still succeeded; the entry is usable as provisional.
+                review_error = f"could not open a review: {exc}"
+                log.warning("publishing %s for review failed: %s", api_id, exc)
         await self.audit.record(
             AuditEvent(
                 event="onboard",
@@ -256,10 +269,10 @@ class Librarian:
                 principal=caller.principal,
                 api=api_id,
                 detail=f"{len(entry.operations)} operations ({reads} read, {review} need review)",
-                extra={"spec_url": spec_url},
+                extra={"spec_url": spec_url, "review_url": review_url},
             )
         )
-        return OnboardResult(entry, path, reads, review)
+        return OnboardResult(entry, path, reads, review, review_url, review_error)
 
     # -- credentials ------------------------------------------------------------
 
@@ -303,6 +316,21 @@ def _default_secrets(settings: Settings) -> SecretStore:
         stores.append(FileSecretStore(settings.secrets_dir))
     stores.append(EnvSecretStore())
     return ChainSecretStore(stores)
+
+
+def _default_publisher(settings: Settings) -> Publisher | None:
+    config = settings.publish
+    if config.type != "github":
+        return None
+    if not config.repo or config.token is None:
+        raise ValueError("publish.type=github requires publish.repo and publish.token")
+    return GitHubPublisher(
+        config.repo,
+        config.token.get_secret_value(),
+        base_branch=config.base_branch,
+        directory=config.directory,
+        api_url=config.api_url,
+    )
 
 
 def _default_notifier(settings: Settings) -> Notifier:

@@ -84,6 +84,10 @@ def learn(
             f"{outcome.read_operations} read, {outcome.needs_review} need review "
             f"(auth: {outcome.entry.auth.type})"
         )
+        if outcome.review_url:
+            typer.echo(f"Review: {outcome.review_url}")
+        if outcome.review_error:
+            typer.echo(f"Warning: {outcome.review_error}", err=True)
 
     _run(run())
 

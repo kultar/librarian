@@ -41,6 +41,7 @@ class Registry:
         self._entries: dict[str, ApiEntry] = {}
         self._errors: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        self._fingerprint: tuple[tuple[str, int, int], ...] = ()
 
     @property
     def errors(self) -> dict[str, str]:
@@ -63,7 +64,27 @@ class Registry:
                 entries[entry.id] = entry
         self._entries = entries
         self._errors = errors
+        self._fingerprint = self._current_fingerprint()
         log.info("registry loaded: %d APIs, %d invalid files", len(entries), len(errors))
+
+    def _current_fingerprint(self) -> tuple[tuple[str, int, int], ...]:
+        if not self.directory.exists():
+            return ()
+        stats: list[tuple[str, int, int]] = []
+        for path in sorted(self.directory.glob("*.y*ml")):
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                continue
+            stats.append((path.name, st.st_mtime_ns, st.st_size))
+        return tuple(stats)
+
+    def reload_if_changed(self) -> bool:
+        """Reload when files were added, removed or edited (e.g. by git-sync)."""
+        if self._current_fingerprint() == self._fingerprint:
+            return False
+        self.load()
+        return True
 
     def all(self) -> list[ApiEntry]:
         return sorted(self._entries.values(), key=lambda e: e.id)
@@ -98,6 +119,7 @@ class Registry:
             await asyncio.to_thread(path.write_text, text, "utf-8")
             self._entries[entry.id] = entry
             self._errors.pop(path.name, None)
+            self._fingerprint = self._current_fingerprint()  # our own write is not a change
             return path
 
     async def set_status(self, api_id: str, status: EntryStatus) -> ApiEntry:

@@ -110,3 +110,10 @@ async def test_fetch_spec_checks_redirect_hops() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
         with pytest.raises(SpecError, match="non-public"):
             await fetch_spec("http://93.184.215.14/spec.json", c)
+
+
+def test_validation_operation_is_guessed() -> None:
+    entry = entry_from_spec(SPEC, api_id="jira")
+    assert entry.credential.validation_operation == "get__api_3_myself"
+    no_auth = {k: v for k, v in SPEC.items() if k not in ("components", "security")}
+    assert entry_from_spec(no_auth, api_id="x").credential.validation_operation is None
