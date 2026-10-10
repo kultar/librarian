@@ -7,7 +7,13 @@ port: 8080
 public_url: http://127.0.0.1:8080     # how approvers' browsers reach the secure page
 
 registry_dir: registry
-secrets_dir: .librarian/secrets        # file secret store (0600 files)
+secrets_backend: file                  # file | aws (Secrets Manager; `aws` extra)
+secrets_dir: .librarian/secrets        # file backend: one 0600 file per secret
+aws_secrets:
+  region: null                         # default AWS config chain
+  prefix: ""                           # e.g. "librarian/" → ref jira/readonly = secret librarian/jira/readonly
+  cache_seconds: 60
+database_url: sqlite+aiosqlite:///.librarian/librarian.db   # or postgresql+asyncpg://... (`postgres` extra)
 # audit_file: .librarian/audit.jsonl   # default: JSON lines on stdout
 
 # The `fetch` skill (plain-language requests). Leave unset to run without an LLM.

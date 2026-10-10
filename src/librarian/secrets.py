@@ -8,11 +8,13 @@ placed in messages, logs, LLM context or registry files.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import stat
+import time
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from librarian.registry.models import SECRET_REF
 
@@ -162,3 +164,129 @@ class ChainSecretStore:
     @property
     def writable(self) -> bool:
         return any(store.writable for store in self.stores)
+
+
+class AwsSecretsManagerStore:
+    """AWS Secrets Manager (install the `aws` extra).
+
+    `jira/readonly` maps to the secret named `<prefix>jira/readonly`. A `#key`
+    suffix selects one key of a JSON secret (`service/jira#api_token`), which
+    fits organizations that keep one JSON secret per service. Values are cached
+    briefly to limit API calls; writes invalidate the cache.
+    """
+
+    def __init__(
+        self,
+        prefix: str = "",
+        region: str | None = None,
+        cache_seconds: float = 60,
+        client: Any = None,
+    ) -> None:
+        if client is None:
+            import boto3  # pyright: ignore[reportMissingTypeStubs]
+
+            client = boto3.client("secretsmanager", region_name=region)  # pyright: ignore[reportUnknownMemberType]
+        self.client: Any = client
+        self.prefix = prefix
+        self.cache_seconds = cache_seconds
+        self._cache: dict[str, tuple[float, str | None]] = {}
+
+    def _split(self, ref: str) -> tuple[str, str | None]:
+        _check_ref(ref)
+        name, _, key = ref.partition("#")
+        return self.prefix + name, key or None
+
+    def _fetch(self, secret_id: str) -> str | None:
+        cached = self._cache.get(secret_id)
+        if cached is not None and time.monotonic() - cached[0] < self.cache_seconds:
+            return cached[1]
+        try:
+            response = self.client.get_secret_value(SecretId=secret_id)
+            value: str | None = response.get("SecretString")
+        except Exception as exc:
+            if _aws_code(exc) == "ResourceNotFoundException":
+                value = None
+            else:
+                raise SecretStoreError(
+                    f"cannot read secret {secret_id!r}: {_aws_code(exc)}"
+                ) from exc
+        self._cache[secret_id] = (time.monotonic(), value)
+        return value
+
+    async def get(self, ref: str) -> str | None:
+        secret_id, key = self._split(ref)
+        raw = await asyncio.to_thread(self._fetch, secret_id)
+        if raw is None or key is None:
+            return raw or None
+        try:
+            document: Any = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(document, dict):
+            return None
+        value = cast(dict[str, Any], document).get(key)
+        return str(value) if value not in (None, "") else None
+
+    async def put(self, ref: str, value: str) -> None:
+        secret_id, key = self._split(ref)
+
+        def write() -> None:
+            payload = value
+            if key is not None:
+                current = self._fetch(secret_id)
+                document: dict[str, Any] = {}
+                if current:
+                    try:
+                        loaded: Any = json.loads(current)
+                        if isinstance(loaded, dict):
+                            document = cast(dict[str, Any], loaded)
+                    except ValueError:
+                        pass
+                document[key] = value
+                payload = json.dumps(document)
+            try:
+                self.client.put_secret_value(SecretId=secret_id, SecretString=payload)
+            except Exception as exc:
+                if _aws_code(exc) != "ResourceNotFoundException":
+                    raise SecretStoreError(
+                        f"cannot write secret {secret_id!r}: {_aws_code(exc)}"
+                    ) from exc
+                self.client.create_secret(
+                    Name=secret_id,
+                    SecretString=payload,
+                    Description="Created by librarian",
+                    Tags=[{"Key": "managed-by", "Value": "librarian"}],
+                )
+            self._cache.pop(secret_id, None)
+
+        await asyncio.to_thread(write)
+
+    async def list_names(self) -> list[str]:
+        def scan() -> list[str]:
+            kwargs: dict[str, Any] = {}
+            if self.prefix:
+                kwargs["Filters"] = [{"Key": "name", "Values": [self.prefix]}]
+            names: list[str] = []
+            for page in self.client.get_paginator("list_secrets").paginate(**kwargs):
+                for item in page.get("SecretList", []):
+                    name = str(item.get("Name", ""))
+                    if name.startswith(self.prefix):
+                        ref = name[len(self.prefix) :]
+                        if SECRET_REF.match(ref):
+                            names.append(ref)
+            return sorted(names)
+
+        return await asyncio.to_thread(scan)
+
+    @property
+    def writable(self) -> bool:
+        return True
+
+
+def _aws_code(exc: Exception) -> str:
+    response: Any = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        error: Any = cast(dict[str, Any], response).get("Error", {})
+        if isinstance(error, dict):
+            return str(cast(dict[str, Any], error).get("Code", type(exc).__name__))
+    return type(exc).__name__

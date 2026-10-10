@@ -41,6 +41,12 @@ class ApproverSettings(BaseModel):
     group: str | None = None
 
 
+class AwsSecretsSettings(BaseModel):
+    region: str | None = None  # default: the usual AWS environment/config chain
+    prefix: str = ""  # e.g. "librarian/" → ref jira/readonly = secret librarian/jira/readonly
+    cache_seconds: float = 60
+
+
 class PublishSettings(BaseModel):
     """Where learned entries are proposed for human review."""
 
@@ -80,7 +86,11 @@ class Settings(BaseSettings):
     public_url: str = "http://127.0.0.1:8080"
 
     registry_dir: Path = Path("registry")
+    # Where credentials live: "file" (secrets_dir) or "aws" (Secrets Manager, `aws`
+    # extra). Environment variables (LIBRARIAN_SECRET_*) are always consulted last.
+    secrets_backend: Literal["file", "aws"] = "file"
     secrets_dir: Path | None = Path(".librarian/secrets")
+    aws_secrets: AwsSecretsSettings = Field(default_factory=AwsSecretsSettings)
     audit_file: Path | None = None  # stdout when unset
     state_dir: Path = Path(".librarian")
     # Durable state (credential requests, A2A tasks). SQLite for one instance;

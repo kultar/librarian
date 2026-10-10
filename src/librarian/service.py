@@ -25,7 +25,13 @@ from librarian.policy import PolicyEngine
 from librarian.publish import GitHubPublisher, Publisher, PublishError
 from librarian.registry.models import Access, ApiEntry, EntryStatus
 from librarian.registry.store import Registry
-from librarian.secrets import ChainSecretStore, EnvSecretStore, FileSecretStore, SecretStore
+from librarian.secrets import (
+    AwsSecretsManagerStore,
+    ChainSecretStore,
+    EnvSecretStore,
+    FileSecretStore,
+    SecretStore,
+)
 from librarian.state import StateStore, make_engine
 
 log = logging.getLogger(__name__)
@@ -312,7 +318,14 @@ class Librarian:
 
 def _default_secrets(settings: Settings) -> SecretStore:
     stores: list[SecretStore] = []
-    if settings.secrets_dir is not None:
+    if settings.secrets_backend == "aws":
+        aws = settings.aws_secrets
+        stores.append(
+            AwsSecretsManagerStore(
+                prefix=aws.prefix, region=aws.region, cache_seconds=aws.cache_seconds
+            )
+        )
+    elif settings.secrets_dir is not None:
         stores.append(FileSecretStore(settings.secrets_dir))
     stores.append(EnvSecretStore())
     return ChainSecretStore(stores)

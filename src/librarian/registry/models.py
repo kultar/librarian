@@ -17,7 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 OPERATION_ID = re.compile(r"^[A-Za-z0-9_.\-]{1,128}$")
-SECRET_REF = re.compile(r"^[a-z0-9][a-z0-9_./-]{0,127}$")
+# A secret reference, optionally selecting one key of a JSON secret: `service/jira#api_token`.
+SECRET_REF = re.compile(r"^[a-z0-9][a-z0-9_./-]{0,127}(#[A-Za-z0-9_.-]{1,128})?$")
 # Internal secrets (caller keys, the link-signing key) live under this prefix.
 # API entries may never reference them, so no registry entry can make the
 # librarian send an internal secret to an outside host.

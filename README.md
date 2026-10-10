@@ -94,9 +94,15 @@ model_base_url: http://litellm:4000/v1
 model_api_key: sk-litellm-...       # or LIBRARIAN_MODEL_API_KEY
 ```
 
-**Secrets.** v0.1 ships a file store (one `0600` file per secret, good for local use or a mounted
-Kubernetes volume) and a read-only environment store (`jira/readonly` →
-`LIBRARIAN_SECRET_JIRA_READONLY`). Cloud secret managers are planned plugins.
+**Secrets.** Choose a backend with `secrets_backend`:
+
+- `file` (default): one `0600` file per secret, good locally or on a mounted volume.
+- `aws`: AWS Secrets Manager (`uv sync --extra aws`). `jira/readonly` maps to the secret
+  `<prefix>jira/readonly`; append `#key` to read one key of a JSON secret
+  (`service/jira#api_token`). Values are cached briefly (`aws_secrets.cache_seconds`).
+
+Environment variables are always checked last (`jira/readonly` → `LIBRARIAN_SECRET_JIRA_READONLY`).
+Internal secrets (caller keys, the link-signing key) live under the reserved `librarian/` prefix.
 
 **State.** Credential requests and A2A tasks are stored in SQLite by default
 (`.librarian/librarian.db`), so pending approvals and their links survive restarts. For several
