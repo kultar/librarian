@@ -10,7 +10,8 @@
     uv run python examples/client/ask_librarian.py ask "How many APIs does APIs.guru track?"
 
 Environment: LIBRARIAN_URL (default http://127.0.0.1:8080), LIBRARIAN_KEY (this agent's bearer
-key, if the server requires one), LIBRARIAN_PRINCIPAL (who the agent acts for, optional).
+key, if the server requires one), LIBRARIAN_PRINCIPAL (who the agent acts for, optional),
+LIBRARIAN_PRINCIPAL_TOKEN (a token from your identity provider proving that, optional).
 """
 
 from __future__ import annotations
@@ -54,6 +55,8 @@ async def main() -> None:
     headers = {"A2A-Version": "1.0"}
     if key := os.environ.get("LIBRARIAN_KEY"):
         headers["Authorization"] = f"Bearer {key}"
+    if principal_token := os.environ.get("LIBRARIAN_PRINCIPAL_TOKEN"):
+        headers["X-Principal-Token"] = principal_token  # proves who this agent acts for
 
     async with httpx.AsyncClient(headers=headers, timeout=60) as http:
         if opts.command == "card":

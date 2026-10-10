@@ -40,3 +40,21 @@ kagent `Agent` references a remote A2A agent depends on your kagent version; che
 copying a manifest from elsewhere. Point it at the librarian Service
 (`http://librarian.<namespace>.svc:8080`), give the kagent agent its own caller key, and scope it
 with `apis` / `write_apis` in librarian's `callers` config.
+
+## Verified principals
+
+With `principals.mode: optional` or `required`, an agent proves who it acts for by sending a
+JWT from your identity provider in `X-Principal-Token` (configurable). The token's audience must
+be librarian (`principals.issuers[].audience`); tokens minted for other applications are
+refused, so an agent cannot simply forward a user's token for some other API.
+
+Ways for an agent to get such a token on a user's behalf:
+
+- **OAuth 2.0 Token Exchange (RFC 8693)**: the agent exchanges the user's token for one with
+  audience librarian, where your identity provider supports it.
+- **On-behalf-of flows** offered by your provider (for example Microsoft Entra's OBO flow).
+- **Your own token service** that mints short-lived tokens for librarian after checking the user.
+
+Keep tokens short-lived. librarian accepts only asymmetric signatures (RS*, PS*, ES*, EdDSA),
+fetches the issuer's keys from its OIDC discovery document (or `jwks_url`), caches them for an
+hour, and refreshes on an unknown key id at most every 30 seconds.

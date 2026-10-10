@@ -37,9 +37,10 @@ high-value target. This document lists what we defend against, how, and what is 
   `Idempotency-Key` is forwarded and idempotent retries return the first result.
 - The planner can only *propose* writes; proposals go back to the calling agent.
 - Per-agent `write_apis` allowlists and a separate, lower write rate limit.
-- **Residual risk:** with `writes.approvers: requester`, the requester is the principal the
-  calling agent *asserts* (verified principals are on the roadmap). A compromised agent colluding
-  with an insider could name that insider as principal. Use `group` approval for sensitive APIs.
+- With `principals.mode: optional` or `required`, only a **verified** principal (or the agent's
+  configured owner) counts as the requester. With `principals.mode: off`, the requester is
+  whatever the agent claims: a compromised agent colluding with an insider could name that
+  insider. Turn verification on, or use `group` approval for sensitive APIs.
 - **Residual risk:** a grant allows any request body for its operation. Pin the arguments that
   matter and prefer short expiries.
 - **Defense in depth:** scope credentials (read key read-only; write key only what is needed).
@@ -99,8 +100,12 @@ high-value target. This document lists what we defend against, how, and what is 
 - Per-agent API allowlists (glob patterns) are enforced by the policy engine and also hide
   disallowed APIs from discovery (`capabilities`, planner tools). Onboarding and writes are
   separate per-agent permissions.
-- The `principal` a caller asserts is recorded for audit (and used for requester approval) but
-  is **not verified** yet. Verified delegation (OAuth token exchange) is on the roadmap.
+- Principals can be **verified**: a JWT from a configured issuer, checked for signature (JWKS,
+  asymmetric algorithms only, no `none`, no HMAC so no key-confusion), issuer, audience
+  (librarian) and expiry. The token travels in a header, not in message metadata, so it is not
+  stored with tasks. In `required` mode a claimed principal without a token is refused.
+- **Residual risk:** a token is a bearer credential; an agent holding a user's librarian-audience
+  token can act as that user until it expires. Keep lifetimes short.
 
 ## Out of scope
 

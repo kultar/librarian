@@ -26,6 +26,10 @@ class Caller(BaseModel):
     agent: str = "anonymous"
     authenticated: bool = False
     principal: str | None = None
+    # True when `principal` came from a verified identity-provider token.
+    principal_verified: bool = False
+    # Whether an unverified (merely claimed) principal may act as requester.
+    trust_claimed_principal: bool = True
     # Glob patterns of API ids this caller may use; None = every API.
     apis: tuple[str, ...] | None = None
     can_onboard: bool = True
@@ -38,8 +42,15 @@ class Caller(BaseModel):
     approval_wait_seconds: float | None = None
 
     def requesters(self) -> set[str]:
-        """Humans who count as 'the requester' when approving this caller's writes."""
-        return {who.lower() for who in (self.principal, self.owner) if who}
+        """Humans who count as 'the requester' when approving this caller's writes.
+
+        A claimed principal only counts when it was verified, or when principal
+        verification is off. The agent's configured owner always counts.
+        """
+        people = {self.owner} if self.owner else set[str]()
+        if self.principal and (self.principal_verified or self.trust_claimed_principal):
+            people.add(self.principal)
+        return {who.lower() for who in people}
 
     def may_use(self, api: str) -> bool:
         return self.apis is None or any(fnmatchcase(api, pattern) for pattern in self.apis)
@@ -81,6 +92,7 @@ class Provenance(BaseModel):
     requested_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     caller: str
     principal: str | None = None
+    principal_verified: bool = False
     credential_ref: str | None = None
     pages: int = 1
 

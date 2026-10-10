@@ -48,6 +48,15 @@ callers: []
 #    write_apis: ["jira"]              # may request writes (each needs approval or a grant)
 #    owner: ops@example.com            # stands in as requester for autonomous agents
 
+# Who agents act for: off (claims trusted) | optional | required (proof via a signed token).
+principals:
+  mode: off
+  header: X-Principal-Token
+  issuers: []
+#    - issuer: https://acme.okta.com/oauth2/default
+#      audience: librarian
+#      claim: email
+
 # Writes: who approves, how long approvals stay open, and standing grants.
 writes:
   approvers: requester_or_group        # requester | group | requester_or_group

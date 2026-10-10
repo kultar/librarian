@@ -204,6 +204,7 @@ class Executor:
             url=_redact(url, query, entry),
             caller=caller.agent,
             principal=caller.principal,
+            principal_verified=caller.principal_verified,
             credential_ref=entry.secret_ref,
             pages=page_count,
         )
@@ -327,6 +328,7 @@ class Executor:
                 url=_redact(url, query, entry),
                 caller=caller.agent,
                 principal=caller.principal,
+                principal_verified=caller.principal_verified,
                 credential_ref=ref,
             ),
         )

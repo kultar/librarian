@@ -59,8 +59,10 @@ from starlette.routing import Route
 from librarian import __version__, telemetry
 from librarian.approvals import WriteApproval
 from librarian.calls import Caller, CallRequest, WriteRequest
+from librarian.config import PrincipalSettings
 from librarian.credentials import CredentialRequest
 from librarian.executor import PolicyDenied
+from librarian.principals import Issuer, PrincipalError, PrincipalVerifier
 from librarian.service import CredentialUnavailable, Librarian, LibrarianError, WriteRefused
 from librarian.web import approval_routes, credential_routes
 
@@ -184,8 +186,21 @@ class LibrarianExecutor(AgentExecutor):
 
         caller = _caller_from(context)
         command = _parse_command(context)
-        if command.get("principal") and isinstance(command["principal"], str):
-            caller = caller.model_copy(update={"principal": command["principal"][:200]})
+        claimed = command.get("principal")
+        if isinstance(claimed, str) and claimed and not caller.principal_verified:
+            if self.librarian.settings.principals.mode == "required":
+                await updater.reject(
+                    updater.new_agent_message(
+                        [
+                            new_text_part(
+                                "Refused: this librarian only accepts principals proven with a "
+                                f"token in the {self.librarian.settings.principals.header} header."
+                            )
+                        ]
+                    )
+                )
+                return
+            caller = caller.model_copy(update={"principal": claimed[:200]})
 
         async def on_auth_required(request: CredentialRequest) -> None:
             await updater.requires_auth(
@@ -416,29 +431,52 @@ class CallerContextBuilder(DefaultServerCallContextBuilder):
 
 
 class CallerAuthMiddleware(BaseHTTPMiddleware):
-    """Authenticates calling agents on the A2A endpoint with per-agent bearer keys."""
+    """Authenticates calling agents (per-agent bearer keys) and verifies principal tokens."""
 
-    def __init__(self, app: Any, keys: dict[str, str], profiles: dict[str, Caller]) -> None:
+    def __init__(
+        self,
+        app: Any,
+        keys: dict[str, str],
+        profiles: dict[str, Caller],
+        principals: PrincipalSettings,
+        verifier: PrincipalVerifier | None,
+    ) -> None:
         super().__init__(app)
         self.keys = keys  # agent -> key
         self.profiles = profiles  # agent -> permissions
+        self.principals = principals
+        self.verifier = verifier
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if request.url.path != RPC_PATH or request.method != "POST":
             return await call_next(request)
         if not self.keys:
-            request.scope[CALLER_STATE_KEY] = Caller(agent="anonymous", authenticated=False)
-            return await call_next(request)
-        header = request.headers.get("authorization", "")
-        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-        agent = next(
-            (name for name, key in self.keys.items() if token and hmac.compare_digest(token, key)),
-            None,
+            caller = Caller(agent="anonymous", authenticated=False)
+        else:
+            header = request.headers.get("authorization", "")
+            token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+            agent = next(
+                (n for n, key in self.keys.items() if token and hmac.compare_digest(token, key)),
+                None,
+            )
+            if agent is None:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            caller = self.profiles.get(agent, Caller(agent=agent)).model_copy(
+                update={"authenticated": True}
+            )
+        caller = caller.model_copy(
+            update={"trust_claimed_principal": self.principals.mode == "off"}
         )
-        if agent is None:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        profile = self.profiles.get(agent, Caller(agent=agent))
-        request.scope[CALLER_STATE_KEY] = profile.model_copy(update={"authenticated": True})
+        principal_token = request.headers.get(self.principals.header, "").strip()
+        if principal_token and self.principals.mode != "off":
+            if self.verifier is None:
+                return JSONResponse({"error": "no principal token issuers configured"}, 401)
+            try:
+                subject = await self.verifier.verify(principal_token)
+            except PrincipalError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=401)
+            caller = caller.model_copy(update={"principal": subject, "principal_verified": True})
+        request.scope[CALLER_STATE_KEY] = caller
         return await call_next(request)
 
 
@@ -549,7 +587,32 @@ def create_app(
     }
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.caller_keys = {}
-    app.add_middleware(CallerAuthMiddleware, keys=app.state.caller_keys, profiles=profiles)
+    principals = librarian.settings.principals
+    verifier = (
+        PrincipalVerifier(
+            [
+                Issuer(
+                    issuer=i.issuer,
+                    audience=i.audience,
+                    jwks_url=i.jwks_url,
+                    claim=i.claim,
+                    algorithms=tuple(i.algorithms),
+                    leeway_seconds=i.leeway_seconds,
+                )
+                for i in principals.issuers
+            ]
+        )
+        if principals.issuers
+        else None
+    )
+    app.state.principal_verifier = verifier
+    app.add_middleware(
+        CallerAuthMiddleware,
+        keys=app.state.caller_keys,
+        profiles=profiles,
+        principals=principals,
+        verifier=verifier,
+    )
     return app
 
 

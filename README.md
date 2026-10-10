@@ -16,7 +16,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.4)**. Expect breaking changes.
+> Status: **alpha (v0.5)**. Expect breaking changes.
 
 ## Why
 
@@ -149,6 +149,31 @@ Set `otel_enabled: true` (install the `otel` extra; the Docker image has it) and
 
 The JSONL audit log is separate and always on.
 
+## Verified principals
+
+By default the person an agent acts for (`principal`) is whatever the agent claims. Turn on
+verification to require proof: the agent sends a token from your identity provider in the
+`X-Principal-Token` header, and librarian checks its signature (issuer's published keys), issuer,
+audience and expiry.
+
+```yaml
+principals:
+  mode: required          # off | optional | required
+  issuers:
+    - issuer: https://acme.okta.com/oauth2/default
+      audience: librarian  # tokens must be minted for librarian
+      claim: email
+```
+
+- `optional`: verified when a token is present; a claimed principal without one is recorded
+  but does **not** count as the requester for write approvals.
+- `required`: a claimed principal without a valid token is refused. Requests with no person
+  behind them (autonomous agents) still work.
+
+Verified identities appear in provenance (`principal_verified: true`) and the audit log. How an
+agent gets a token for librarian on a user's behalf is covered in
+[docs/integrations.md](docs/integrations.md#verified-principals).
+
 ## Slack notifications
 
 1. Create a Slack app from [`deploy/slack-app-manifest.yaml`](deploy/slack-app-manifest.yaml) and
@@ -261,8 +286,8 @@ uv run pytest
   autonomous agents); agent owners; planner write proposals; grants/approvals CLI
 - **v0.4** ✅: Helm chart (oauth2-proxy sign-in, git-sync registry, hardened pod), separate
   pages listener, registry overlay, release workflow (GHCR, PyPI), example client, LiteLLM compose
-- **v0.5**: verified principals: signed tokens from your identity provider instead of asserted
-  names, making requester approval safe
+- **v0.5** ✅: verified principals (signed tokens from your identity provider; optional and
+  required modes); claimed principals no longer count as requesters once verification is on
 - **v0.6**: better at big APIs: operation search for 500+ operation APIs, saved **recipes**
   (successful plans replayed without the LLM), learning instance details (e.g. Jira custom fields)
 - **Later**: Vault/GCP/Azure secret stores; per-user OAuth; per-API approver routing in Slack;

@@ -59,6 +59,29 @@ class PublishSettings(BaseModel):
     api_url: str = "https://api.github.com"
 
 
+class IssuerSettings(BaseModel):
+    issuer: str  # e.g. https://acme.okta.com/oauth2/default
+    audience: str  # the audience tokens must be minted for (librarian)
+    jwks_url: str | None = None  # default: from the issuer's OIDC discovery document
+    claim: str = "email"  # claim that names the person
+    algorithms: list[str] = Field(default_factory=lambda: ["RS256", "ES256"])
+    leeway_seconds: int = 30
+
+
+class PrincipalSettings(BaseModel):
+    """Who agents act for.
+
+    - off:      the agent's claimed `principal` is recorded (and trusted for approvals)
+    - optional: a token in `header` is verified when present; a claimed principal
+                without one is recorded but not trusted for approvals
+    - required: a claimed principal without a valid token is refused
+    """
+
+    mode: Literal["off", "optional", "required"] = "off"
+    header: str = "X-Principal-Token"
+    issuers: list[IssuerSettings] = Field(default_factory=list[IssuerSettings])
+
+
 class GrantSettings(BaseModel):
     """A standing grant declared by the operator (typically for autonomous agents)."""
 
@@ -199,6 +222,7 @@ class Settings(BaseSettings):
     notifier: NotifierSettings = Field(default_factory=NotifierSettings)
     publish: PublishSettings = Field(default_factory=PublishSettings)
     writes: WriteSettings = Field(default_factory=WriteSettings)
+    principals: PrincipalSettings = Field(default_factory=PrincipalSettings)
     approvers: ApproverSettings = Field(default_factory=ApproverSettings)
 
     @classmethod
