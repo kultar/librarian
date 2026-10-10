@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +33,19 @@ class SearchHit:
 class Registry:
     """Loads, searches and saves API entries.
 
+    `directory` is the reviewed registry (often a git checkout kept current by
+    git-sync). `overlay`, if set, is where the librarian writes its own changes
+    (learned entries, blocks, write enablement) so they survive git-sync replacing
+    the checkout. For each API the entry with the newest `updated_at` wins; on a tie
+    the reviewed one wins, so a reviewer's merge takes effect.
+
     Invalid files are logged and skipped rather than crashing the server, so one
     bad community entry cannot take the librarian down.
     """
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, overlay: Path | None = None) -> None:
         self.directory = directory
+        self.overlay = overlay
         self._entries: dict[str, ApiEntry] = {}
         self._errors: dict[str, str] = {}
         self._lock = asyncio.Lock()
@@ -47,36 +55,52 @@ class Registry:
     def errors(self) -> dict[str, str]:
         return dict(self._errors)
 
-    def load(self) -> None:
+    @property
+    def _directories(self) -> list[Path]:
+        return [self.directory] if self.overlay is None else [self.directory, self.overlay]
+
+    def _load_dir(self, directory: Path, errors: dict[str, str], label: str) -> dict[str, ApiEntry]:
         entries: dict[str, ApiEntry] = {}
+        if not directory.exists():
+            return entries
+        for path in sorted(directory.glob("*.y*ml")):
+            name = f"{label}{path.name}"
+            try:
+                entry = load_entry(path)
+            except (RegistryError, ValidationError, yaml.YAMLError) as exc:
+                errors[name] = str(exc)
+                log.warning("skipping invalid registry file %s: %s", name, exc)
+                continue
+            if entry.id in entries:
+                errors[name] = f"duplicate API id {entry.id!r}"
+                continue
+            entries[entry.id] = entry
+        return entries
+
+    def load(self) -> None:
         errors: dict[str, str] = {}
-        if self.directory.exists():
-            for path in sorted(self.directory.glob("*.y*ml")):
-                try:
-                    entry = load_entry(path)
-                except (RegistryError, ValidationError, yaml.YAMLError) as exc:
-                    errors[path.name] = str(exc)
-                    log.warning("skipping invalid registry file %s: %s", path.name, exc)
-                    continue
-                if entry.id in entries:
-                    errors[path.name] = f"duplicate API id {entry.id!r}"
-                    continue
-                entries[entry.id] = entry
+        entries = self._load_dir(self.directory, errors, "")
+        if self.overlay is not None:
+            for api_id, local in self._load_dir(self.overlay, errors, "overlay/").items():
+                reviewed = entries.get(api_id)
+                if reviewed is None or local.updated_at > reviewed.updated_at:
+                    entries[api_id] = local
         self._entries = entries
         self._errors = errors
         self._fingerprint = self._current_fingerprint()
         log.info("registry loaded: %d APIs, %d invalid files", len(entries), len(errors))
 
     def _current_fingerprint(self) -> tuple[tuple[str, int, int], ...]:
-        if not self.directory.exists():
-            return ()
         stats: list[tuple[str, int, int]] = []
-        for path in sorted(self.directory.glob("*.y*ml")):
-            try:
-                st = path.stat()
-            except FileNotFoundError:
+        for directory in self._directories:
+            if not directory.exists():
                 continue
-            stats.append((path.name, st.st_mtime_ns, st.st_size))
+            for path in sorted(directory.glob("*.y*ml")):
+                try:
+                    st = path.stat()
+                except FileNotFoundError:
+                    continue
+                stats.append((str(path), st.st_mtime_ns, st.st_size))
         return tuple(stats)
 
     def reload_if_changed(self) -> bool:
@@ -112,9 +136,12 @@ class Registry:
         return hits[:limit]
 
     async def save(self, entry: ApiEntry) -> Path:
+        """Write an entry (to the overlay when configured), stamping `updated_at`."""
         async with self._lock:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            path = self.directory / f"{entry.id}.yaml"
+            target = self.overlay or self.directory
+            target.mkdir(parents=True, exist_ok=True)
+            entry = entry.model_copy(update={"updated_at": datetime.now(UTC)})
+            path = target / f"{entry.id}.yaml"
             text = dump_entry(entry)
             await asyncio.to_thread(path.write_text, text, "utf-8")
             self._entries[entry.id] = entry

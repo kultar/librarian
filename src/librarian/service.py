@@ -96,7 +96,7 @@ class Librarian:
         publisher: Publisher | None = None,
     ) -> None:
         self.settings = settings
-        self.registry = registry or Registry(settings.registry_dir)
+        self.registry = registry or Registry(settings.registry_dir, settings.registry_overlay_dir)
         self.secrets = secrets_store or _default_secrets(settings)
         self.audit = audit or JsonlAuditSink(settings.audit_file)
         self.http = http_client or httpx.AsyncClient(

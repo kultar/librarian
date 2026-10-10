@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     pages_port: int | None = None
 
     registry_dir: Path = Path("registry")
+    # Where the librarian writes its own registry changes when registry_dir is
+    # managed elsewhere (e.g. a git-sync checkout). None = write into registry_dir.
+    registry_overlay_dir: Path | None = None
     # Where credentials live: "file" (secrets_dir) or "aws" (Secrets Manager, `aws`
     # extra). Environment variables (LIBRARIAN_SECRET_*) are always consulted last.
     secrets_backend: Literal["file", "aws"] = "file"

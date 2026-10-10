@@ -99,7 +99,10 @@ async def test_save_roundtrip(tmp_path: Path) -> None:
     await registry.save(api)
     reloaded = Registry(tmp_path)
     reloaded.load()
-    assert reloaded.get("tracker") == api
+    loaded = reloaded.get("tracker")
+    assert loaded is not None
+    assert loaded.model_dump(exclude={"updated_at"}) == api.model_dump(exclude={"updated_at"})
+    assert loaded.updated_at >= api.updated_at  # save stamps the time
 
 
 async def test_registry_reloads_only_on_change(tmp_path: Path) -> None:
@@ -118,3 +121,34 @@ async def test_registry_reloads_only_on_change(tmp_path: Path) -> None:
     os.utime(tmp_path)
     assert registry.reload_if_changed()
     assert registry.get("wiki") is None
+
+
+async def test_overlay_keeps_local_changes_and_lets_reviews_win(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    reviewed_dir, overlay_dir = tmp_path / "git", tmp_path / "overlay"
+    old = datetime.now(UTC) - timedelta(days=1)
+    write_entries(reviewed_dir, {**TRACKER, "updated_at": old.isoformat()})
+    registry = Registry(reviewed_dir, overlay_dir)
+    registry.load()
+
+    # The librarian's own change (a block after a denial) goes to the overlay and wins.
+    from librarian.registry import EntryStatus
+
+    await registry.set_status("tracker", EntryStatus.BLOCKED)
+    assert not (reviewed_dir / "tracker.yaml").read_text().count("blocked")
+    registry.load()
+    assert registry.get("tracker").status is EntryStatus.BLOCKED  # type: ignore[union-attr]
+
+    # A learned API lives only in the overlay.
+    await registry.save(
+        ApiEntry.model_validate({**TRACKER, "id": "learned", "status": "provisional"})
+    )
+    assert (overlay_dir / "learned.yaml").exists()
+
+    # A reviewer merges a newer version in git: the reviewed entry now wins.
+    newer = datetime.now(UTC) + timedelta(minutes=1)
+    write_entries(reviewed_dir, {**TRACKER, "status": "verified", "updated_at": newer.isoformat()})
+    assert registry.reload_if_changed()
+    assert registry.get("tracker").status is EntryStatus.VERIFIED  # type: ignore[union-attr]
+    assert registry.get("learned") is not None

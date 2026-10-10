@@ -1,0 +1,127 @@
+# Default values for librarian.
+
+image:
+  repository: ghcr.io/kultar/librarian
+  tag: ""                # defaults to the chart appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# More than one replica requires Postgres (config.database_url) and a secret store
+# shared by all replicas (config.secrets_backend: aws, or a ReadWriteMany volume).
+replicaCount: 1
+
+# URL where approvers' browsers reach the approval pages (used in Slack links), e.g.
+# https://librarian.example.com. Usually the host of `ingress.pages`.
+publicUrl: ""
+
+# librarian configuration (see examples/librarian.yaml). Listener settings, paths and the
+# approver header names are managed by the chart; everything else is yours.
+# Put secrets (Slack token, model key, GitHub token) in `envFrom`, not here.
+config:
+  notifier:
+    type: log
+  writes:
+    approvers: requester_or_group
+  callers: []
+
+# Extra environment, e.g. secrets as LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN,
+# LIBRARIAN_MODEL_API_KEY, LIBRARIAN_PUBLISH__TOKEN, or caller keys as
+# LIBRARIAN_SECRET_LIBRARIAN_CALLERS_<AGENT>.
+env: []
+envFrom: []
+#  - secretRef:
+#      name: librarian-secrets
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}          # e.g. eks.amazonaws.com/role-arn for Secrets Manager (IRSA)
+
+# /data holds the SQLite database, file secrets and (without git-sync) the registry.
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+  existingClaim: ""
+
+registry:
+  # Keep the registry in a git repo you review by pull request; git-sync pulls merged
+  # changes and librarian hot-reloads them.
+  gitSync:
+    enabled: false
+    image: registry.k8s.io/git-sync/git-sync:v4.4.0
+    repo: ""               # https://github.com/acme/api-registry.git
+    ref: main
+    path: registry         # directory inside the repo that holds <id>.yaml files
+    period: 60s
+    # Secret with git credentials (keys per git-sync docs, e.g. GITSYNC_USERNAME and
+    # GITSYNC_PASSWORD for HTTPS) for private repos.
+    credentialsSecret: ""
+    resources: {}
+
+# Sign-in for approvers. Runs oauth2-proxy as a sidecar in front of the approval pages
+# and switches librarian to approvers.mode=trusted_header. Agents keep using the A2A
+# port directly and never pass through the proxy.
+oauth2Proxy:
+  enabled: false
+  image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+  # Secret with OAUTH2_PROXY_CLIENT_ID, OAUTH2_PROXY_CLIENT_SECRET, OAUTH2_PROXY_COOKIE_SECRET
+  existingSecret: ""
+  provider: oidc
+  oidcIssuerUrl: ""        # e.g. https://acme.okta.com
+  emailDomains: ["*"]
+  # Group (as sent by your identity provider) whose members may approve credential
+  # requests and, depending on writes.approvers, writes.
+  approverGroup: ""
+  extraArgs: []
+  resources: {}
+
+service:
+  type: ClusterIP
+  a2aPort: 8080
+  pagesPort: 8081
+
+ingress:
+  # For agents outside the cluster. In-cluster agents use the Service directly.
+  a2a:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: ""
+    tls: []
+  # For approvers' browsers (route this through your SSO: enable oauth2Proxy).
+  pages:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: ""
+    tls: []
+
+otel:
+  enabled: false
+  endpoint: ""             # e.g. http://otel-collector.observability:4318
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+nodeSelector: {}
+tolerations: []
+affinity: {}
