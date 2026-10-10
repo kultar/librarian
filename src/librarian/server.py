@@ -64,6 +64,7 @@ from librarian.credentials import CredentialRequest
 from librarian.executor import PolicyDenied
 from librarian.principals import Issuer, PrincipalError, PrincipalVerifier
 from librarian.service import CredentialUnavailable, Librarian, LibrarianError, WriteRefused
+from librarian.state import retry_already_exists
 from librarian.web import approval_routes, credential_routes
 
 log = logging.getLogger(__name__)
@@ -564,6 +565,10 @@ def create_app(
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncGenerator[None]:
         await librarian.start()
+        if isinstance(task_store, DatabaseTaskStore):
+            # Create the task table now (with the same race tolerance as our own
+            # tables) rather than lazily on each replica's first request.
+            await retry_already_exists(task_store.initialize)
         keys = caller_keys if caller_keys is not None else await _caller_keys(librarian)
         app.state.caller_keys.update(keys)
         sweeper = asyncio.create_task(_sweep_forever(librarian))

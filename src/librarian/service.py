@@ -201,7 +201,8 @@ class Librarian:
             return stored.encode()
         key = pysecrets.token_hex(32)
         if self.secrets.writable:
-            await self.secrets.put(ref, key)
+            # Replicas starting together must agree on one key: first writer wins.
+            key = await self.secrets.put_if_absent(ref, key)
         else:
             log.warning(
                 "no signing key at %r and the secret store is read-only: approval links "

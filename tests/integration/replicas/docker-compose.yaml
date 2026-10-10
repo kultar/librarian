@@ -1,0 +1,56 @@
+# Two librarian replicas sharing Postgres, AWS Secrets Manager (LocalStack) and a registry
+# overlay, in front of a go-httpbin test API.   See tests/integration/README.md.
+x-librarian: &librarian
+  image: librarian:integration
+  command: [serve, --config, /config/config.yaml]
+  environment: &env
+    AWS_ENDPOINT_URL: http://localstack:4566
+    AWS_ACCESS_KEY_ID: test
+    AWS_SECRET_ACCESS_KEY: test
+    AWS_DEFAULT_REGION: us-east-1
+    LIBRARIAN_AUDIT_FILE: /tmp/audit.jsonl
+  volumes:
+    - ./config.yaml:/config/config.yaml:ro
+    - ../registry:/registry:ro
+    - overlay:/data/registry
+  depends_on:
+    postgres: {condition: service_healthy}
+    localstack: {condition: service_healthy}
+    httpbin: {condition: service_started}
+
+services:
+  librarian-a:
+    <<: *librarian
+    build: ../../..          # builds librarian:integration; replica B reuses it
+    ports: ["18101:8080"]
+    environment: {<<: *env, LIBRARIAN_PUBLIC_URL: "http://localhost:18101"}
+  librarian-b:
+    <<: *librarian
+    depends_on:
+      librarian-a: {condition: service_started}
+      postgres: {condition: service_healthy}
+      localstack: {condition: service_healthy}
+    ports: ["18102:8080"]
+    environment: {<<: *env, LIBRARIAN_PUBLIC_URL: "http://localhost:18102"}
+  postgres:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: lib, POSTGRES_PASSWORD: lib, POSTGRES_DB: lib}
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U lib]
+      interval: 2s
+      retries: 30
+  localstack:
+    image: localstack/localstack:4
+    ports: ["14566:4566"]
+    environment: {SERVICES: secretsmanager}
+    volumes:
+      - ./localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
+    healthcheck:
+      test: [CMD, awslocal, secretsmanager, describe-secret, --secret-id, lib/service/echo]
+      interval: 3s
+      retries: 40
+  httpbin:
+    image: mccutchen/go-httpbin:latest
+
+volumes:
+  overlay:

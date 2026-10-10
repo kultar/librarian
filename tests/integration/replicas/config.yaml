@@ -1,0 +1,14 @@
+host: 0.0.0.0
+port: 8080
+registry_dir: /registry
+registry_overlay_dir: /data/registry   # shared by both replicas (like a ReadWriteMany volume)
+database_url: postgresql+asyncpg://lib:lib@postgres:5432/lib
+secrets_backend: aws
+aws_secrets: {prefix: "lib/", cache_seconds: 1}
+callers:
+  - agent: agent-a
+    key_ref: librarian/callers/agent-a
+    write_apis: [echo]
+    owner: ops@example.com
+writes: {approvers: requester_or_group}
+approvers: {mode: token}

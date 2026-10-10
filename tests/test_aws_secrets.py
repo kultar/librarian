@@ -99,3 +99,17 @@ async def test_access_denied_is_an_error_not_a_missing_secret() -> None:
     store = AwsSecretsManagerStore(client=fake)
     with pytest.raises(SecretStoreError, match="AccessDenied"):
         await store.get("jira/readonly")
+
+
+async def test_put_if_absent_first_writer_wins() -> None:
+    fake = FakeSecretsManager()
+
+    def create_secret(Name: str, SecretString: str, **kwargs: Any) -> None:
+        if Name in fake.secrets:
+            raise ClientError({"Error": {"Code": "ResourceExistsException"}}, "CreateSecret")
+        fake.secrets[Name] = SecretString
+
+    fake.create_secret = create_secret  # type: ignore[method-assign]
+    store = AwsSecretsManagerStore(client=fake, cache_seconds=0)
+    assert await store.put_if_absent("librarian/signing-key", "first") == "first"
+    assert await store.put_if_absent("librarian/signing-key", "second") == "first"

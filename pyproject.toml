@@ -83,6 +83,7 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "RUF", "SIM", "PTH"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "ASYNC110"]
+"tests/integration/**" = ["S101", "S105", "S106", "S603", "S607"]  # drives docker compose
 
 [tool.pyright]
 include = ["src", "tests"]

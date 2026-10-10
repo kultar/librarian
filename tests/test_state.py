@@ -119,3 +119,18 @@ async def test_approvers_cannot_pick_internal_secrets(librarian: Librarian) -> N
     error = await librarian.broker.use_existing(request.id, "librarian/callers/agent-a", "sam")
     assert error is not None
     assert librarian.registry.get("tracker").secret_ref == "tracker/readonly"  # type: ignore[union-attr]
+
+
+async def test_replicas_starting_together_share_one_signing_key(
+    tmp_path: Path, router: Router
+) -> None:
+    a, b = replica(tmp_path, router), replica(tmp_path, router)
+    await asyncio.gather(a.start(), b.start())
+    entry = a.registry.get("tracker")
+    assert entry is not None
+    request = await a.broker.open(entry, A, "missing")
+    loaded = await b.broker.load(request.id)
+    assert loaded is not None
+    assert b.broker.link(loaded) == a.broker.link(request)
+    await a.aclose()
+    await b.aclose()

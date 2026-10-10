@@ -37,6 +37,13 @@ class SecretStore(Protocol):
         """List secret references (names only, never values)."""
         ...
 
+    async def put_if_absent(self, ref: str, value: str) -> str:
+        """Store `value` unless the secret exists; return whichever value won.
+
+        Atomic where the backend allows, so replicas starting together agree.
+        """
+        ...
+
     @property
     def writable(self) -> bool: ...
 
@@ -65,6 +72,12 @@ class EnvSecretStore:
 
     async def put(self, ref: str, value: str) -> None:
         raise SecretStoreError("the environment secret store is read-only")
+
+    async def put_if_absent(self, ref: str, value: str) -> str:
+        existing = await self.get(ref)
+        if existing is None:
+            raise SecretStoreError("the environment secret store is read-only")
+        return existing
 
     async def list_names(self) -> list[str]:
         names = [
@@ -117,6 +130,23 @@ class FileSecretStore:
 
         await asyncio.to_thread(write)
 
+    async def put_if_absent(self, ref: str, value: str) -> str:
+        path = self._path(ref)
+
+        def create() -> str:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                fd = os.open(
+                    path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR
+                )
+            except FileExistsError:
+                return path.read_text("utf-8").strip()
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(value)
+            return value
+
+        return await asyncio.to_thread(create)
+
     async def list_names(self) -> list[str]:
         def scan() -> list[str]:
             if not self.directory.exists():
@@ -153,6 +183,15 @@ class ChainSecretStore:
             if store.writable:
                 await store.put(ref, value)
                 return
+        raise SecretStoreError("no writable secret store is configured")
+
+    async def put_if_absent(self, ref: str, value: str) -> str:
+        existing = await self.get(ref)
+        if existing is not None:
+            return existing
+        for store in self.stores:
+            if store.writable:
+                return await store.put_if_absent(ref, value)
         raise SecretStoreError("no writable secret store is configured")
 
     async def list_names(self) -> list[str]:
@@ -260,6 +299,38 @@ class AwsSecretsManagerStore:
             self._cache.pop(secret_id, None)
 
         await asyncio.to_thread(write)
+
+    async def put_if_absent(self, ref: str, value: str) -> str:
+        secret_id, key = self._split(ref)
+        if key is not None:  # one key of a JSON secret: no atomic primitive
+            existing = await self.get(ref)
+            if existing is None:
+                await self.put(ref, value)
+                return value
+            return existing
+
+        def create() -> str:
+            try:
+                self.client.create_secret(
+                    Name=secret_id,
+                    SecretString=value,
+                    Description="Created by librarian",
+                    Tags=[{"Key": "managed-by", "Value": "librarian"}],
+                )
+            except Exception as exc:
+                if _aws_code(exc) != "ResourceExistsException":
+                    raise SecretStoreError(
+                        f"cannot create secret {secret_id!r}: {_aws_code(exc)}"
+                    ) from exc
+                self._cache.pop(secret_id, None)
+                existing = self._fetch(secret_id)
+                if existing is None:
+                    raise SecretStoreError(f"secret {secret_id!r} exists but is empty") from exc
+                return existing
+            self._cache[secret_id] = (time.monotonic(), value)
+            return value
+
+        return await asyncio.to_thread(create)
 
     async def list_names(self) -> list[str]:
         def scan() -> list[str]:

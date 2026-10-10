@@ -7,9 +7,12 @@ Postgres (several replicas). A2A tasks are stored by the SDK's own
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import Column, DateTime, MetaData, String, Table, Text, delete, insert, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from librarian.credentials import CredentialRequest, RequestState
@@ -49,13 +52,33 @@ def make_engine(url: str) -> AsyncEngine:
     return create_async_engine(url)
 
 
+async def retry_already_exists(setup: Callable[[], Awaitable[None]]) -> None:
+    """Run a schema setup step, tolerating another replica doing it at the same moment.
+
+    `create_all` checks before creating, so two replicas starting together can both
+    decide to create a table; the loser gets "already exists". Retrying succeeds
+    because the check then sees the table.
+    """
+    for attempt in range(5):
+        try:
+            await setup()
+            return
+        except DBAPIError as exc:
+            if "already exists" not in str(exc).lower() or attempt == 4:
+                raise
+            await asyncio.sleep(0.2 * (attempt + 1))
+
+
 class StateStore:
     def __init__(self, engine: AsyncEngine) -> None:
         self.engine = engine
 
     async def initialize(self) -> None:
-        async with self.engine.begin() as conn:
-            await conn.run_sync(metadata.create_all)
+        async def create() -> None:
+            async with self.engine.begin() as conn:
+                await conn.run_sync(metadata.create_all)
+
+        await retry_already_exists(create)
 
     async def save_request(self, request: CredentialRequest) -> None:
         row = {
