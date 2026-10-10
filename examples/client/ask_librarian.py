@@ -29,8 +29,11 @@ from a2a.types import AgentCard, GetTaskRequest, Message, Role, SendMessageReque
 from google.protobuf.json_format import ParseDict
 from google.protobuf.struct_pb2 import Struct
 
-WAITING = {TaskState.TASK_STATE_AUTH_REQUIRED, TaskState.TASK_STATE_WORKING,
-           TaskState.TASK_STATE_SUBMITTED}
+WAITING = {
+    TaskState.TASK_STATE_AUTH_REQUIRED,
+    TaskState.TASK_STATE_WORKING,
+    TaskState.TASK_STATE_SUBMITTED,
+}
 
 
 def parse_args(pairs: list[str]) -> dict[str, str]:
@@ -65,8 +68,12 @@ async def main() -> None:
             command = {"skill": "fetch", "intent": " ".join(opts.rest)}
         else:
             api, operation, *pairs = opts.rest
-            command = {"skill": opts.command, "api": api, "operation": operation,
-                       "args": parse_args(pairs)}
+            command = {
+                "skill": opts.command,
+                "api": api,
+                "operation": operation,
+                "args": parse_args(pairs),
+            }
             if opts.select:
                 command["select"] = opts.select
             if opts.body:
@@ -87,8 +94,9 @@ async def main() -> None:
             card, client_config=ClientConfig(httpx_client=http, streaming=False)
         )
         request = SendMessageRequest(
-            message=Message(role=Role.ROLE_USER, message_id=uuid.uuid4().hex,
-                            parts=[new_data_part(command)])
+            message=Message(
+                role=Role.ROLE_USER, message_id=uuid.uuid4().hex, parts=[new_data_part(command)]
+            )
         )
         if principal := os.environ.get("LIBRARIAN_PRINCIPAL"):
             request.metadata.CopyFrom(ParseDict({"principal": principal}, Struct()))
@@ -114,8 +122,9 @@ async def main() -> None:
         if results:
             print(json.dumps(results[-1], indent=2))
         else:
-            message = get_message_text(task.status.message) if task.status.HasField(
-                "message") else ""
+            message = (
+                get_message_text(task.status.message) if task.status.HasField("message") else ""
+            )
             print(f"{state}: {message}")
 
 
