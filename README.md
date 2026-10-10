@@ -108,8 +108,12 @@ approval handled by any replica wakes the task waiting on another. Rate limits a
 ```yaml
 callers:
   - agent: release-notes-agent
-    key_ref: librarian/callers/release-notes-agent
+    key_ref: librarian/callers/release-notes-agent   # internal secrets live under librarian/
+    apis: ["jira", "github-*"]                       # glob patterns; default ["*"]
+    can_onboard: false                               # may this agent teach new APIs?
 ```
+
+An agent only sees and uses the APIs its patterns allow, in `capabilities`, `execute` and `fetch`.
 
 With no callers configured the server is open: fine on a laptop, never in a shared deployment.
 

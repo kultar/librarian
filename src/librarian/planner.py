@@ -79,7 +79,10 @@ def build_agent(model: Model | str) -> Agent[PlannerDeps, FetchAnswer]:
     @agent.tool
     def search_apis(ctx: RunContext[PlannerDeps], query: str) -> list[dict[str, Any]]:
         """Find registered APIs relevant to a request. Returns ids, names and descriptions."""
-        hits = ctx.deps.registry.search(query, limit=5)
+        caller = ctx.deps.caller
+        hits = [h for h in ctx.deps.registry.search(query, limit=10) if caller.may_use(h.entry.id)][
+            :5
+        ]
         # With no keyword match, fall back to listing everything usable.
         return [
             {
@@ -92,7 +95,7 @@ def build_agent(model: Model | str) -> Agent[PlannerDeps, FetchAnswer]:
         ] or [
             {"api": e.id, "name": e.name, "description": e.description[:200]}
             for e in ctx.deps.registry.all()
-            if e.status is not EntryStatus.BLOCKED
+            if e.status is not EntryStatus.BLOCKED and caller.may_use(e.id)
         ][:20]
 
     @agent.tool
@@ -101,7 +104,7 @@ def build_agent(model: Model | str) -> Agent[PlannerDeps, FetchAnswer]:
     ) -> dict[str, Any]:
         """List an API's read operations (optionally filtered by keywords) with parameters."""
         entry = ctx.deps.registry.get(api)
-        if entry is None:
+        if entry is None or not ctx.deps.caller.may_use(api):
             raise ModelRetry(f"unknown API {api!r}; use search_apis first")
         words = {w for w in filter_text.lower().split() if w}
         ops: list[dict[str, Any]] = []

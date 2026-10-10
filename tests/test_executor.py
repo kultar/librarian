@@ -161,3 +161,16 @@ async def test_provisional_entries_cannot_reach_private_addresses(
     with pytest.raises(PolicyDenied, match="non-public"):
         await librarian.executor.execute(CallRequest(api="status", operation="summary"), CALLER)
     assert router.requests == []
+
+
+async def test_403_is_reported_not_treated_as_bad_key(
+    librarian: Librarian, router: Router, audit: MemoryAuditSink
+) -> None:
+    router.add("GET", f"{BASE}/v1/issues/SECRET-1", lambda r: httpx.Response(403, json={}))
+    result = await librarian.executor.execute(
+        CallRequest(api="tracker", operation="getIssue", args={"key": "SECRET-1"}), CALLER
+    )
+    assert not result.ok and result.status_code == 403
+    assert result.error is not None and "lacks permission" in result.error
+    assert librarian.broker.pending_for("tracker") is None  # nobody was paged
+    assert audit.events[-1].detail == "permission denied by the API"

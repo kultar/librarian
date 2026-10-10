@@ -31,6 +31,8 @@ credential_wait_seconds: 900           # how long a task waits for an approver
 callers: []
 #  - agent: release-notes-agent
 #    key_ref: librarian/callers/release-notes-agent
+#    apis: ["jira", "github-*"]        # glob patterns; default ["*"]
+#    can_onboard: false
 
 notifier:
   type: log                            # log | slack | webhook

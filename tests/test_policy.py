@@ -113,3 +113,13 @@ def test_rate_limiter_window() -> None:
     assert not limiter.allow("a", "api", now=2)
     assert limiter.allow("b", "api", now=2)  # separate bucket per caller
     assert limiter.allow("a", "api", now=61)
+
+
+def test_caller_allowlist_globs(engine: PolicyEngine) -> None:
+    restricted = Caller(agent="notes-bot", apis=("status", "track*"))
+    assert engine.check(req(), restricted).allowed
+    other = Caller(agent="hr-bot", apis=("weather",))
+    decision = engine.check(req(), other)
+    assert not decision.allowed
+    assert "not allowed to use API 'tracker'" in decision.reason
+    assert not engine.check(req(), Caller(agent="nobody", apis=())).allowed

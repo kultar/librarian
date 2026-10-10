@@ -224,3 +224,39 @@ def test_json_safe_preserves_large_integers() -> None:
         "flag": True,
         "items": [str(2**60), "x"],
     }
+
+
+async def test_caller_profiles_limit_capabilities_and_onboarding(librarian: Librarian) -> None:
+    from librarian.config import CallerKey
+
+    librarian.settings.callers = [
+        CallerKey(
+            agent="agent-a",
+            key_ref="librarian/callers/agent-a",
+            apis=["weather"],
+            can_onboard=False,
+        )
+    ]
+    app = create_app(librarian, caller_keys=KEYS)
+    app.state.caller_keys.update(KEYS)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url=librarian.settings.public_url,
+        headers={"Authorization": "Bearer key-a"},
+    ) as http:
+        caps = await send(librarian, http, [new_data_part({"skill": "capabilities"})])
+        assert [a["api"] for a in caps.data[-1]["apis"]] == ["weather"]
+        denied = await send(
+            librarian,
+            http,
+            [new_data_part({"skill": "execute", "api": "tracker", "operation": "whoami"})],
+        )
+        assert denied.final == TaskState.TASK_STATE_REJECTED
+        assert any("not allowed to use API" in t for t in denied.texts)
+        onboard = await send(
+            librarian,
+            http,
+            [new_data_part({"skill": "onboard", "api": "x", "base_url": "https://x.example"})],
+        )
+        assert onboard.final == TaskState.TASK_STATE_FAILED
+        assert any("not allowed to onboard" in t for t in onboard.texts)

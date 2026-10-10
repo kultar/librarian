@@ -34,9 +34,8 @@ high-value target. This document lists what we defend against, how, and what is 
 - The LLM can only *propose* calls; every call passes the same deterministic policy.
 - Tool results are truncated and labelled as untrusted in the planner instructions.
 - **Residual risk:** within read-only policy, injected text could steer the planner to read *other*
-  allowed data and include it in its answer to the caller. The caller could already read that data
-  through `execute`, so this is not an escalation for the caller, but restrict which APIs a caller
-  may use (planned per-caller policies) if that matters.
+  data the same caller is allowed to read and include it in the answer. Per-agent API allowlists
+  bound this to what the caller could already read through `execute`.
 
 ### T3. Credential theft
 - Secrets never enter A2A messages, Slack, logs, audit events, provenance or LLM context.
@@ -75,7 +74,10 @@ high-value target. This document lists what we defend against, how, and what is 
   count caps, page limits, LLM request limits per `fetch`.
 
 ### T8. Caller impersonation
-- Per-agent bearer keys, compared in constant time. The `principal` a caller asserts is recorded
+- Per-agent bearer keys, compared in constant time.
+- Per-agent API allowlists (glob patterns) are enforced by the policy engine and also hide
+  disallowed APIs from discovery (`capabilities`, planner tools). Onboarding is a separate
+  per-agent permission. The `principal` a caller asserts is recorded
   for audit but **not verified** in v0.1. Verified delegation (token exchange) is on the roadmap.
 
 ## Out of scope (v0.1)

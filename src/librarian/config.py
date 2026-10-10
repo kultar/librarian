@@ -46,6 +46,10 @@ class CallerKey(BaseModel):
 
     agent: str
     key_ref: str
+    # Glob patterns of API ids this agent may use, e.g. ["jira", "github-*"].
+    # Narrow this in shared deployments; "*" lets the agent use every API.
+    apis: list[str] = Field(default_factory=lambda: ["*"])
+    can_onboard: bool = True
 
     @field_validator("key_ref")
     @classmethod

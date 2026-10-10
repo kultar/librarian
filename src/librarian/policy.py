@@ -73,6 +73,10 @@ class PolicyEngine:
         self.allowed_hosts = allowed_hosts
 
     def check(self, request: CallRequest, caller: Caller) -> Decision:
+        if not caller.may_use(request.api):
+            return Decision.deny(
+                f"caller {caller.agent!r} is not allowed to use API {request.api!r}"
+            )
         entry = self.registry.get(request.api)
         if entry is None:
             return Decision.deny(f"unknown API {request.api!r}")

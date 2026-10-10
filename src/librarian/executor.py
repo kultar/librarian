@@ -147,11 +147,21 @@ class Executor:
                 status_code=status_code,
                 bytes=total_bytes,
                 duration_ms=int((time.monotonic() - started) * 1000),
+                detail="permission denied by the API" if status_code == 403 else None,
                 extra={"pages": page_count, "truncated": truncated},
             )
         )
-        if status_code in (401, 403) and not isinstance(entry.auth, NoAuth):
-            raise CredentialMissing(entry, reason=f"rejected with HTTP {status_code}")
+        if status_code == 401 and not isinstance(entry.auth, NoAuth):
+            # The credential itself is missing, expired or revoked: ask for a new one.
+            raise CredentialMissing(entry, reason="rejected with HTTP 401")
+        error = None
+        if status_code == 403:
+            # The credential works but may not see this resource. A new key would not
+            # help, so tell the caller instead of paging an approver.
+            error = (
+                f"{entry.name} refused this request (HTTP 403): the credential is valid but "
+                "lacks permission for this resource"
+            )
         data = pages[0] if len(pages) == 1 else pages
         return CallResult(
             status_code=status_code,
@@ -159,6 +169,7 @@ class Executor:
             data=data,
             truncated=truncated,
             content_type=content_type,
+            error=error,
             provenance=provenance,
         )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from fnmatch import fnmatchcase
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,6 +26,12 @@ class Caller(BaseModel):
     agent: str = "anonymous"
     authenticated: bool = False
     principal: str | None = None
+    # Glob patterns of API ids this caller may use; None = every API.
+    apis: tuple[str, ...] | None = None
+    can_onboard: bool = True
+
+    def may_use(self, api: str) -> bool:
+        return self.apis is None or any(fnmatchcase(api, pattern) for pattern in self.apis)
 
 
 class CallRequest(BaseModel):
@@ -60,4 +67,7 @@ class CallResult(BaseModel):
     data: Any = None
     truncated: bool = False
     content_type: str = ""
+    # Set when the API refused the call for a reason the caller should see
+    # (e.g. 403: the credential works but lacks permission for this resource).
+    error: str | None = None
     provenance: Provenance

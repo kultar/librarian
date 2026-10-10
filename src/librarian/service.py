@@ -173,12 +173,15 @@ class Librarian:
                 await self._await_credential(missing, caller, on_auth_required)
         raise LibrarianError("credential still not usable after it was provided")
 
-    def capabilities(self, query: str | None = None) -> list[dict[str, Any]]:
+    def capabilities(
+        self, query: str | None = None, caller: Caller = SYSTEM_CALLER
+    ) -> list[dict[str, Any]]:
         entries = (
             [h.entry for h in self.registry.search(query, limit=10)]
             if query
             else [e for e in self.registry.all() if e.status is not EntryStatus.BLOCKED]
         )
+        entries = [e for e in entries if caller.may_use(e.id)]
         return [
             {
                 "api": e.id,
@@ -209,6 +212,8 @@ class Librarian:
         """Learn an API from its OpenAPI spec and save it as a provisional entry."""
         if not self.settings.onboarding_enabled:
             raise LibrarianError("onboarding is disabled on this librarian")
+        if not caller.can_onboard:
+            raise LibrarianError(f"caller {caller.agent!r} is not allowed to onboard APIs")
         existing = self.registry.get(api_id)
         if existing is not None and (
             existing.status is not EntryStatus.PROVISIONAL or not replace_provisional

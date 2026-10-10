@@ -229,7 +229,7 @@ class LibrarianExecutor(AgentExecutor):
             return result.model_dump(mode="json")
         if skill == "capabilities":
             query = command.get("query")
-            return {"apis": librarian.capabilities(str(query) if query else None)}
+            return {"apis": librarian.capabilities(str(query) if query else None, caller)}
         if skill == "onboard":
             api = command.get("api")
             if not isinstance(api, str):
@@ -329,9 +329,10 @@ class CallerContextBuilder(DefaultServerCallContextBuilder):
 class CallerAuthMiddleware(BaseHTTPMiddleware):
     """Authenticates calling agents on the A2A endpoint with per-agent bearer keys."""
 
-    def __init__(self, app: Any, keys: dict[str, str]) -> None:
+    def __init__(self, app: Any, keys: dict[str, str], profiles: dict[str, Caller]) -> None:
         super().__init__(app)
         self.keys = keys  # agent -> key
+        self.profiles = profiles  # agent -> permissions
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if request.url.path != RPC_PATH or request.method != "POST":
@@ -347,7 +348,8 @@ class CallerAuthMiddleware(BaseHTTPMiddleware):
         )
         if agent is None:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        request.scope[CALLER_STATE_KEY] = Caller(agent=agent, authenticated=True)
+        profile = self.profiles.get(agent, Caller(agent=agent))
+        request.scope[CALLER_STATE_KEY] = profile.model_copy(update={"authenticated": True})
         return await call_next(request)
 
 
@@ -407,9 +409,13 @@ def create_app(librarian: Librarian, caller_keys: dict[str, str] | None = None) 
                 await sweeper
             await librarian.aclose()
 
+    profiles = {
+        c.agent: Caller(agent=c.agent, apis=tuple(c.apis), can_onboard=c.can_onboard)
+        for c in librarian.settings.callers
+    }
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.caller_keys = {}
-    app.add_middleware(CallerAuthMiddleware, keys=app.state.caller_keys)
+    app.add_middleware(CallerAuthMiddleware, keys=app.state.caller_keys, profiles=profiles)
     return app
 
 
