@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets as pysecrets
@@ -58,6 +59,17 @@ class CredentialUnavailable(LibrarianError):
         super().__init__(
             f"no credential for {request.api!r}: request {request.state}"
             + (f" ({request.resolution_note})" if request.resolution_note else "")
+        )
+        self.request = request
+
+
+class CredentialPending(LibrarianError):
+    """A credential is needed; approvers were notified. Retry later (non-waiting callers)."""
+
+    def __init__(self, request: CredentialRequest) -> None:
+        super().__init__(
+            f"{request.api_name} needs a credential; approvers were notified "
+            f"(request {request.id}). Retry once access is granted."
         )
         self.request = request
 
@@ -167,6 +179,7 @@ class Librarian:
         )
         self.publisher = publisher if publisher is not None else _default_publisher(settings)
         self.recipes: dict[str, Recipe] = {}
+        self._background: set[asyncio.Task[None]] = set()
         model = planner_model if planner_model is not None else _model_from_settings(settings)
         mode = settings.planner_output
         if mode == "auto":
@@ -190,6 +203,13 @@ class Librarian:
             for data in await self.state.list_docs("recipe", "active"):
                 recipe = Recipe.model_validate_json(data)
                 self.recipes[recipe.id] = recipe
+            # Detached writes (MCP callers) are finished by the librarian itself; pick
+            # them back up after a restart. The claim step keeps replicas from both
+            # running one.
+            for approval in self.approvals.detached_unfinished():
+                self._finish_in_background(
+                    approval, Caller(agent=approval.agent, principal=approval.principal)
+                )
         key = await self._signing_key()
         self.broker.set_signing_key(key)
         self.approvals.set_signing_key(key)
@@ -223,11 +243,16 @@ class Librarian:
         request: CallRequest,
         caller: Caller,
         on_auth_required: AuthRequiredHook | None = None,
+        wait_for_credential: bool = True,
     ) -> CallResult:
-        """Run one read operation; if a credential is missing, ask a human and wait."""
+        """Run one read operation; if a credential is missing, ask a human (and wait,
+        unless `wait_for_credential` is False, in which case raise CredentialPending)."""
         try:
             return await self.executor.execute(request, caller)
         except CredentialMissing as missing:
+            if not wait_for_credential:
+                pending = await self.broker.open(missing.entry, caller, missing.reason)
+                raise CredentialPending(pending) from missing
             await self._await_credential(missing, caller, on_auth_required)
         try:
             return await self.executor.execute(request, caller)
@@ -323,6 +348,59 @@ class Librarian:
         on_approval_required: ApprovalHook | None = None,
     ) -> WriteOutcome:
         """Make a write: run it under a matching grant, or ask a human and wait."""
+        started = await self._start_write(request, caller)
+        if isinstance(started, WriteOutcome):
+            return started
+        approval = started
+        if on_approval_required is not None:
+            await on_approval_required(approval)
+        approval = await self.approvals.wait(approval.id, max_wait=caller.approval_wait_seconds)
+        if approval.state is ApprovalState.PENDING:
+            await self.approvals.expire(approval.id, f"{caller.agent} stopped waiting")
+        return await self._run_approved(approval, caller)
+
+    async def request_write(
+        self, request: WriteRequest, caller: Caller
+    ) -> WriteOutcome | WriteApproval:
+        """Like `write`, but never waits for a human: returns the pending approval, and
+        the librarian runs the write itself once it is approved (callers poll)."""
+        started = await self._start_write(request, caller)
+        if isinstance(started, WriteOutcome):
+            return started
+        await self.approvals.mark_detached(started)
+        self._finish_in_background(started, caller)
+        return started
+
+    def write_status(self, approval: WriteApproval) -> dict[str, Any]:
+        status: dict[str, Any] = {
+            "approval": approval.id,
+            "state": approval.state.value,
+            "api": approval.api,
+            "operation": approval.operation,
+            "decided_by": approval.decided_by,
+            "note": approval.note,
+            "expires_at": approval.expires_at.isoformat(),
+        }
+        if approval.result is not None:
+            status["result"] = approval.result
+        return status
+
+    def _finish_in_background(self, approval: WriteApproval, caller: Caller) -> None:
+        async def finish() -> None:
+            decided = await self.approvals.wait(approval.id)
+            try:
+                await self._run_approved(decided, caller)
+            except WriteRefused as exc:
+                log.info("detached write %s not run: %s", approval.id, exc)
+
+        task = asyncio.create_task(finish())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _start_write(
+        self, request: WriteRequest, caller: Caller
+    ) -> WriteOutcome | WriteApproval:
+        """Policy, idempotency and grants; opens an approval when a human must decide."""
         if request.idempotency_key:
             prior = self.approvals.find_executed(caller, request.idempotency_key)
             if prior is not None and prior.result is not None:
@@ -371,21 +449,21 @@ class Librarian:
         problem = self.approvals.approval_route(caller.requesters(), group)
         if problem is not None:
             raise PolicyDenied(problem)
-        approval = await self.approvals.open(entry, op, request, caller)
-        if on_approval_required is not None:
-            await on_approval_required(approval)
-        approval = await self.approvals.wait(approval.id, max_wait=caller.approval_wait_seconds)
-        if approval.state is ApprovalState.PENDING:
-            await self.approvals.expire(approval.id, f"{caller.agent} stopped waiting")
+        return await self.approvals.open(entry, op, request, caller)
+
+    async def _run_approved(self, approval: WriteApproval, caller: Caller) -> WriteOutcome:
+        """Run exactly what was approved, once, against the entry as it is now."""
         if approval.state is not ApprovalState.APPROVED:
-            telemetry.write_requests.add(1, {"librarian.api": entry.id, "outcome": approval.state})
+            telemetry.write_requests.add(
+                1, {"librarian.api": approval.api, "outcome": approval.state}
+            )
             raise WriteRefused(
                 f"write {approval.state}" + (f" ({approval.note})" if approval.note else "")
             )
-
-        # Run exactly what was approved, against the entry as it is now.
-        current = self.registry.get(entry.id)
-        current_op = current.operation(op.id) if current is not None else None
+        if not await self.approvals.claim(approval):
+            raise WriteRefused("this approved write is already being run")
+        current = self.registry.get(approval.api)
+        current_op = current.operation(approval.operation) if current is not None else None
         if current is None or current_op is None or not current_op.writable:
             await self.approvals.finish(approval, False, None, "operation no longer writable")
             raise WriteRefused("the operation is no longer enabled for writes")
@@ -401,7 +479,7 @@ class Librarian:
             stored = {**stored, "data": None, "truncated": True}
         note = "done" if result.ok else (result.error or f"HTTP {result.status_code}")
         await self.approvals.finish(approval, result.ok, stored, note)
-        telemetry.write_requests.add(1, {"librarian.api": entry.id, "outcome": "executed"})
+        telemetry.write_requests.add(1, {"librarian.api": approval.api, "outcome": "executed"})
         return WriteOutcome(result, "approved", approval.id, approval.grant_id)
 
     def capabilities(

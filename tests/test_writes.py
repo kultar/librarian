@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from librarian.approvals import ApprovalState, Grant
+from librarian.approvals import ApprovalState, Grant, WriteApproval
 from librarian.calls import Caller, WriteRequest
 from librarian.config import ApproverSettings
 from librarian.executor import PolicyDenied
@@ -382,3 +382,52 @@ async def test_pending_approvals_and_grants_survive_restart(tmp_path: Any, route
         for a in second.approvals._approvals.values()  # pyright: ignore[reportPrivateUsage]
     )
     await second.aclose()
+
+
+async def test_detached_write_runs_exactly_once_across_replicas(
+    tmp_path: Any, router: Router, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from librarian import approvals as approvals_module
+    from tests.test_state import replica
+
+    monkeypatch.setattr(approvals_module, "POLL_SECONDS", 0.05)
+    a = replica(tmp_path, router)
+    await a.start()
+    await a.secrets.put("tracker/write", "w")
+    pending = await a.request_write(comment("PAY-1"), KIM)  # an MCP-style caller
+    assert isinstance(pending, WriteApproval)
+
+    b = replica(tmp_path, router)
+    await b.start()  # picks the detached write up too
+    await a.approvals.approve(pending.id, "kim@x.test")
+
+    for _ in range(200):
+        final = await b.approvals.load(pending.id)
+        if final is not None and final.state is ApprovalState.EXECUTED:
+            break
+        await asyncio.sleep(0.02)
+    await asyncio.sleep(0.3)  # give the other replica every chance to (wrongly) run it too
+    writes = [r for r in router.requests if r.method == "POST"]
+    assert len(writes) == 1
+    await a.aclose()
+    await b.aclose()
+
+
+async def test_only_one_replica_can_claim_an_approved_write(tmp_path: Any, router: Router) -> None:
+    from tests.test_state import replica
+
+    a, b = replica(tmp_path, router), replica(tmp_path, router)
+    await a.start()
+    await b.start()
+    # An approval nobody is already watching, so the two claims below really race.
+    pending = await a._start_write(comment("PAY-1"), KIM)  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(pending, WriteApproval)
+    await a.approvals.approve(pending.id, "kim@x.test")
+    copy_a = await a.approvals.load(pending.id)
+    copy_b = await b.approvals.load(pending.id)
+    assert copy_a is not None and copy_b is not None
+    assert copy_a.state is ApprovalState.APPROVED and copy_b.state is ApprovalState.APPROVED
+    claims = await asyncio.gather(a.approvals.claim(copy_a), b.approvals.claim(copy_b))
+    assert sorted(claims) == [False, True]
+    await a.aclose()
+    await b.aclose()

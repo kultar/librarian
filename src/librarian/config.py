@@ -210,6 +210,8 @@ class Settings(BaseSettings):
     # Keep off unless every caller is trusted (SSRF protection).
     allow_private_networks: bool = False
     onboarding_enabled: bool = True
+    # Serve librarian's skills as MCP tools at /mcp (Streamable HTTP) on the A2A listener.
+    mcp_enabled: bool = True
     # How long an A2A task waits for a human to provide a missing credential.
     credential_wait_seconds: float = 900
 

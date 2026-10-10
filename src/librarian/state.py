@@ -11,7 +11,18 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime, MetaData, String, Table, Text, delete, insert, select
+from sqlalchemy import (
+    Column,
+    DateTime,
+    MetaData,
+    String,
+    Table,
+    Text,
+    delete,
+    insert,
+    select,
+    update,
+)
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -149,3 +160,18 @@ class StateStore:
             query = query.where(documents.c.state == state)
         async with self.engine.connect() as conn:
             return list((await conn.execute(query)).scalars().all())
+
+    async def transition_doc(
+        self, kind: str, doc_id: str, from_state: str, to_state: str, data: str
+    ) -> bool:
+        """Atomically move a document from one state to another. False if it was not
+        in `from_state` (e.g. another replica got there first)."""
+        async with self.engine.begin() as conn:
+            result = await conn.execute(
+                update(documents)
+                .where(documents.c.kind == kind)
+                .where(documents.c.id == doc_id)
+                .where(documents.c.state == from_state)
+                .values(state=to_state, data=data, updated_at=datetime.now(UTC))
+            )
+            return result.rowcount == 1

@@ -36,6 +36,7 @@ ApproverMode = Literal["requester", "group", "requester_or_group"]
 class ApprovalState(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
+    EXECUTING = "executing"  # claimed by one replica; never run twice
     DENIED = "denied"
     EXPIRED = "expired"
     EXECUTED = "executed"
@@ -65,6 +66,9 @@ class WriteApproval(BaseModel):
     grant_id: str | None = None
     note: str | None = None
     result: dict[str, Any] | None = None  # CallResult as JSON once executed
+    # Requested by a caller that does not wait (e.g. MCP): librarian runs the write
+    # itself once approved, and the caller polls for the outcome.
+    detached: bool = False
     channel: str | None = None
     approver_group: str | None = None
     notifier_ref: dict[str, str] = Field(default_factory=dict[str, str])
@@ -128,6 +132,9 @@ def _arg_text(value: ArgValue | None) -> str | None:
 
 class ApprovalStore(Protocol):
     async def save_doc(self, kind: str, doc_id: str, state: str, data: str) -> None: ...
+    async def transition_doc(
+        self, kind: str, doc_id: str, from_state: str, to_state: str, data: str
+    ) -> bool: ...
     async def get_doc(self, kind: str, doc_id: str) -> str | None: ...
     async def list_docs(self, kind: str, state: str | None = None) -> list[str]: ...
 
@@ -179,10 +186,11 @@ class ApprovalBroker:
     async def restore(self) -> None:
         if self.store is None:
             return
-        for data in await self.store.list_docs("approval", ApprovalState.PENDING.value):
-            approval = WriteApproval.model_validate_json(data)
-            self._approvals[approval.id] = approval
-            self._events.setdefault(approval.id, asyncio.Event())
+        for state in (ApprovalState.PENDING, ApprovalState.APPROVED):
+            for data in await self.store.list_docs("approval", state.value):
+                approval = WriteApproval.model_validate_json(data)
+                self._approvals[approval.id] = approval
+                self._events.setdefault(approval.id, asyncio.Event())
         for data in await self.store.list_docs("grant"):
             grant = Grant.model_validate_json(data)
             self._grants.setdefault(grant.id, grant)
@@ -262,6 +270,13 @@ class ApprovalBroker:
             (a for a in self._approvals.values() if a.state is ApprovalState.PENDING),
             key=lambda a: a.created_at,
         )
+
+    def detached_unfinished(self) -> list[WriteApproval]:
+        return [
+            a
+            for a in self._approvals.values()
+            if a.detached and a.state in (ApprovalState.PENDING, ApprovalState.APPROVED)
+        ]
 
     def find_executed(self, caller: Caller, idempotency_key: str) -> WriteApproval | None:
         return next(
@@ -444,6 +459,28 @@ class ApprovalBroker:
         approval = self._approvals.get(approval_id)
         if approval is not None and approval.state is ApprovalState.PENDING:
             await self._decide(approval, ApprovalState.EXPIRED, None, note)
+
+    async def mark_detached(self, approval: WriteApproval) -> None:
+        approval.detached = True
+        await self._save(approval)
+
+    async def claim(self, approval: WriteApproval) -> bool:
+        """Move an approved write to EXECUTING, exactly once across all replicas."""
+        if approval.state is not ApprovalState.APPROVED:
+            return False
+        approval.state = ApprovalState.EXECUTING
+        if self.store is None:
+            return True
+        claimed = await self.store.transition_doc(
+            "approval",
+            approval.id,
+            ApprovalState.APPROVED.value,
+            ApprovalState.EXECUTING.value,
+            approval.model_dump_json(),
+        )
+        if not claimed:
+            await self.load(approval.id)  # someone else claimed it; refresh our copy
+        return claimed
 
     async def finish(
         self, approval: WriteApproval, ok: bool, result: dict[str, Any] | None, note: str

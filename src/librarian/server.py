@@ -62,7 +62,9 @@ from librarian.calls import Caller, CallRequest, WriteRequest
 from librarian.config import PrincipalSettings
 from librarian.credentials import CredentialRequest
 from librarian.executor import PolicyDenied
+from librarian.mcp_server import build_mcp
 from librarian.principals import Issuer, PrincipalError, PrincipalVerifier
+from librarian.server_state import CALLER_STATE_KEY, TRACE_STATE_KEY
 from librarian.service import CredentialUnavailable, Librarian, LibrarianError, WriteRefused
 from librarian.state import retry_already_exists
 from librarian.web import approval_routes, credential_routes
@@ -70,8 +72,7 @@ from librarian.web import approval_routes, credential_routes
 log = logging.getLogger(__name__)
 
 RPC_PATH = "/"
-CALLER_STATE_KEY = "librarian_caller"
-TRACE_STATE_KEY = "librarian_trace"
+MCP_PATH = "/mcp"
 
 
 def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) -> AgentCard:
@@ -450,7 +451,10 @@ class CallerAuthMiddleware(BaseHTTPMiddleware):
         self.verifier = verifier
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        if request.url.path != RPC_PATH or request.method != "POST":
+        path = request.url.path
+        is_a2a = path == RPC_PATH and request.method == "POST"
+        is_mcp = path == MCP_PATH or path.startswith(MCP_PATH + "/")
+        if not (is_a2a or is_mcp):
             return await call_next(request)
         if not self.keys:
             caller = Caller(agent="anonymous", authenticated=False)
@@ -550,6 +554,13 @@ def create_app(
         *create_jsonrpc_routes(handler, RPC_PATH, context_builder=CallerContextBuilder()),
         Route("/healthz", healthz, methods=["GET"]),
     ]
+    mcp = build_mcp(librarian) if librarian.settings.mcp_enabled else None
+    if mcp is not None:
+        # Stateless + JSON responses: no session affinity (gateways, several replicas).
+        mcp_app = mcp.streamable_http_app(
+            streamable_http_path=MCP_PATH, stateless_http=True, json_response=True
+        )
+        routes += list(mcp_app.routes)
     if surface == "all":
         if librarian.settings.approvers.mode == "trusted_header":
             log.warning(
@@ -572,13 +583,16 @@ def create_app(
         keys = caller_keys if caller_keys is not None else await _caller_keys(librarian)
         app.state.caller_keys.update(keys)
         sweeper = asyncio.create_task(_sweep_forever(librarian))
-        try:
-            yield
-        finally:
-            sweeper.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await sweeper
-            await librarian.aclose()
+        async with contextlib.AsyncExitStack() as stack:
+            if mcp is not None:
+                await stack.enter_async_context(mcp.session_manager.run())
+            try:
+                yield
+            finally:
+                sweeper.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sweeper
+                await librarian.aclose()
 
     profiles = {
         c.agent: Caller(
