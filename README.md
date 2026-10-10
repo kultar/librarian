@@ -46,6 +46,14 @@ When a credential is missing, the task enters A2A's `TASK_STATE_AUTH_REQUIRED`, 
 notified (Slack by default), and the task **resumes on its own** once someone adds the key. The
 caller polls or subscribes to the task as usual.
 
+## Install
+
+```bash
+pip install librarian-a2a            # the CLI and import are `librarian`
+docker pull ghcr.io/kultar/librarian
+helm install librarian ./deploy/helm/librarian   # see deploy/helm/librarian/README.md
+```
+
 ## Quick start
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
