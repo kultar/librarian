@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
@@ -19,7 +20,7 @@ import httpx
 
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance
-from librarian.net import BlockedAddress, check_url
+from librarian.net import BlockedAddress, pin
 from librarian.policy import PolicyEngine
 from librarian.registry.models import (
     ApiEntry,
@@ -64,6 +65,7 @@ class Executor:
         timeout_seconds: float = 30.0,
         max_response_bytes: int = 2_000_000,
         allow_private_provisional: bool = False,
+        pinned_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         self.policy = policy
         self.secrets = secrets
@@ -75,6 +77,14 @@ class Executor:
         # Provisional entries come from agent-supplied specs, so by default they
         # may only reach public addresses. Verified entries were human-reviewed.
         self.allow_private_provisional = allow_private_provisional
+        # Pinned requests get a fresh client: httpcore pools connections by IP and
+        # port, so a pooled connection verified for one hostname must not be reused
+        # for another hostname on the same address.
+        self._pinned_client_factory = pinned_client_factory or (
+            lambda: httpx.AsyncClient(
+                timeout=timeout_seconds, follow_redirects=False, headers={"User-Agent": USER_AGENT}
+            )
+        )
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -111,7 +121,7 @@ class Executor:
         page_count = 0
 
         while next_url is not None and page_count < request.max_pages:
-            response, body, cut = await self._send(
+            response, body, cut, final_url = await self._send(
                 entry, op, next_url, next_query, secret_query, headers, request.body
             )
             page_count += 1
@@ -122,7 +132,7 @@ class Executor:
             pages.append(_decode(body, content_type, cut))
             if not response.is_success or cut:
                 break
-            next_url = _next_link(response, entry)
+            next_url = _next_link(response, entry, final_url)
             next_query = None  # the next link already carries its own query
 
         ok = 200 <= status_code < 300
@@ -193,41 +203,53 @@ class Executor:
         secret_query: dict[str, str],
         headers: dict[str, str],
         body: dict[str, Any] | None,
-    ) -> tuple[httpx.Response, bytes, bool]:
+    ) -> tuple[httpx.Response, bytes, bool, str]:
+        """Send with same-origin redirects. Returns (response, body, truncated, final URL)."""
         method = op.method
         current = url
         params: dict[str, ArgValue] = {**(query or {}), **secret_query}
+        must_pin = entry.status is not EntryStatus.VERIFIED and not self.allow_private_provisional
         for _ in range(MAX_REDIRECTS + 1):
             _assert_same_origin(entry, current)
-            if entry.status is not EntryStatus.VERIFIED and not self.allow_private_provisional:
+            target, send_headers, extensions = current, headers, None
+            if must_pin:
                 try:
-                    await check_url(current, allow_private=False)
+                    pinned = await pin(current)
                 except BlockedAddress as exc:
                     raise PolicyDenied(f"provisional API {entry.id!r}: {exc}") from exc
-            request = self.client.build_request(
-                method,
-                current,
-                params=params or None,
-                headers=headers,
-                json=body if body is not None else None,
-            )
-            response = await self.client.send(request, stream=True)
+                target = pinned.url
+                send_headers = {**headers, "Host": pinned.host_header}
+                extensions = pinned.extensions
+            client = self._pinned_client_factory() if must_pin else self.client
             try:
-                if response.is_redirect:
-                    location = response.headers.get("location", "")
-                    target = urljoin(current, location)
-                    if not _same_origin(entry, target):
-                        # Do not follow (and do not leak credentials) off-origin.
-                        return response, b"", False
-                    current = target
-                    params = dict(secret_query)  # redirect target carries its own query
-                    if response.status_code in (301, 302, 303):
-                        method, body = "GET", None
-                    continue
-                payload, cut = await _read_capped(response, self.max_response_bytes)
-                return response, payload, cut
+                request = client.build_request(
+                    method,
+                    target,
+                    params=params or None,
+                    headers=send_headers,
+                    json=body if body is not None else None,
+                    extensions=extensions,
+                )
+                response = await client.send(request, stream=True)
+                try:
+                    if response.is_redirect:
+                        location = response.headers.get("location", "")
+                        next_target = urljoin(current, location)
+                        if not _same_origin(entry, next_target):
+                            # Do not follow (and do not leak credentials) off-origin.
+                            return response, b"", False, current
+                        current = next_target
+                        params = dict(secret_query)  # redirect target carries its own query
+                        if response.status_code in (301, 302, 303):
+                            method, body = "GET", None
+                        continue
+                    payload, cut = await _read_capped(response, self.max_response_bytes)
+                    return response, payload, cut, current
+                finally:
+                    await response.aclose()
             finally:
-                await response.aclose()
+                if client is not self.client:
+                    await client.aclose()
         raise PolicyDenied(f"too many redirects calling {entry.id!r}")
 
 
@@ -310,11 +332,12 @@ def _decode(body: bytes, content_type: str, truncated: bool) -> Any:
     return text
 
 
-def _next_link(response: httpx.Response, entry: ApiEntry) -> str | None:
+def _next_link(response: httpx.Response, entry: ApiEntry, base_url: str) -> str | None:
     link = response.links.get("next")
     if not link:
         return None
-    target = urljoin(str(response.url), link.get("url", ""))
+    # Join against the real URL (the response URL may be a pinned IP address).
+    target = urljoin(base_url, link.get("url", ""))
     return target if _same_origin(entry, target) else None
 
 

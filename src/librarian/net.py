@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-from urllib.parse import urlsplit
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 class BlockedAddress(Exception):
@@ -46,3 +48,30 @@ async def check_url(url: str, allow_private: bool) -> None:
         raise BlockedAddress(f"unsupported URL scheme {parts.scheme!r}")
     if not allow_private:
         await resolve_public(parts.hostname or "")
+
+
+@dataclass(frozen=True)
+class PinnedTarget:
+    """A request target bound to an address that already passed the public-IP check.
+
+    Connecting to the vetted IP (instead of resolving the name again) closes the
+    DNS-rebinding gap between check and connect. TLS still verifies the
+    certificate against the real hostname via the `sni_hostname` extension.
+    """
+
+    url: str
+    host_header: str
+    extensions: dict[str, Any]
+
+
+async def pin(url: str) -> PinnedTarget:
+    """Resolve `url`'s host, require a public address, and target that address."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    address = (await resolve_public(host))[0]
+    literal = f"[{address}]" if ":" in address else address
+    netloc = literal + (f":{parts.port}" if parts.port else "")
+    pinned = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    host_header = host + (f":{parts.port}" if parts.port else "")
+    extensions: dict[str, Any] = {"sni_hostname": host} if parts.scheme == "https" else {}
+    return PinnedTarget(pinned, host_header, extensions)

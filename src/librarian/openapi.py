@@ -9,6 +9,7 @@ Nothing here can mark a non-GET operation as a read; only a human can.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from datetime import UTC, datetime
@@ -18,7 +19,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 import yaml
 
-from librarian.net import BlockedAddress, check_url
+from librarian.net import BlockedAddress, check_url, pin
 from librarian.registry.models import (
     Access,
     ApiEntry,
@@ -65,11 +66,21 @@ async def fetch_spec(url: str, client: httpx.AsyncClient, *, allow_private: bool
     """
     current = url
     for _ in range(6):
+        target, headers, extensions = current, {}, None
         try:
-            await check_url(current, allow_private)
+            await check_url(current, allow_private=True)  # scheme check
+            if not allow_private:
+                pinned = await pin(current)
+                target = pinned.url
+                # Never reuse this connection for another hostname on the same IP.
+                headers = {"Host": pinned.host_header, "Connection": "close"}
+                extensions = pinned.extensions
         except BlockedAddress as exc:
             raise SpecError(str(exc)) from exc
-        async with client.stream("GET", current, follow_redirects=False) as response:
+        request = client.build_request("GET", target, headers=headers, extensions=extensions)
+        response = await client.send(request, stream=True)
+        async with contextlib.AsyncExitStack() as stack:
+            stack.push_async_callback(response.aclose)
             if response.is_redirect:
                 current = urljoin(current, response.headers.get("location", ""))
                 continue

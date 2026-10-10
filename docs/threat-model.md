@@ -55,8 +55,10 @@ high-value target. This document lists what we defend against, how, and what is 
 - `onboard` lets callers name a URL. By default spec fetching (each redirect hop included) and
   calls to **provisional** entries may only reach public addresses: loopback, private, link-local
   (cloud metadata) and similar ranges are refused (`allow_private_networks: false`).
-- **Residual risk:** DNS rebinding between the check and the connection. Pin internal APIs as
-  `verified` entries and keep `allow_private_networks` off; a connection-level resolver pin is planned.
+- DNS rebinding is closed by pinning: the host is resolved once, every address must be public,
+  and the connection goes to that vetted IP. TLS still verifies the certificate against the real
+  hostname (SNI), and pinned connections are never reused for another hostname.
+- Internal APIs belong in human-reviewed `verified` entries; keep `allow_private_networks` off.
 
 ### T5. Approval-link abuse
 - Links are HMAC tokens bound to one request, valid only while it is pending and until expiry,

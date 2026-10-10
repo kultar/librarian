@@ -126,3 +126,18 @@ def test_settings_from_yaml_and_env(tmp_path: Any, monkeypatch: pytest.MonkeyPat
     assert settings.notifier.slack.bot_token is not None
     assert settings.notifier.slack.bot_token.get_secret_value() == "xoxb-env"
     assert "xoxb-env" not in repr(settings)
+
+
+async def test_pin_formats_ipv6_and_ports(monkeypatch: pytest.MonkeyPatch) -> None:
+    from librarian import net
+
+    async def fake_resolve(host: str) -> list[str]:
+        return ["2606:2800:21f:cb07:6820:80da:af6b:8b2c"]
+
+    monkeypatch.setattr(net, "resolve_public", fake_resolve)
+    target = await net.pin("https://api.example.test:8443/v1/x?q=1")
+    assert target.url == "https://[2606:2800:21f:cb07:6820:80da:af6b:8b2c]:8443/v1/x?q=1"
+    assert target.host_header == "api.example.test:8443"
+    assert target.extensions == {"sni_hostname": "api.example.test"}
+    plain = await net.pin("http://api.example.test/x")
+    assert plain.extensions == {}

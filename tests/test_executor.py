@@ -174,3 +174,34 @@ async def test_403_is_reported_not_treated_as_bad_key(
     assert result.error is not None and "lacks permission" in result.error
     assert librarian.broker.pending_for("tracker") is None  # nobody was paged
     assert audit.events[-1].detail == "permission denied by the API"
+
+
+async def test_provisional_requests_are_pinned_to_the_vetted_address(
+    librarian: Librarian, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from librarian import net
+
+    async def fake_resolve(host: str) -> list[str]:
+        assert host == "status.example.test"
+        return ["93.184.215.14"]
+
+    monkeypatch.setattr(net, "resolve_public", fake_resolve)
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    librarian.executor.allow_private_provisional = False
+    librarian.executor._pinned_client_factory = lambda: httpx.AsyncClient(  # pyright: ignore[reportPrivateUsage]
+        transport=httpx.MockTransport(handler)
+    )
+    result = await librarian.executor.execute(
+        CallRequest(api="status", operation="summary"), CALLER
+    )
+    assert result.ok
+    sent = seen[0]
+    assert sent.url.host == "93.184.215.14"  # connected to the address that was checked
+    assert sent.headers["host"] == "status.example.test"
+    assert sent.extensions["sni_hostname"] == "status.example.test"  # TLS verifies the real name
+    assert result.provenance.url == "https://status.example.test/summary"
