@@ -55,12 +55,17 @@ jobs:
         with:
           name: dist
           path: dist/
-      - name: Create GitHub release with the built distributions
+      - name: Create (or update) the GitHub release with the built distributions
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "${TAG}" dist/* --repo "${GITHUB_REPOSITORY}"
-          --title "librarian ${TAG}" --generate-notes --verify-tag
+        # Create first, then upload: re-runnable, and avoids gh creating a second
+        # release while uploading assets in the same call.
+        run: |
+          if ! gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --title "librarian ${TAG}" --generate-notes --verify-tag
+          fi
+          gh release upload "${TAG}" dist/* --repo "${GITHUB_REPOSITORY}" --clobber
 
   image:
     needs: build

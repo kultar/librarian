@@ -15,9 +15,9 @@ The release workflow then:
 
 ## One-time setup
 
-**Container image visibility.** The first push creates the `librarian` package on GHCR as
-private. Make it public under GitHub → Packages → librarian → Package settings → Change
-visibility, so `docker pull` and the Helm chart work without credentials.
+**Container image visibility.** `ghcr.io/kultar/librarian` is public (it was created public
+from this public repository). If a fork's package ends up private, change it under GitHub →
+Packages → librarian → Package settings → Change visibility.
 
 **PyPI (trusted publishing, no API token).**
 
