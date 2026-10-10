@@ -1,0 +1,30 @@
+general_settings:
+  master_key: sk-master             # demo only; use virtual keys in real deployments
+
+mcp_servers:
+  librarian:
+    server_id: librarian
+    url: http://librarian:8080/mcp
+    transport: http
+    auth_type: bearer_token
+    auth_value: os.environ/LIBRARIAN_KEY
+    extra_headers: ["x-principal-token"]   # forward the end user's identity token
+    timeout: 120
+
+agents:
+  - agent_name: librarian
+    static_headers:
+      Authorization: Bearer key-gw
+    extra_headers: ["x-principal-token"]
+    agent_card_params:
+      name: librarian
+      description: Central API librarian (reads within policy, writes with human approval)
+      url: http://librarian:8080/
+      version: 0.6.0
+      protocolVersion: "1.0"
+      capabilities: {streaming: true}
+      defaultInputModes: [application/json, text/plain]
+      defaultOutputModes: [application/json, text/plain]
+      skills:
+        - {id: execute, name: Execute an API read, description: Run one read operation, tags: [api]}
+        - {id: write, name: Request a write, description: Change data with human approval, tags: [api]}

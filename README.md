@@ -39,6 +39,12 @@ credential out.
 | `write` | Change data, with human approval or a grant: `{"skill":"write","api":"jira","operation":"addComment","args":{...},"body":{...},"reason":"why"}` | No |
 | `fetch` | Plain language: *"open bugs assigned to the payments team"* (only when a model is configured) | Yes |
 
+The same skills are available as **MCP tools** at `/mcp` (Streamable HTTP, same caller keys):
+`capabilities`, `execute`, `fetch`, `write`, `write_status`, `onboard`. MCP calls never wait on a
+human: writes return `pending_approval` and librarian finishes them once approved. librarian
+works behind the **LiteLLM** gateway as both an MCP server and an A2A agent
+([docs/integrations.md](docs/integrations.md#litellm-agent-gateway)).
+
 Results are A2A artifacts with the data plus **provenance**: which API and operation, the URL
 (secrets redacted), when, for which calling agent and principal, and which credential reference.
 

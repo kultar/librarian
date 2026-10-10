@@ -209,3 +209,28 @@ async def test_write_status_is_private_to_the_requesting_agent(
     async with connect() as session:
         result = await session.call_tool("write_status", {"approval": pending["approval"]})
     assert result.is_error
+
+
+async def test_mcp_accepts_requests_for_any_host_name(server: str) -> None:
+    # Gateways and other pods reach librarian by service name, not "localhost".
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "t", "version": "1"},
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{server}/mcp",
+            json=body,
+            headers={
+                "Authorization": "Bearer key-a",
+                "Host": "librarian:8080",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
+    assert response.status_code == 200, response.text

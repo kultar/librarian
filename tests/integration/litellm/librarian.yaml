@@ -1,0 +1,11 @@
+host: 0.0.0.0
+port: 8080
+public_url: http://localhost:18301
+registry_dir: /registry
+database_url: ""
+callers:
+  - agent: litellm-gateway          # one key for the gateway; people are told apart by principal
+    key_ref: librarian/callers/litellm-gateway
+    write_apis: [echo]
+    owner: ops@example.com
+approvers: {mode: token}

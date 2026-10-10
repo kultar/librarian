@@ -1,0 +1,25 @@
+# librarian behind the LiteLLM gateway, as both an MCP server and an A2A agent.
+services:
+  librarian:
+    build: ../../..
+    image: librarian:integration
+    command: [serve, --config, /config/librarian.yaml]
+    ports: ["18301:8080"]
+    environment:
+      LIBRARIAN_SECRET_LIBRARIAN_CALLERS_LITELLM_GATEWAY: key-gw
+      LIBRARIAN_SECRET_ECHO_READ: read-1
+      LIBRARIAN_SECRET_SERVICE_ECHO_WRITE_TOKEN: w-litellm
+    volumes:
+      - ./librarian.yaml:/config/librarian.yaml:ro
+      - ../registry:/registry:ro
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.104.2
+    command: [--config, /config/litellm.yaml, --port, "4000"]
+    ports: ["14000:4000"]
+    environment:
+      LIBRARIAN_KEY: key-gw
+    volumes:
+      - ./litellm.yaml:/config/litellm.yaml:ro
+    depends_on: [librarian]
+  httpbin:
+    image: mccutchen/go-httpbin:latest

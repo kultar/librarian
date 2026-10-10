@@ -17,7 +17,56 @@ Things a client must handle:
   as strings so they keep their precision.
 - **Principal**: pass the person the agent acts for as message metadata `{"principal": "..."}`.
 
-## LiteLLM (model gateway)
+## LiteLLM (agent gateway)
+
+librarian works behind LiteLLM both as an **MCP server** and as an **A2A agent**, tested end to
+end against LiteLLM v1.104.2 (`tests/integration/litellm`).
+
+```yaml
+# LiteLLM config.yaml
+mcp_servers:
+  librarian:                          # tools appear as librarian-execute, librarian-write, ...
+    server_id: librarian
+    url: http://librarian.<ns>.svc:8080/mcp
+    transport: http
+    auth_type: bearer_token
+    auth_value: os.environ/LIBRARIAN_GATEWAY_KEY   # librarian caller key for the gateway
+    extra_headers: ["x-principal-token"]           # forward the user's identity token
+    timeout: 120                                    # above librarian's slowest tool (fetch)
+
+agents:
+  - agent_name: librarian
+    static_headers: {Authorization: "Bearer <librarian caller key for the gateway>"}
+    extra_headers: ["x-principal-token"]
+    agent_card_params:
+      name: librarian
+      url: http://librarian.<ns>.svc:8080/
+      protocolVersion: "1.0"                        # pin it
+      # description, version, capabilities, input/output modes, skills: copy from
+      # librarian's /.well-known/agent-card.json (LiteLLM serves this stored copy)
+```
+
+On the librarian side, give the gateway its own caller (`callers: [{agent: litellm-gateway,
+key_ref: librarian/callers/litellm-gateway, apis: [...], write_apis: [...], owner: ...}]`).
+Everything that reaches librarian through LiteLLM then arrives as that one agent, so scope it
+accordingly; people are told apart by `X-Principal-Token` when principal verification is on.
+
+Clients call LiteLLM with their LiteLLM key in `x-litellm-api-key` (so `Authorization` stays
+free), at `/librarian/mcp` (MCP) or `/a2a/librarian` (A2A).
+
+Things that matter behind LiteLLM:
+
+- **A2A task calls arrive in 0.3 form.** LiteLLM forwards `GetTask`/`CancelTask` upstream with
+  A2A 0.3 method names and params even for 1.0 agents; librarian accepts both (without that,
+  polling a task through the gateway fails with "Method not found").
+- **MCP is stateless with JSON responses**, so LiteLLM's per-call upstream sessions work and
+  any replica can answer.
+- **MCP tool calls never block on a human:** writes return `pending_approval` and are finished
+  by librarian after approval (`write_status`); missing credentials return `credential_pending`.
+- **Host header:** librarian accepts any `Host` on `/mcp` by default (the MCP SDK's default
+  allows only localhost and answers 421 through a gateway). Pin hosts with `mcp_allowed_hosts`.
+
+### LiteLLM as librarian's model gateway
 
 The `fetch` skill plans with any OpenAI-compatible endpoint:
 
@@ -34,12 +83,11 @@ and LiteLLM together.
 
 ## kagent
 
-kagent agents talk A2A, so they can delegate API work to librarian as a remote A2A agent. How a
-kagent `Agent` references a remote A2A agent depends on your kagent version; check
-`kubectl explain agent.spec` on your cluster for the remote-agent / A2A tool fields rather than
-copying a manifest from elsewhere. Point it at the librarian Service
-(`http://librarian.<namespace>.svc:8080`), give the kagent agent its own caller key, and scope it
-with `apis` / `write_apis` in librarian's `callers` config.
+kagent 1.0 (`api.kagent.dev/v1alpha3`, alpha at the time of writing) runs bring-your-own agents
+as per-session sandboxed actors with an egress allowlist and kagent's own task store, which does
+not fit a shared service like librarian. The supported way for kagent agents to use librarian
+is as a tool: register librarian's `/mcp` endpoint as a `RemoteMCPServer` and bind it to the
+agent (this also adds librarian to the agent's egress allowlist).
 
 ## Verified principals
 

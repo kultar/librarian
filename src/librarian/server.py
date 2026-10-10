@@ -47,6 +47,7 @@ from a2a.types import (
     SecurityScheme,
     StringList,
 )
+from mcp.server.transport_security import TransportSecuritySettings
 from opentelemetry import propagate, trace
 from pydantic import ValidationError
 from pydantic_ai.exceptions import AgentRunError
@@ -551,14 +552,29 @@ def create_app(
 
     routes = [
         *create_agent_card_routes(card),
-        *create_jsonrpc_routes(handler, RPC_PATH, context_builder=CallerContextBuilder()),
+        *create_jsonrpc_routes(
+            handler,
+            RPC_PATH,
+            context_builder=CallerContextBuilder(),
+            # Gateways such as LiteLLM forward task calls (tasks/get, ...) with A2A 0.3
+            # method names and params even for 1.0 agents; accept both.
+            enable_v0_3_compat=True,
+        ),
         Route("/healthz", healthz, methods=["GET"]),
     ]
     mcp = build_mcp(librarian) if librarian.settings.mcp_enabled else None
     if mcp is not None:
         # Stateless + JSON responses: no session affinity (gateways, several replicas).
+        allowed = librarian.settings.mcp_allowed_hosts
         mcp_app = mcp.streamable_http_app(
-            streamable_http_path=MCP_PATH, stateless_http=True, json_response=True
+            streamable_http_path=MCP_PATH,
+            stateless_http=True,
+            json_response=True,
+            # The SDK only accepts Host: localhost by default, which rejects every call
+            # through a service name or gateway with 421.
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=bool(allowed), allowed_hosts=allowed
+            ),
         )
         routes += list(mcp_app.routes)
     if surface == "all":

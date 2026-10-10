@@ -212,6 +212,10 @@ class Settings(BaseSettings):
     onboarding_enabled: bool = True
     # Serve librarian's skills as MCP tools at /mcp (Streamable HTTP) on the A2A listener.
     mcp_enabled: bool = True
+    # Host headers accepted on /mcp (the MCP SDK's DNS-rebinding guard, e.g.
+    # ["librarian.internal:8080"]). Empty = any host: every MCP request already needs a
+    # caller key, which a rebinding web page cannot have.
+    mcp_allowed_hosts: list[str] = Field(default_factory=list[str])
     # How long an A2A task waits for a human to provide a missing credential.
     credential_wait_seconds: float = 900
 
