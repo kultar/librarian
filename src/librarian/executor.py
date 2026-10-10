@@ -13,7 +13,7 @@ import base64
 import json
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import httpx
@@ -34,6 +34,7 @@ from librarian.registry.models import (
     is_reserved_secret,
 )
 from librarian.secrets import SecretStore
+from librarian.shaping import get_path, select, set_path
 
 MAX_REDIRECTS = 3
 USER_AGENT = "librarian/0.1 (+https://github.com/kultar/librarian)"
@@ -116,9 +117,16 @@ class Executor:
         truncated = False
         status_code = 0
         content_type = ""
+        paging = entry.pagination_for(op)
         next_url: str | None = url
         next_query: dict[str, ArgValue] | None = query
         page_count = 0
+        offset = _int(query.get(paging.offset_param or "")) if paging.offset_param else 0
+        page_number = (
+            _int(query.get(paging.page_param or ""), paging.first_page)
+            if paging.page_param
+            else paging.first_page
+        )
 
         while next_url is not None and page_count < request.max_pages:
             response, body, cut, final_url = await self._send(
@@ -129,11 +137,34 @@ class Executor:
             content_type = response.headers.get("content-type", "")
             total_bytes += len(body)
             truncated = truncated or cut
-            pages.append(_decode(body, content_type, cut))
-            if not response.is_success or cut:
+            page = _decode(body, content_type, cut)
+            pages.append(page)
+            if not response.is_success or cut or page_count >= request.max_pages:
                 break
-            next_url = _next_link(response, entry, final_url)
-            next_query = None  # the next link already carries its own query
+            if paging.style == "link":
+                next_url = _next_link(response, entry, final_url)
+                next_query = None  # the next link already carries its own query
+                continue
+            items = get_path(page, paging.items_path) if paging.items_path else None
+            if paging.style == "cursor":
+                cursor = get_path(page, paging.next_cursor_path or "")
+                if not isinstance(cursor, str | int) or not str(cursor) or len(str(cursor)) > 2048:
+                    break
+                next_query = {**query, paging.cursor_param or "": str(cursor)}
+            elif paging.style == "offset":
+                if not isinstance(items, list) or not items:
+                    break
+                offset += len(cast(list[Any], items))
+                total = get_path(page, paging.total_path) if paging.total_path else None
+                if isinstance(total, int) and offset >= total:
+                    break
+                next_query = {**query, paging.offset_param or "": offset}
+            else:  # page
+                if not isinstance(items, list) or not items:
+                    break
+                page_number += 1
+                next_query = {**query, paging.page_param or "": page_number}
+            next_url = url
 
         ok = 200 <= status_code < 300
         provenance = Provenance(
@@ -172,7 +203,9 @@ class Executor:
                 f"{entry.name} refused this request (HTTP 403): the credential is valid but "
                 "lacks permission for this resource"
             )
-        data = pages[0] if len(pages) == 1 else pages
+        data = _merge_pages(pages, paging.items_path)
+        if request.select:
+            data = select(data, request.select)
         return CallResult(
             status_code=status_code,
             ok=ok,
@@ -339,6 +372,27 @@ def _next_link(response: httpx.Response, entry: ApiEntry, base_url: str) -> str 
     # Join against the real URL (the response URL may be a pinned IP address).
     target = urljoin(base_url, link.get("url", ""))
     return target if _same_origin(entry, target) else None
+
+
+def _int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _merge_pages(pages: list[Any], items_path: str | None) -> Any:
+    """One page as-is; several pages merged into one list at `items_path`."""
+    if len(pages) == 1:
+        return pages[0]
+    if items_path is None:
+        return pages
+    merged: list[Any] = []
+    for page in pages:
+        items = get_path(page, items_path)
+        if isinstance(items, list):
+            merged.extend(cast(list[Any], items))
+    return set_path(pages[-1], items_path, merged)
 
 
 def _redact(url: str, query: dict[str, ArgValue], entry: ApiEntry) -> str:

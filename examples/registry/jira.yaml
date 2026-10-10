@@ -42,6 +42,11 @@ operations:
       - {name: fields, in: query}
       - {name: maxResults, in: query, type: integer}
       - {name: nextPageToken, in: query}
+    pagination:
+      style: cursor
+      cursor_param: nextPageToken
+      next_cursor_path: nextPageToken
+      items_path: issues
   - id: getProject
     method: GET
     path: /rest/api/3/project/{projectIdOrKey}

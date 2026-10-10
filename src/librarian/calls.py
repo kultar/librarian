@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from librarian.registry.models import EntryStatus
 
@@ -44,6 +44,16 @@ class CallRequest(BaseModel):
     args: dict[str, ArgValue] = Field(default_factory=dict[str, ArgValue])
     body: dict[str, Any] | None = None
     max_pages: int = Field(default=1, ge=1, le=20)
+    # Dotted paths to keep, e.g. ["issues.key", "issues.fields.summary"].
+    select: list[str] = Field(default_factory=list[str], max_length=50)
+
+    @field_validator("select")
+    @classmethod
+    def _check_select(cls, paths: list[str]) -> list[str]:
+        for path in paths:
+            if not path.strip() or len(path) > 200:
+                raise ValueError(f"invalid select path {path!r}")
+        return paths
 
 
 class Provenance(BaseModel):

@@ -33,7 +33,7 @@ credential out.
 
 | Skill | What it does | LLM? |
 |---|---|---|
-| `execute` | Run one read operation: `{"skill":"execute","api":"jira","operation":"getIssue","args":{"issueIdOrKey":"ABC-1"}}` | No |
+| `execute` | Run one read operation: `{"skill":"execute","api":"jira","operation":"getIssue","args":{"issueIdOrKey":"ABC-1"}}`. Optional `select` (dotted paths, e.g. `["fields.summary"]`) and `max_pages` | No |
 | `capabilities` | List APIs and read operations: `{"skill":"capabilities","query":"issues"}` | No |
 | `onboard` | Learn an API: `{"skill":"onboard","api":"jira","spec_url":"https://..."}` or `"base_url"` to auto-discover | No |
 | `fetch` | Plain language: *"open bugs assigned to the payments team"* (only when a model is configured) | Yes |

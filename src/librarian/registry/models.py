@@ -89,6 +89,42 @@ class Parameter(StrictModel):
         return self
 
 
+class Pagination(StrictModel):
+    """How to fetch more pages of an operation's results.
+
+    - link:   follow `Link: <...>; rel="next"` headers (the default)
+    - cursor: send the value at `next_cursor_path` back as `cursor_param`
+              (e.g. Jira: nextPageToken → nextPageToken)
+    - offset: advance `offset_param` by the number of items received
+              (e.g. startAt), optionally stopping at `total_path`
+    - page:   increment `page_param` until a page has no items
+    `items_path` names the list in each page; when set, pages are merged into
+    one list at that path.
+    """
+
+    style: Literal["link", "cursor", "offset", "page"] = "link"
+    items_path: str | None = None
+    cursor_param: str | None = None
+    next_cursor_path: str | None = None
+    offset_param: str | None = None
+    total_path: str | None = None
+    page_param: str | None = None
+    first_page: int = 1
+
+    @model_validator(mode="after")
+    def _check(self) -> Pagination:
+        required = {
+            "cursor": ("cursor_param", "next_cursor_path"),
+            "offset": ("offset_param", "items_path"),
+            "page": ("page_param", "items_path"),
+            "link": (),
+        }[self.style]
+        missing = [name for name in required if getattr(self, name) is None]
+        if missing:
+            raise ValueError(f"{self.style} pagination needs {', '.join(missing)}")
+        return self
+
+
 class Operation(StrictModel):
     id: str
     method: str
@@ -99,6 +135,7 @@ class Operation(StrictModel):
     read_basis: ReadBasis | None = None
     # Only meaningful for reviewed reads that need a JSON body (POST search).
     accepts_body: bool = False
+    pagination: Pagination | None = None  # overrides the entry's default
 
     @field_validator("id")
     @classmethod
@@ -209,6 +246,7 @@ class ApiEntry(StrictModel):
     auth: AuthSpec = Field(default_factory=NoAuth)
     credential: CredentialGuidance = Field(default_factory=CredentialGuidance)
     operations: list[Operation] = Field(default_factory=list[Operation])
+    pagination: Pagination | None = None  # default for all operations
     source: SpecSource = Field(default_factory=SpecSource)
     owners: Owners = Field(default_factory=Owners)
     notes: str = Field(default="", max_length=8000)
@@ -263,6 +301,9 @@ class ApiEntry(StrictModel):
     @property
     def secret_ref(self) -> str | None:
         return None if isinstance(self.auth, NoAuth) else self.auth.secret_ref
+
+    def pagination_for(self, op: Operation) -> Pagination:
+        return op.pagination or self.pagination or Pagination()
 
     def operation(self, operation_id: str) -> Operation | None:
         return next((op for op in self.operations if op.id == operation_id), None)

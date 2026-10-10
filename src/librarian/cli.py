@@ -100,6 +100,10 @@ def call(
         list[str] | None, typer.Option("--arg", "-a", help="Argument as name=value (repeatable)")
     ] = None,
     pages: int = 1,
+    select: Annotated[
+        list[str] | None,
+        typer.Option("--select", "-s", help="Keep only this dotted path (repeatable)"),
+    ] = None,
     config: ConfigOption = None,
 ) -> None:
     """Run one read operation locally (same policy as the server)."""
@@ -114,7 +118,9 @@ def call(
         librarian = Librarian(_settings(config))
         librarian.load()
         try:
-            request = CallRequest(api=api, operation=operation, args=dict(args), max_pages=pages)
+            request = CallRequest(
+                api=api, operation=operation, args=dict(args), max_pages=pages, select=select or []
+            )
             result = await librarian.executor.execute(request, Caller(agent="cli"))
         finally:
             await librarian.aclose()

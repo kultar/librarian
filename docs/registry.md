@@ -42,6 +42,32 @@ operations:
     accepts_body: true
 ```
 
+## Pagination
+
+Declare it on the entry (default for every operation) or per operation. Without it, `Link:
+rel="next"` headers are followed. Callers ask for more pages with `max_pages` (1-20).
+
+```yaml
+pagination:                 # Jira search: send nextPageToken back until it disappears
+  style: cursor
+  cursor_param: nextPageToken
+  next_cursor_path: nextPageToken
+  items_path: issues        # pages are merged into one list here
+```
+
+| Style | Needs | Stops when |
+|---|---|---|
+| `link` | nothing | no `rel="next"` link |
+| `cursor` | `cursor_param`, `next_cursor_path` | no cursor in the response |
+| `offset` | `offset_param`, `items_path` (`total_path` optional) | empty page or offset ≥ total |
+| `page` | `page_param`, `items_path` (`first_page`, default 1) | empty page |
+
+## Field selection
+
+Callers can pass `select` with dotted paths to keep only what they need. Lists are traversed
+automatically: `["issues.key", "issues.fields.summary"]` returns just the key and summary of every
+issue. This keeps large responses under the size cap and saves LLM context.
+
 ## Rules enforced by the policy engine
 
 | Situation | Allowed? |

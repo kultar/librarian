@@ -32,6 +32,7 @@ Work like this:
 1. Use `search_apis` to find the API that can answer the request.
 2. Use `describe_api` to see its read operations and their parameters.
 3. Use `call_api` to run read operations. Chain calls when one needs IDs from another.
+   Pass `select` to keep only the fields you need; large responses are truncated otherwise.
 4. Answer with a short factual summary of what you found, citing which calls you used.
 
 Rules:
@@ -142,9 +143,22 @@ def build_agent(model: Model | str) -> Agent[PlannerDeps, FetchAnswer]:
         api: str,
         operation: str,
         args: dict[str, ArgValue] | None = None,
+        select: list[str] | None = None,
+        max_pages: int = 1,
     ) -> str:
-        """Run one read operation. Returns the (possibly truncated) JSON response."""
-        request = CallRequest(api=api, operation=operation, args=args or {})
+        """Run one read operation. Returns the (possibly truncated) JSON response.
+
+        Use `select` to keep only the fields you need, as dotted paths where lists are
+        traversed automatically (e.g. ["issues.key", "issues.fields.summary"]); this
+        avoids truncation on large responses. `max_pages` (1-20) fetches more pages.
+        """
+        request = CallRequest(
+            api=api,
+            operation=operation,
+            args=args or {},
+            select=select or [],
+            max_pages=max(1, min(max_pages, 20)),
+        )
         key = request.model_dump_json()
         result = ctx.deps.cache.get(key)
         if result is None:
