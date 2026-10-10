@@ -13,10 +13,11 @@ from __future__ import annotations
 import base64
 import logging
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import quote
 
 import httpx
+import yaml
 
 from librarian.registry.models import Access, ApiEntry
 from librarian.registry.store import dump_entry
@@ -71,15 +72,20 @@ class GitHubPublisher:
         branch = f"librarian/onboard-{entry.id}-{stamp}"
         file_path = f"{self.directory}/{entry.id}.yaml" if self.directory else f"{entry.id}.yaml"
 
+        existing = await self._call(
+            "GET", f"/contents/{quote(file_path)}", params={"ref": self.base_branch}
+        )
+        if existing.status_code == 200 and _is_verified(existing.json()):
+            # Never propose replacing a reviewed entry with an unreviewed one.
+            raise PublishError(
+                f"{file_path} is already verified in {self.repo}; not proposing a replacement"
+            )
         base = await self._call("GET", f"/git/ref/heads/{quote(self.base_branch)}")
         if base.status_code == 404:
             raise PublishError(f"base branch {self.base_branch!r} not found in {self.repo}")
         sha = base.json()["object"]["sha"]
         await self._call("POST", "/git/refs", json={"ref": f"refs/heads/{branch}", "sha": sha})
 
-        existing = await self._call(
-            "GET", f"/contents/{quote(file_path)}", params={"ref": self.base_branch}
-        )
         payload: dict[str, Any] = {
             "message": f"registry: learn {entry.id} ({entry.name})",
             "content": base64.b64encode(dump_entry(entry).encode()).decode(),
@@ -102,6 +108,15 @@ class GitHubPublisher:
         return str(pr.json()["html_url"])
 
 
+def _is_verified(content: dict[str, Any]) -> bool:
+    try:
+        text = base64.b64decode(str(content.get("content", ""))).decode("utf-8")
+        data: Any = yaml.safe_load(text)
+    except (ValueError, yaml.YAMLError):
+        return False
+    return isinstance(data, dict) and cast(dict[str, Any], data).get("status") == "verified"
+
+
 def review_body(entry: ApiEntry, learned_by: str) -> str:
     reads = [op.id for op in entry.operations if op.access is Access.READ]
     unknown = [op.id for op in entry.operations if op.access is Access.UNKNOWN]
@@ -120,7 +135,7 @@ def review_body(entry: ApiEntry, learned_by: str) -> str:
         f"| Spec | {entry.source.url or 'n/a'} |",
         f"| Reads | {len(reads)} |",
         f"| Need review | {len(unknown)} |",
-        f"| Writes (always refused) | {writes} |",
+        f"| Writes (refused unless a reviewer enables them) | {writes} |",
         f"| Key test | `{entry.credential.validation_operation or 'none'}` |",
         "",
         "### Review checklist",

@@ -6,6 +6,7 @@ These run librarian against real services in Docker. They are skipped unless
 | Stack | What it proves |
 |---|---|
 | `replicas/` | Two replicas on **Postgres** and **AWS Secrets Manager** (LocalStack) in front of go-httpbin: a credential requested on one replica is provided on the other (validated with a real call, stored in Secrets Manager, waiting task resumed); a write approved on the other replica using one key of a JSON secret; approval links surviving a restart. |
+| `test_github.py` | The **GitHub publisher** against a real repo: a learned API becomes a pull request with the review checklist and a valid provisional entry; the PR and branch are cleaned up afterwards. Needs `LIBRARIAN_GITHUB_REPO=owner/repo` (a throwaway repo with `main`) and `GITHUB_TOKEN`. |
 | `identity/` | **Keycloak** (real OIDC) + **oauth2-proxy** + librarian in one network namespace, like the Helm sidecar: verified principals from real tokens, tampered tokens refused, forged identity headers blocked, a real browser sign-in where only the requester can approve their write, and the credential page's approver-group check from real group claims. |
 
 ```bash

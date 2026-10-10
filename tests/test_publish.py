@@ -16,9 +16,10 @@ from tests.test_openapi import SPEC
 
 
 class FakeGitHub:
-    def __init__(self, file_exists: bool = False) -> None:
+    def __init__(self, file_exists: bool = False, existing_status: str = "provisional") -> None:
         self.calls: list[tuple[str, str, Any]] = []
         self.file_exists = file_exists
+        self.existing_status = existing_status
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else None
@@ -31,7 +32,8 @@ class FakeGitHub:
             return httpx.Response(201, json={})
         if request.method == "GET" and path.startswith("/contents/"):
             if self.file_exists:
-                return httpx.Response(200, json={"sha": "old-sha"})
+                content = base64.b64encode(f"id: jira\nstatus: {self.existing_status}\n".encode())
+                return httpx.Response(200, json={"sha": "old-sha", "content": content.decode()})
             return httpx.Response(404, json={})
         if request.method == "PUT" and path.startswith("/contents/"):
             return httpx.Response(201, json={})
@@ -54,8 +56,13 @@ async def test_publish_opens_pull_request() -> None:
     url = await publisher(fake).publish(entry, "release-notes-agent")
     assert url == "https://github.com/acme/registry/pull/7"
     methods = [(m, p) for m, p, _ in fake.calls]
-    assert methods[:2] == [("GET", "/git/ref/heads/main"), ("POST", "/git/refs")]
-    branch_ref = fake.calls[1][2]["ref"]
+    # The existing file is checked first, so a refusal leaves no branch behind.
+    assert methods[:3] == [
+        ("GET", "/contents/registry/jira.yaml"),
+        ("GET", "/git/ref/heads/main"),
+        ("POST", "/git/refs"),
+    ]
+    branch_ref = fake.calls[2][2]["ref"]
     assert branch_ref.startswith("refs/heads/librarian/onboard-jira-")
     put = next(body for m, _, body in fake.calls if m == "PUT")
     assert put["branch"] == branch_ref.removeprefix("refs/heads/")
@@ -113,3 +120,10 @@ async def test_onboard_publishes_and_survives_publish_failure(
     outcome = await librarian.onboard("jira", spec_url="https://x.example/spec.json")
     assert outcome.review_url is None
     assert outcome.review_error is not None and "GitHub is down" in outcome.review_error
+
+
+async def test_never_proposes_replacing_a_verified_entry() -> None:
+    fake = FakeGitHub(file_exists=True, existing_status="verified")
+    with pytest.raises(PublishError, match="already verified"):
+        await publisher(fake).publish(entry_from_spec(SPEC, api_id="jira"), "agent")
+    assert not [c for c in fake.calls if c[0] in ("POST", "PUT")]  # no branch, no PR
