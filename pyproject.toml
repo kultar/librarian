@@ -1,6 +1,6 @@
 [project]
 name = "librarian"
-version = "0.1.0"
+version = "0.2.0"
 description = "An A2A agent that learns APIs on demand and gives other agents safe, read-only, audited access to them."
 readme = "README.md"
 license = "Apache-2.0"

@@ -230,7 +230,7 @@ class LibrarianExecutor(AgentExecutor):
             request = CallRequest.model_validate(
                 {
                     k: command[k]
-                    for k in ("api", "operation", "args", "body", "max_pages")
+                    for k in ("api", "operation", "args", "body", "max_pages", "select")
                     if k in command
                 }
             )

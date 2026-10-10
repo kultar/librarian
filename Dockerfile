@@ -21,6 +21,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     LIBRARIAN_REGISTRY_DIR=/data/registry \
     LIBRARIAN_SECRETS_DIR=/data/secrets \
     LIBRARIAN_STATE_DIR=/data \
+    LIBRARIAN_DATABASE_URL=sqlite+aiosqlite:////data/librarian.db \
     PYDANTIC_AI_NO_BANNER=1
 USER librarian
 VOLUME ["/data"]

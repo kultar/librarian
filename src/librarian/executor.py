@@ -18,7 +18,7 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import httpx
 
-from librarian import telemetry
+from librarian import __version__, telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance
 from librarian.net import BlockedAddress, pin
@@ -38,7 +38,7 @@ from librarian.secrets import SecretStore
 from librarian.shaping import get_path, select, set_path
 
 MAX_REDIRECTS = 3
-USER_AGENT = "librarian/0.1 (+https://github.com/kultar/librarian)"
+USER_AGENT = f"librarian/{__version__} (+https://github.com/kultar/librarian)"
 
 
 class PolicyDenied(Exception):

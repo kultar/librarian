@@ -260,3 +260,30 @@ async def test_caller_profiles_limit_capabilities_and_onboarding(librarian: Libr
         )
         assert onboard.final == TaskState.TASK_STATE_FAILED
         assert any("not allowed to onboard" in t for t in onboard.texts)
+
+
+async def test_execute_select_over_a2a(
+    librarian: Librarian, http: httpx.AsyncClient, router: Router, secrets_store: FileSecretStore
+) -> None:
+    await secrets_store.put("tracker/readonly", "tok")
+    router.add(
+        "GET",
+        f"{BASE}/v1/issues/ABC-1",
+        lambda r: httpx.Response(200, json={"key": "ABC-1", "fields": {"summary": "s", "x": 1}}),
+    )
+    outcome = await send(
+        librarian,
+        http,
+        [
+            new_data_part(
+                {
+                    "skill": "execute",
+                    "api": "tracker",
+                    "operation": "getIssue",
+                    "args": {"key": "ABC-1"},
+                    "select": ["key", "fields.summary"],
+                }
+            )
+        ],
+    )
+    assert outcome.data[-1]["data"] == {"key": "ABC-1", "fields": {"summary": "s"}}
