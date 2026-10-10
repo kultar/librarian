@@ -50,7 +50,6 @@ def serve(
     logging.basicConfig(level=log_level.upper(), format="%(levelname)s %(name)s: %(message)s")
     settings = _settings(config)
     librarian = Librarian(settings)
-    librarian.load()
     uvicorn.run(
         create_app(librarian),
         host=host or settings.host,

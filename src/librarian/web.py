@@ -118,18 +118,18 @@ is blocked until someone re-enables it.</p>
 
 def credential_routes(broker: CredentialBroker, approvers: ApproverSettings) -> list[Route]:
     async def show(request: Request) -> Response:
-        req = broker.get(request.path_params["request_id"])
+        req = await broker.load(request.path_params["request_id"])
         token = request.query_params.get("t", "")
         if req is None or not broker.check_token(req, token):
             return _page("Link expired", "<h1>This link is no longer valid</h1>", 404)
         _, problem = _approver(request, approvers)
         if problem:
             return _page("Not allowed", f"<h1>Not allowed</h1><p>{html.escape(problem)}</p>", 403)
-        names = await broker.secrets.list_names()
+        names = await broker.offerable_secrets()
         return _page(f"Access needed: {req.api_name}", _form(req, token, names, None))
 
     async def submit(request: Request) -> Response:
-        req = broker.get(request.path_params["request_id"])
+        req = await broker.load(request.path_params["request_id"])
         form: Any = await request.form()
         token = str(form.get("t", ""))
         if req is None or not broker.check_token(req, token):
@@ -155,7 +155,7 @@ def credential_routes(broker: CredentialBroker, approvers: ApproverSettings) -> 
         except LookupError:
             return _page("Already handled", "<h1>This request was already handled</h1>", 409)
         if error:
-            names = await broker.secrets.list_names()
+            names = await broker.offerable_secrets()
             return _page(f"Access needed: {req.api_name}", _form(req, token, names, error), 400)
         note = html.escape(req.resolution_note or "")
         return _page(

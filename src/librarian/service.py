@@ -25,6 +25,7 @@ from librarian.policy import PolicyEngine
 from librarian.registry.models import Access, ApiEntry, EntryStatus
 from librarian.registry.store import Registry
 from librarian.secrets import ChainSecretStore, EnvSecretStore, FileSecretStore, SecretStore
+from librarian.state import StateStore, make_engine
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +74,8 @@ class Librarian:
         self.http = http_client or httpx.AsyncClient(
             timeout=settings.request_timeout_seconds, follow_redirects=False
         )
+        self.engine = make_engine(settings.database_url) if settings.database_url else None
+        self.state = StateStore(self.engine) if self.engine is not None else None
         self.policy = PolicyEngine(
             self.registry,
             rate_limit_per_minute=settings.rate_limit_per_minute,
@@ -97,6 +100,7 @@ class Librarian:
             remind_after=timedelta(hours=settings.notifier.remind_after_hours),
             default_channel=settings.notifier.slack.channel,
             default_approver_group=settings.notifier.slack.approver_group,
+            store=self.state,
         )
         self.broker.validator = self._validate_credential
         model = planner_model if planner_model is not None else _model_from_settings(settings)
@@ -105,8 +109,36 @@ class Librarian:
     def load(self) -> None:
         self.registry.load()
 
+    async def start(self) -> None:
+        """Load the registry and durable state; call once before serving."""
+        self.load()
+        if self.state is not None:
+            await self.state.initialize()
+            restored = await self.broker.restore()
+            if restored:
+                log.info("restored %d pending credential request(s)", restored)
+        self.broker.set_signing_key(await self._signing_key())
+
+    async def _signing_key(self) -> bytes:
+        ref = self.settings.signing_key_ref
+        stored = await self.secrets.get(ref)
+        if stored is not None:
+            return stored.encode()
+        key = pysecrets.token_hex(32)
+        if self.secrets.writable:
+            await self.secrets.put(ref, key)
+        else:
+            log.warning(
+                "no signing key at %r and the secret store is read-only: approval links "
+                "will stop working after a restart",
+                ref,
+            )
+        return key.encode()
+
     async def aclose(self) -> None:
         await self.http.aclose()
+        if self.engine is not None:
+            await self.engine.dispose()
 
     # -- skills ---------------------------------------------------------------
 

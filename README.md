@@ -98,12 +98,17 @@ model_api_key: sk-litellm-...       # or LIBRARIAN_MODEL_API_KEY
 Kubernetes volume) and a read-only environment store (`jira/readonly` →
 `LIBRARIAN_SECRET_JIRA_READONLY`). Cloud secret managers are planned plugins.
 
+**State.** Credential requests and A2A tasks are stored in SQLite by default
+(`.librarian/librarian.db`), so pending approvals and their links survive restarts. For several
+replicas, install the `postgres` extra and set `database_url: postgresql+asyncpg://...`; an
+approval handled by any replica wakes the task waiting on another. Rate limits are per replica.
+
 **Caller authentication.** List agents and the secret holding each one's key:
 
 ```yaml
 callers:
   - agent: release-notes-agent
-    key_ref: callers/release-notes-agent
+    key_ref: librarian/callers/release-notes-agent
 ```
 
 With no callers configured the server is open: fine on a laptop, never in a shared deployment.

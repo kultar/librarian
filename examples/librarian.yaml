@@ -30,7 +30,7 @@ credential_wait_seconds: 900           # how long a task waits for an approver
 # Empty = open server (local use only).
 callers: []
 #  - agent: release-notes-agent
-#    key_ref: callers/release-notes-agent
+#    key_ref: librarian/callers/release-notes-agent
 
 notifier:
   type: log                            # log | slack | webhook

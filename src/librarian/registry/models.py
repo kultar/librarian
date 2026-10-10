@@ -18,6 +18,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 OPERATION_ID = re.compile(r"^[A-Za-z0-9_.\-]{1,128}$")
 SECRET_REF = re.compile(r"^[a-z0-9][a-z0-9_./-]{0,127}$")
+# Internal secrets (caller keys, the link-signing key) live under this prefix.
+# API entries may never reference them, so no registry entry can make the
+# librarian send an internal secret to an outside host.
+RESERVED_SECRET_PREFIX = "librarian/"  # noqa: S105 - a name prefix, not a secret
+
+
+def is_reserved_secret(ref: str) -> bool:
+    return ref.startswith(RESERVED_SECRET_PREFIX)
+
 
 READ_METHODS = frozenset({"GET", "HEAD"})
 HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
@@ -231,8 +240,14 @@ class ApiEntry(StrictModel):
                 raise ValueError(f"duplicate operation id {op.id!r}")
             seen.add(op.id)
         auth = self.auth
-        if not isinstance(auth, NoAuth) and not SECRET_REF.match(auth.secret_ref):
-            raise ValueError(f"invalid secret_ref {auth.secret_ref!r}")
+        if not isinstance(auth, NoAuth):
+            if not SECRET_REF.match(auth.secret_ref):
+                raise ValueError(f"invalid secret_ref {auth.secret_ref!r}")
+            if is_reserved_secret(auth.secret_ref):
+                raise ValueError(
+                    f"secret_ref {auth.secret_ref!r} uses the reserved prefix "
+                    f"{RESERVED_SECRET_PREFIX!r} (internal secrets)"
+                )
         validation = self.credential.validation_operation
         if validation is not None:
             op = self.operation(validation)

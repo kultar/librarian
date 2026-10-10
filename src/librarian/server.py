@@ -32,7 +32,9 @@ from a2a.server.routes import (
     create_agent_card_routes,
     create_jsonrpc_routes,
 )
+from a2a.server.tasks.database_task_store import DatabaseTaskStore
 from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
+from a2a.server.tasks.task_store import TaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
 from a2a.types import (
     AgentCapabilities,
@@ -364,9 +366,14 @@ def create_app(librarian: Librarian, caller_keys: dict[str, str] | None = None) 
     card = build_agent_card(
         librarian, require_auth=bool(librarian.settings.callers) or bool(caller_keys)
     )
+    task_store: TaskStore = (
+        DatabaseTaskStore(librarian.engine, table_name="librarian_tasks")
+        if librarian.engine is not None
+        else InMemoryTaskStore()
+    )
     handler = DefaultRequestHandlerV2(
         agent_executor=LibrarianExecutor(librarian),
-        task_store=InMemoryTaskStore(),
+        task_store=task_store,
         agent_card=card,
     )
 
@@ -388,8 +395,7 @@ def create_app(librarian: Librarian, caller_keys: dict[str, str] | None = None) 
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncGenerator[None]:
-        if not librarian.registry.all():
-            librarian.load()
+        await librarian.start()
         keys = caller_keys if caller_keys is not None else await _caller_keys(librarian)
         app.state.caller_keys.update(keys)
         sweeper = asyncio.create_task(_sweep_forever(librarian))

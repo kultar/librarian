@@ -17,12 +17,13 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import Caller
-from librarian.registry.models import ApiEntry, EntryStatus, NoAuth
+from librarian.registry.models import ApiEntry, EntryStatus, NoAuth, is_reserved_secret
 from librarian.registry.store import Registry
 from librarian.secrets import SecretStore
 
@@ -84,6 +85,17 @@ class Notifier:
         )
 
 
+class RequestStore(Protocol):
+    """Durable storage for requests (see `librarian.state.StateStore`)."""
+
+    async def save_request(self, request: CredentialRequest) -> None: ...
+    async def get_request(self, request_id: str) -> CredentialRequest | None: ...
+    async def pending_for(self, api: str) -> CredentialRequest | None: ...
+    async def list_requests(self, state: RequestState | None = None) -> list[CredentialRequest]: ...
+
+
+POLL_SECONDS = 2.0
+
 Validator = Callable[[ApiEntry], Awaitable[str | None]]
 """Checks a freshly provided credential; returns an error message or None."""
 
@@ -102,8 +114,10 @@ class CredentialBroker:
         remind_after: timedelta = timedelta(hours=4),
         default_channel: str | None = None,
         default_approver_group: str | None = None,
+        store: RequestStore | None = None,
     ) -> None:
         self.registry = registry
+        self.store = store
         self.secrets = secrets_store
         self.notifier = notifier
         self.audit = audit
@@ -118,6 +132,42 @@ class CredentialBroker:
         self._events: dict[str, asyncio.Event] = {}
         self._used_tokens: set[str] = set()
         self._lock = asyncio.Lock()
+
+    def set_signing_key(self, key: bytes) -> None:
+        self._signing_key = key
+
+    async def restore(self) -> int:
+        """Reload pending requests after a restart. Returns how many were restored."""
+        if self.store is None:
+            return 0
+        restored = await self.store.list_requests(RequestState.PENDING)
+        for request in restored:
+            request.waiting = 0  # the tasks that were waiting died with the old process
+            self._remember(request)
+        return len(restored)
+
+    def _remember(self, request: CredentialRequest) -> CredentialRequest:
+        self._requests[request.id] = request
+        self._events.setdefault(request.id, asyncio.Event())
+        return request
+
+    async def _persist(self, request: CredentialRequest) -> None:
+        if self.store is not None:
+            await self.store.save_request(request)
+
+    async def load(self, request_id: str) -> CredentialRequest | None:
+        """Get a request, refreshing from the shared store (another replica may own it)."""
+        if self.store is not None:
+            stored = await self.store.get_request(request_id)
+            if stored is not None:
+                current = self._requests.get(request_id)
+                if current is None:
+                    return self._remember(stored)
+                for name in CredentialRequest.model_fields:
+                    if name != "waiting":  # local count of tasks waiting on this replica
+                        setattr(current, name, getattr(stored, name))
+                return current
+        return self._requests.get(request_id)
 
     # -- opening and waiting -------------------------------------------------
 
@@ -144,6 +194,9 @@ class CredentialBroker:
         who = caller.agent + (f" (for {caller.principal})" if caller.principal else "")
         async with self._lock:
             existing = self.pending_for(entry.id)
+            if existing is None and self.store is not None:
+                stored = await self.store.pending_for(entry.id)
+                existing = self._remember(stored) if stored is not None else None
             if existing is not None:
                 existing.waiting += 1
                 if who not in existing.requested_by:
@@ -166,9 +219,9 @@ class CredentialBroker:
                     channel=entry.owners.channel or self.default_channel,
                     approver_group=entry.owners.approver_group or self.default_approver_group,
                 )
-                self._requests[request.id] = request
-                self._events[request.id] = asyncio.Event()
+                self._remember(request)
                 is_new = True
+            await self._persist(request)
         if is_new:
             await self.audit.record(
                 AuditEvent(
@@ -190,10 +243,18 @@ class CredentialBroker:
         event = self._events[request_id]
         remaining = (request.expires_at - datetime.now(UTC)).total_seconds()
         limit = remaining if max_wait is None else min(max_wait, remaining)
+        deadline = asyncio.get_running_loop().time() + max(limit, 0)
         try:
-            await asyncio.wait_for(event.wait(), timeout=max(limit, 0))
-        except TimeoutError:
-            await self._expire_if_due(request)
+            while request.state is RequestState.PENDING:
+                left = deadline - asyncio.get_running_loop().time()
+                if left <= 0:
+                    await self._expire_if_due(request)
+                    break
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=min(left, POLL_SECONDS))
+                except TimeoutError:
+                    # Another replica may have resolved it.
+                    await self.load(request_id)
         finally:
             if request.waiting > 0:
                 request.waiting -= 1
@@ -213,6 +274,7 @@ class CredentialBroker:
                 await self._close(request, RequestState.EXPIRED, None, "no one responded in time")
             elif not request.reminded and now - request.created_at >= self.remind_after:
                 request.reminded = True
+                await self._persist(request)
                 await self.notifier.updated(request)
 
     # -- one-time links ------------------------------------------------------
@@ -237,7 +299,7 @@ class CredentialBroker:
 
     async def provide_value(self, request_id: str, value: str, approver: str) -> str | None:
         """Store a pasted secret, validate it, and resolve. Returns an error or None."""
-        request = self._require_pending(request_id)
+        request = await self._require_pending(request_id)
         value = value.strip()
         if not value:
             return "The key was empty."
@@ -246,8 +308,8 @@ class CredentialBroker:
 
     async def use_existing(self, request_id: str, existing_ref: str, approver: str) -> str | None:
         """Point the API at an existing secret, validate it, and resolve."""
-        request = self._require_pending(request_id)
-        if existing_ref not in await self.secrets.list_names():
+        request = await self._require_pending(request_id)
+        if is_reserved_secret(existing_ref) or existing_ref not in await self.offerable_secrets():
             return f"No secret named {existing_ref!r} exists."
         entry = self.registry.get(request.api)
         if entry is None:
@@ -256,10 +318,15 @@ class CredentialBroker:
             auth = entry.auth.model_copy(update={"secret_ref": existing_ref})
             await self.registry.save(entry.model_copy(update={"auth": auth}))
             request.secret_ref = existing_ref
+            await self._persist(request)
         return await self._validate_and_resolve(request, approver, f"using existing {existing_ref}")
 
+    async def offerable_secrets(self) -> list[str]:
+        """Secret names an approver may pick; internal secrets are never offered."""
+        return [n for n in await self.secrets.list_names() if not is_reserved_secret(n)]
+
     async def deny(self, request_id: str, approver: str) -> None:
-        request = self._require_pending(request_id)
+        request = await self._require_pending(request_id)
         await self.registry.set_status(request.api, EntryStatus.BLOCKED)
         await self._close(request, RequestState.DENIED, approver, "access denied by approver")
 
@@ -284,8 +351,8 @@ class CredentialBroker:
         )
         return None
 
-    def _require_pending(self, request_id: str) -> CredentialRequest:
-        request = self._requests.get(request_id)
+    async def _require_pending(self, request_id: str) -> CredentialRequest:
+        request = await self.load(request_id)
         if request is None or request.state is not RequestState.PENDING:
             raise LookupError("this request is no longer pending")
         return request
@@ -301,7 +368,8 @@ class CredentialBroker:
         request.resolved_by = approver
         request.resolution_note = note
         self._used_tokens.add(self.token_for(request))
-        self._events[request.id].set()
+        await self._persist(request)
+        self._events.setdefault(request.id, asyncio.Event()).set()
         await self.audit.record(
             AuditEvent(
                 event="credential_resolved",

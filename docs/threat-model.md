@@ -46,6 +46,9 @@ high-value target. This document lists what we defend against, how, and what is 
 - Credentials are only attached to requests for the entry's own origin; off-origin redirects are
   never followed, so a compromised API can't bounce the token elsewhere.
 - Callers cannot supply credentials (prevents "use my key against my server" data poisoning).
+- Internal secrets (caller keys, the link-signing key) live under the reserved `librarian/` prefix.
+  Registry entries may not reference that prefix and approvers are never offered it, so no entry
+  (community, learned or hand-written) can make the librarian send an internal secret to a host.
 
 ### T4. Server-side request forgery (SSRF)
 - URLs are built from the registry entry; callers only supply argument values. Path arguments
@@ -80,4 +83,5 @@ high-value target. This document lists what we defend against, how, and what is 
 - Writes of any kind.
 - Multi-tenant isolation inside one librarian (run one per trust domain).
 - Protection against a malicious operator or a compromised host.
-- Persistence of in-flight tasks across restarts (callers should retry).
+- Waiting tasks resume after a restart only if the caller re-sends; pending credential requests
+  and their approval links do survive restarts (durable state + persisted signing key).

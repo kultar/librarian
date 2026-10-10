@@ -164,6 +164,7 @@ def settings(tmp_path: Path) -> Settings:
         rate_limit_per_minute=1000,
         credential_wait_seconds=5,
         allow_private_networks=True,  # tests never touch real DNS
+        database_url=None,  # in-memory; persistence has its own tests
     )
 
 

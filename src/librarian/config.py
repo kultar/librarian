@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from librarian.registry.models import RESERVED_SECRET_PREFIX
 
 
 class SlackSettings(BaseModel):
@@ -45,6 +47,13 @@ class CallerKey(BaseModel):
     agent: str
     key_ref: str
 
+    @field_validator("key_ref")
+    @classmethod
+    def _internal(cls, value: str) -> str:
+        if not value.startswith(RESERVED_SECRET_PREFIX):
+            raise ValueError(f"caller key_ref must start with {RESERVED_SECRET_PREFIX!r}")
+        return value
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -59,6 +68,21 @@ class Settings(BaseSettings):
     secrets_dir: Path | None = Path(".librarian/secrets")
     audit_file: Path | None = None  # stdout when unset
     state_dir: Path = Path(".librarian")
+    # Durable state (credential requests, A2A tasks). SQLite for one instance;
+    # postgresql+asyncpg://... (install the `postgres` extra) for several replicas.
+    # Set to null to keep everything in memory.
+    database_url: str | None = "sqlite+aiosqlite:///.librarian/librarian.db"
+    # Secret holding the key that signs approval links. Generated on first start
+    # if the secret store is writable, so links survive restarts and are valid
+    # on every replica.
+    signing_key_ref: str = "librarian/signing-key"
+
+    @field_validator("signing_key_ref")
+    @classmethod
+    def _signing_key_internal(cls, value: str) -> str:
+        if not value.startswith(RESERVED_SECRET_PREFIX):
+            raise ValueError(f"signing_key_ref must start with {RESERVED_SECRET_PREFIX!r}")
+        return value
 
     # LLM for the `fetch` skill. Unset disables `fetch` (execute still works).
     # Examples: "anthropic:claude-sonnet-5-5", or any model name served by an

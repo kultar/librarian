@@ -30,6 +30,7 @@ from librarian.registry.models import (
     NoAuth,
     Operation,
     ParamLocation,
+    is_reserved_secret,
 )
 from librarian.secrets import SecretStore
 
@@ -165,6 +166,8 @@ class Executor:
         ref = entry.secret_ref
         if ref is None:
             return None
+        if is_reserved_secret(ref):  # defense in depth; models already forbid this
+            raise PolicyDenied(f"API {entry.id!r} references an internal secret")
         value = await self.secrets.get(ref)
         if value is None:
             raise CredentialMissing(entry)
