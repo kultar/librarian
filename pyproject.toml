@@ -20,6 +20,7 @@ classifiers = [
 dependencies = [
     "a2a-sdk[http-server,sqlite]>=1.2.2",
     "httpx>=0.28.1",
+    "opentelemetry-api>=1.33",
     "pydantic>=2.14.0",
     "pydantic-ai-slim[anthropic,openai]>=2.55.0",
     "pydantic-settings>=2.15.0",
@@ -39,6 +40,11 @@ postgres = [
 aws = [
     "boto3>=1.35",
 ]
+otel = [
+    "opentelemetry-exporter-otlp-proto-http>=1.33",
+    "opentelemetry-instrumentation-asgi>=0.54b0",
+    "opentelemetry-sdk>=1.33",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]
@@ -47,6 +53,8 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "boto3>=1.35",
+    "opentelemetry-instrumentation-asgi>=0.54b0",
+    "opentelemetry-sdk>=1.33",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",

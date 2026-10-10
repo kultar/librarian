@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     # Caller authentication. Empty = open (local mode only).
     callers: list[CallerKey] = Field(default_factory=list[CallerKey])
 
+    # OpenTelemetry (`otel` extra). Exporter endpoint/headers come from the standard
+    # OTEL_EXPORTER_OTLP_* environment variables.
+    otel_enabled: bool = False
+    otel_service_name: str = "librarian"
+
     notifier: NotifierSettings = Field(default_factory=NotifierSettings)
     publish: PublishSettings = Field(default_factory=PublishSettings)
     approvers: ApproverSettings = Field(default_factory=ApproverSettings)

@@ -47,6 +47,7 @@ from a2a.types import (
     SecurityScheme,
     StringList,
 )
+from opentelemetry import propagate, trace
 from pydantic import ValidationError
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -54,7 +55,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from librarian import __version__
+from librarian import __version__, telemetry
 from librarian.calls import Caller, CallRequest
 from librarian.credentials import CredentialRequest
 from librarian.executor import PolicyDenied
@@ -65,6 +66,7 @@ log = logging.getLogger(__name__)
 
 RPC_PATH = "/"
 CALLER_STATE_KEY = "librarian_caller"
+TRACE_STATE_KEY = "librarian_trace"
 
 
 def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) -> AgentCard:
@@ -192,8 +194,15 @@ class LibrarianExecutor(AgentExecutor):
 
         await updater.start_work()
         skill = str(command.get("skill") or "fetch")
+        carrier = context.call_context.state.get(TRACE_STATE_KEY)
+        span = telemetry.tracer.start_span(
+            "librarian.skill",
+            context=propagate.extract(carrier) if isinstance(carrier, dict) else None,
+            attributes={"librarian.skill": skill, "librarian.caller": caller.agent},
+        )
         try:
-            result = await self._run(skill, command, caller, on_auth_required)
+            with trace.use_span(span, end_on_exit=True):
+                result = await self._run(skill, command, caller, on_auth_required)
         except PolicyDenied as exc:
             await updater.reject(
                 updater.new_agent_message([new_text_part(f"Refused: {exc.reason}")])
@@ -325,6 +334,11 @@ class CallerContextBuilder(DefaultServerCallContextBuilder):
         context = super().build(request)
         caller = request.scope.get(CALLER_STATE_KEY)
         context.state[CALLER_STATE_KEY] = caller if isinstance(caller, Caller) else Caller()
+        # The SDK runs the executor in a background task that does not inherit the
+        # request's OTel context, so carry the trace across explicitly.
+        carrier: dict[str, str] = {}
+        propagate.inject(carrier)
+        context.state[TRACE_STATE_KEY] = carrier
         return context
 
 

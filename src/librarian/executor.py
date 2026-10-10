@@ -18,6 +18,7 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import httpx
 
+from librarian import telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance
 from librarian.net import BlockedAddress, pin
@@ -91,6 +92,33 @@ class Executor:
         await self.client.aclose()
 
     async def execute(self, request: CallRequest, caller: Caller) -> CallResult:
+        attributes: dict[str, str] = {
+            "librarian.api": request.api,
+            "librarian.operation": request.operation,
+            "librarian.caller": caller.agent,
+        }
+        with telemetry.tracer.start_as_current_span(
+            "librarian.call", attributes=attributes
+        ) as span:
+            started = time.monotonic()
+            try:
+                result = await self._execute(request, caller)
+            except PolicyDenied as exc:
+                telemetry.denials.add(1, {"librarian.api": request.api})
+                span.set_attribute("librarian.denied", exc.reason)
+                raise
+            except CredentialMissing as exc:
+                span.set_attribute("librarian.credential", exc.reason)
+                raise
+            code = result.status_code
+            span.set_attribute("http.response.status_code", code)
+            span.set_attribute("url.full", result.provenance.url)
+            labels = {**attributes, "http.status_class": telemetry.status_class(code)}
+            telemetry.calls.add(1, labels)
+            telemetry.call_duration.record((time.monotonic() - started) * 1000, attributes)
+            return result
+
+    async def _execute(self, request: CallRequest, caller: Caller) -> CallResult:
         decision = self.policy.check(request, caller)
         if not decision.allowed or decision.entry is None or decision.operation is None:
             await self.audit.record(

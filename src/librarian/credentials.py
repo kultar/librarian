@@ -21,6 +21,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from librarian import telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import Caller
 from librarian.registry.models import ApiEntry, EntryStatus, NoAuth, is_reserved_secret
@@ -223,6 +224,7 @@ class CredentialBroker:
                 is_new = True
             await self._persist(request)
         if is_new:
+            telemetry.credential_requests.add(1, {"librarian.api": entry.id, "state": "pending"})
             await self.audit.record(
                 AuditEvent(
                     event="credential_request",
@@ -370,6 +372,7 @@ class CredentialBroker:
         self._used_tokens.add(self.token_for(request))
         await self._persist(request)
         self._events.setdefault(request.id, asyncio.Event()).set()
+        telemetry.credential_requests.add(1, {"librarian.api": request.api, "state": state.value})
         await self.audit.record(
             AuditEvent(
                 event="credential_resolved",

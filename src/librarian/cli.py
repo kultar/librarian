@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -48,10 +48,17 @@ def serve(
     from librarian.server import create_app
 
     logging.basicConfig(level=log_level.upper(), format="%(levelname)s %(name)s: %(message)s")
+    from librarian.telemetry import asgi_middleware, setup_telemetry
+
     settings = _settings(config)
+    if settings.otel_enabled:
+        setup_telemetry(settings.otel_service_name)
     librarian = Librarian(settings)
+    app_: Any = create_app(librarian)
+    if settings.otel_enabled:
+        app_ = asgi_middleware(app_)
     uvicorn.run(
-        create_app(librarian),
+        app_,
         host=host or settings.host,
         port=port or settings.port,
         log_level=log_level,

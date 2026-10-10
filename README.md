@@ -123,6 +123,19 @@ An agent only sees and uses the APIs its patterns allow, in `capabilities`, `exe
 
 With no callers configured the server is open: fine on a laptop, never in a shared deployment.
 
+## Observability
+
+Set `otel_enabled: true` (install the `otel` extra; the Docker image has it) and the standard
+`OTEL_EXPORTER_OTLP_ENDPOINT`. You get:
+
+- **Traces**: `librarian.skill` and `librarian.call` spans (plus the A2A SDK's and Pydantic AI's
+  model-call spans). A calling agent's `traceparent` is honoured, so its trace continues through
+  the librarian. Trace headers are **never** forwarded to third-party APIs.
+- **Metrics**: `librarian.api.calls` (by API, operation, caller, status class),
+  `librarian.api.call.duration`, `librarian.policy.denials`, `librarian.credential.requests`.
+
+The JSONL audit log is separate and always on.
+
 ## Slack notifications
 
 1. Create a Slack app from [`deploy/slack-app-manifest.yaml`](deploy/slack-app-manifest.yaml) and
@@ -184,10 +197,12 @@ uv run pytest
 
 ## Roadmap
 
-- **v0.2**: cloud secret stores (AWS Secrets Manager, Vault, GCP, Azure); OpenTelemetry audit
-  sink; Helm chart; persistent task/request store
-- **v0.3**: verified caller identity and delegated principals (OAuth token exchange); OIDC for
-  approvers; per-API approver routing in Slack
+- **v0.2** ✅: durable state (SQLite/Postgres) and stable approval links; per-agent API
+  allowlists; 401 vs 403 handling; DNS-rebinding-proof SSRF guard; GitHub review PRs + hot reload;
+  AWS Secrets Manager; field selection and pagination styles; OpenTelemetry
+- **v0.3**: Helm chart; Vault/GCP/Azure secret stores; verified caller identity and delegated
+  principals (OAuth token exchange); OIDC for approvers; per-API approver routing in Slack;
+  better operation search for very large APIs
 - **v0.4**: saved **recipes** (successful plans replayed without the LLM); learning instance
   details (e.g. Jira custom fields); drift detection
 - **v1.0**: community registry with signed entries; per-user OAuth; writes behind human approval
