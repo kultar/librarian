@@ -27,6 +27,17 @@ credential_requests = Table(
 )
 
 
+documents = Table(
+    "librarian_documents",
+    metadata,
+    Column("kind", String(32), primary_key=True),
+    Column("id", String(64), primary_key=True),
+    Column("state", String(16), nullable=False, index=True),
+    Column("data", Text, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+
 def make_engine(url: str) -> AsyncEngine:
     """Create an async engine; for SQLite, make sure the directory exists."""
     if url.startswith("sqlite"):
@@ -86,3 +97,32 @@ class StateStore:
         async with self.engine.connect() as conn:
             rows = (await conn.execute(query)).scalars().all()
         return [CredentialRequest.model_validate_json(row) for row in rows]
+
+    # -- generic documents (write approvals, grants) ---------------------------------
+
+    async def save_doc(self, kind: str, doc_id: str, state: str, data: str) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                delete(documents).where(documents.c.kind == kind).where(documents.c.id == doc_id)
+            )
+            await conn.execute(
+                insert(documents).values(
+                    kind=kind, id=doc_id, state=state, data=data, updated_at=datetime.now(UTC)
+                )
+            )
+
+    async def get_doc(self, kind: str, doc_id: str) -> str | None:
+        async with self.engine.connect() as conn:
+            result = await conn.execute(
+                select(documents.c.data)
+                .where(documents.c.kind == kind)
+                .where(documents.c.id == doc_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def list_docs(self, kind: str, state: str | None = None) -> list[str]:
+        query = select(documents.c.data).where(documents.c.kind == kind)
+        if state is not None:
+            query = query.where(documents.c.state == state)
+        async with self.engine.connect() as conn:
+            return list((await conn.execute(query)).scalars().all())

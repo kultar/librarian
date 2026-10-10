@@ -23,6 +23,7 @@ TRACKER: dict[str, Any] = {
     "base_url": BASE + "/v1",
     "status": "verified",
     "auth": {"type": "bearer", "secret_ref": "tracker/readonly"},
+    "write_auth": {"type": "bearer", "secret_ref": "tracker/write"},
     "credential": {
         "scopes": ["read:issues"],
         "create_url": "https://tracker.example.test/settings/tokens",
@@ -64,7 +65,25 @@ TRACKER: dict[str, Any] = {
             "method": "DELETE",
             "path": "/issues/{key}",
             "access": "write",
+            "writable": True,
             "parameters": [{"name": "key", "in": "path"}],
+        },
+        {
+            "id": "addComment",
+            "method": "POST",
+            "path": "/issues/{key}/comments",
+            "summary": "Add a comment to an issue",
+            "access": "write",
+            "writable": True,
+            "accepts_body": True,
+            "parameters": [{"name": "key", "in": "path"}],
+        },
+        {
+            "id": "renameProject",
+            "method": "PUT",
+            "path": "/projects/{p}",
+            "access": "write",
+            "parameters": [{"name": "p", "in": "path"}],
         },
     ],
 }
@@ -100,6 +119,8 @@ class RecordingNotifier(Notifier):
     def __init__(self) -> None:
         self.opened_links: list[str] = []
         self.events: list[tuple[str, CredentialRequest]] = []
+        self.write_links: list[str] = []
+        self.write_events: list[tuple[str, Any]] = []
 
     async def opened(self, request: CredentialRequest, link: str) -> None:
         self.opened_links.append(link)
@@ -110,6 +131,16 @@ class RecordingNotifier(Notifier):
 
     async def closed(self, request: CredentialRequest) -> None:
         self.events.append(("closed", request))
+
+    async def write_opened(self, approval: Any, link: str) -> None:
+        self.write_links.append(link)
+        self.write_events.append(("opened", approval))
+
+    async def write_closed(self, approval: Any) -> None:
+        self.write_events.append(("closed", approval))
+
+    async def grant_used(self, grant: Any, approval_like: Any) -> None:
+        self.write_events.append(("grant_used", grant))
 
 
 Handler = Callable[[httpx.Request], httpx.Response]

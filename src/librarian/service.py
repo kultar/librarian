@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets as pysecrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 from pydantic_ai.models import Model
 
+from librarian import telemetry
+from librarian.approvals import ApprovalBroker, ApprovalState, Grant, WriteApproval
 from librarian.audit import AuditEvent, AuditSink, JsonlAuditSink
-from librarian.calls import Caller, CallRequest, CallResult
+from librarian.calls import Caller, CallRequest, CallResult, WriteRequest
 from librarian.config import Settings
 from librarian.credentials import CredentialBroker, CredentialRequest, Notifier, RequestState
 from librarian.executor import CredentialMissing, Executor, PolicyDenied
@@ -54,6 +57,21 @@ class CredentialUnavailable(LibrarianError):
         self.request = request
 
 
+class WriteRefused(LibrarianError):
+    """The write was denied, expired, or could not be approved."""
+
+
+@dataclass
+class WriteOutcome:
+    result: CallResult
+    how: str  # "approved" | "grant" | "idempotent"
+    approval_id: str | None = None
+    grant_id: str | None = None
+
+
+ApprovalHook = Callable[[WriteApproval], Awaitable[None]]
+
+
 @dataclass
 class OnboardResult:
     entry: ApiEntry
@@ -89,6 +107,7 @@ class Librarian:
         self.policy = PolicyEngine(
             self.registry,
             rate_limit_per_minute=settings.rate_limit_per_minute,
+            write_rate_limit_per_minute=settings.writes.rate_limit_per_minute,
             allow_provisional=settings.allow_provisional,
         )
         self.executor = Executor(
@@ -99,10 +118,11 @@ class Librarian:
             max_response_bytes=settings.max_response_bytes,
             allow_private_provisional=settings.allow_private_networks,
         )
+        self.notifier = notifier or _default_notifier(settings)
         self.broker = CredentialBroker(
             self.registry,
             self.secrets,
-            notifier or _default_notifier(settings),
+            self.notifier,
             self.audit,
             public_url=settings.public_url,
             signing_key=pysecrets.token_bytes(32),
@@ -113,6 +133,32 @@ class Librarian:
             store=self.state,
         )
         self.broker.validator = self._validate_credential
+        self.approvals = ApprovalBroker(
+            self.notifier,
+            self.audit,
+            public_url=settings.public_url,
+            signing_key=pysecrets.token_bytes(32),
+            approver_mode=settings.writes.approvers,
+            expire_after=timedelta(hours=settings.writes.approval_expire_hours),
+            default_channel=settings.notifier.slack.channel,
+            default_approver_group=settings.notifier.slack.approver_group,
+            store=self.state,
+            config_grants=[
+                Grant(
+                    id=f"config-{i}",
+                    agent=g.agent,
+                    principal=g.principal,
+                    api=g.api,
+                    operation=g.operation,
+                    pinned_args=g.pinned_args,
+                    max_uses_per_day=g.max_uses_per_day,
+                    notify_owner=g.notify_owner,
+                    created_by="config",
+                    source="config",
+                )
+                for i, g in enumerate(settings.writes.grants)
+            ],
+        )
         self.publisher = publisher if publisher is not None else _default_publisher(settings)
         model = planner_model if planner_model is not None else _model_from_settings(settings)
         self.planner = Planner(model, settings.max_calls_per_fetch) if model is not None else None
@@ -128,7 +174,10 @@ class Librarian:
             restored = await self.broker.restore()
             if restored:
                 log.info("restored %d pending credential request(s)", restored)
-        self.broker.set_signing_key(await self._signing_key())
+            await self.approvals.restore()
+        key = await self._signing_key()
+        self.broker.set_signing_key(key)
+        self.approvals.set_signing_key(key)
 
     async def _signing_key(self) -> bytes:
         ref = self.settings.signing_key_ref
@@ -183,6 +232,94 @@ class Librarian:
             except CredentialMissing as missing:
                 await self._await_credential(missing, caller, on_auth_required)
         raise LibrarianError("credential still not usable after it was provided")
+
+    async def write(
+        self,
+        request: WriteRequest,
+        caller: Caller,
+        on_approval_required: ApprovalHook | None = None,
+    ) -> WriteOutcome:
+        """Make a write: run it under a matching grant, or ask a human and wait."""
+        if request.idempotency_key:
+            prior = self.approvals.find_executed(caller, request.idempotency_key)
+            if prior is not None and prior.result is not None:
+                return WriteOutcome(
+                    CallResult.model_validate(prior.result), "idempotent", prior.id, prior.grant_id
+                )
+        decision = self.policy.check_write(request, caller)
+        if not decision.allowed or decision.entry is None or decision.operation is None:
+            await self.audit.record(
+                AuditEvent(
+                    event="write_denied",
+                    caller=caller.agent,
+                    principal=caller.principal,
+                    api=request.api,
+                    operation=request.operation,
+                    detail=decision.reason,
+                )
+            )
+            telemetry.write_requests.add(1, {"librarian.api": request.api, "outcome": "denied"})
+            raise PolicyDenied(decision.reason)
+        entry, op = decision.entry, decision.operation
+
+        grant = self.approvals.find_grant(request, caller)
+        if grant is not None:
+            await self.approvals.use_grant(grant)
+            result = await self.executor.execute_write(entry, op, request, caller)
+            telemetry.write_requests.add(1, {"librarian.api": entry.id, "outcome": "granted"})
+            notice = WriteApproval(
+                fingerprint=request.fingerprint(caller),
+                api=entry.id,
+                api_name=entry.name,
+                host=entry.host,
+                operation=op.id,
+                method=op.method,
+                path=op.path,
+                request=request,
+                agent=caller.agent,
+                principal=caller.principal,
+                expires_at=datetime.now(UTC),
+                channel=entry.owners.channel or self.settings.notifier.slack.channel,
+            )
+            await self.notifier.grant_used(grant, notice)
+            return WriteOutcome(result, "grant", grant_id=grant.id)
+
+        group = entry.owners.approver_group or self.settings.notifier.slack.approver_group
+        problem = self.approvals.approval_route(caller.requesters(), group)
+        if problem is not None:
+            raise PolicyDenied(problem)
+        approval = await self.approvals.open(entry, op, request, caller)
+        if on_approval_required is not None:
+            await on_approval_required(approval)
+        approval = await self.approvals.wait(approval.id, max_wait=caller.approval_wait_seconds)
+        if approval.state is ApprovalState.PENDING:
+            await self.approvals.expire(approval.id, f"{caller.agent} stopped waiting")
+        if approval.state is not ApprovalState.APPROVED:
+            telemetry.write_requests.add(1, {"librarian.api": entry.id, "outcome": approval.state})
+            raise WriteRefused(
+                f"write {approval.state}" + (f" ({approval.note})" if approval.note else "")
+            )
+
+        # Run exactly what was approved, against the entry as it is now.
+        current = self.registry.get(entry.id)
+        current_op = current.operation(op.id) if current is not None else None
+        if current is None or current_op is None or not current_op.writable:
+            await self.approvals.finish(approval, False, None, "operation no longer writable")
+            raise WriteRefused("the operation is no longer enabled for writes")
+        try:
+            result = await self.executor.execute_write(
+                current, current_op, approval.request, caller
+            )
+        except (CredentialMissing, PolicyDenied, httpx.HTTPError) as exc:
+            await self.approvals.finish(approval, False, None, str(exc))
+            raise WriteRefused(f"approved write failed: {exc}") from exc
+        stored = result.model_dump(mode="json")
+        if len(json.dumps(stored, default=str)) > 65_536:
+            stored = {**stored, "data": None, "truncated": True}
+        note = "done" if result.ok else (result.error or f"HTTP {result.status_code}")
+        await self.approvals.finish(approval, result.ok, stored, note)
+        telemetry.write_requests.add(1, {"librarian.api": entry.id, "outcome": "executed"})
+        return WriteOutcome(result, "approved", approval.id, approval.grant_id)
 
     def capabilities(
         self, query: str | None = None, caller: Caller = SYSTEM_CALLER

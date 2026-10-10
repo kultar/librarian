@@ -7,12 +7,14 @@ be masked and would pass through Slack's servers).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
 
 import httpx
 
+from librarian.approvals import ApprovalState, Grant, WriteApproval
 from librarian.credentials import CredentialRequest, Notifier, RequestState
 
 log = logging.getLogger(__name__)
@@ -50,6 +52,30 @@ class WebhookNotifier(Notifier):
     async def closed(self, request: CredentialRequest) -> None:
         await self._post("credential_request.closed", request, None)
 
+    async def _post_write(self, event: str, payload: dict[str, Any]) -> None:
+        try:
+            response = await self.client.post(self.url, json={"event": event, **payload})
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            log.error("webhook notification failed: %s", exc)
+
+    async def write_opened(self, approval: WriteApproval, link: str) -> None:
+        data = approval.model_dump(mode="json", exclude={"notifier_ref", "result"})
+        await self._post_write("write_approval.opened", {"approval": data, "link": link})
+
+    async def write_closed(self, approval: WriteApproval) -> None:
+        data = approval.model_dump(mode="json", exclude={"notifier_ref", "result"})
+        await self._post_write("write_approval.closed", {"approval": data})
+
+    async def grant_used(self, grant: Grant, approval_like: WriteApproval) -> None:
+        await self._post_write(
+            "grant.used",
+            {
+                "grant": grant.model_dump(mode="json"),
+                "request": approval_like.request.model_dump(mode="json"),
+            },
+        )
+
 
 class SlackNotifier(Notifier):
     """Posts one card per request and keeps it up to date with `chat.update`."""
@@ -66,6 +92,7 @@ class SlackNotifier(Notifier):
         self.client = client or httpx.AsyncClient(timeout=10)
         self.api_base = api_base
         self._links: dict[str, str] = {}
+        self._user_ids: dict[str, str | None] = {}
 
     async def _call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -132,6 +159,147 @@ class SlackNotifier(Notifier):
                 "text": resolution_text(request),
             },
         )
+
+    async def _user_mention(self, email: str) -> str:
+        """`<@U123>` for a workspace member's email (needs users:read.email), else the email."""
+        if "@" not in email:
+            return email
+        if email not in self._user_ids:
+            try:
+                response = await self.client.get(
+                    f"{self.api_base}/users.lookupByEmail",
+                    params={"email": email},
+                    headers={"Authorization": f"Bearer {self.bot_token}"},
+                )
+                data: dict[str, Any] = response.json()
+                user: Any = data.get("user")
+                user_id = user.get("id") if data.get("ok") and isinstance(user, dict) else None
+                self._user_ids[email] = str(user_id) if user_id else None  # pyright: ignore[reportUnknownArgumentType]
+            except (httpx.HTTPError, ValueError):
+                self._user_ids[email] = None
+        user_id = self._user_ids[email]
+        return f"<@{user_id}>" if user_id else email
+
+    async def write_opened(self, approval: WriteApproval, link: str) -> None:
+        self._links[approval.id] = link
+        people = [await self._user_mention(who) for who in approval.requesters]
+        data = await self._call(
+            "chat.postMessage",
+            {
+                "channel": approval.channel or self.default_channel,
+                "text": f"Write approval needed: {approval.api_name} {approval.operation}",
+                "blocks": write_blocks(approval, link, people),
+            },
+        )
+        if data.get("ok"):
+            approval.notifier_ref = {"channel": str(data["channel"]), "ts": str(data["ts"])}
+
+    async def write_closed(self, approval: WriteApproval) -> None:
+        ref = approval.notifier_ref
+        self._links.pop(approval.id, None)
+        if not ref:
+            return
+        await self._call(
+            "chat.update",
+            {
+                "channel": ref["channel"],
+                "ts": ref["ts"],
+                "text": f"{approval.api_name} {approval.operation}: {approval.state}",
+                "blocks": write_blocks(approval, None, []),
+            },
+        )
+        await self._call(
+            "chat.postMessage",
+            {
+                "channel": ref["channel"],
+                "thread_ts": ref["ts"],
+                "text": write_outcome_text(approval),
+            },
+        )
+
+    async def grant_used(self, grant: Grant, approval_like: WriteApproval) -> None:
+        if not grant.notify_owner:
+            return
+        uses = f"{grant.uses}" + (f"/{grant.max_uses}" if grant.max_uses else "")
+        await self._call(
+            "chat.postMessage",
+            {
+                "channel": approval_like.channel or self.default_channel,
+                "text": (
+                    f":robot_face: `{grant.agent}` ran `{grant.operation}` on "
+                    f"{approval_like.api_name} under a standing grant (use {uses}). Args: "
+                    f"`{json.dumps(approval_like.request.args)[:300]}`"
+                ),
+            },
+        )
+
+
+def write_outcome_text(approval: WriteApproval) -> str:
+    icon = {
+        ApprovalState.EXECUTED: ":white_check_mark:",
+        ApprovalState.FAILED: ":x:",
+        ApprovalState.DENIED: ":no_entry:",
+        ApprovalState.EXPIRED: ":hourglass:",
+        ApprovalState.APPROVED: ":ballot_box_with_check:",
+        ApprovalState.PENDING: ":pencil2:",
+    }[approval.state]
+    who = f" by {approval.decided_by}" if approval.decided_by else ""
+    remembered = " (similar writes allowed by a new grant)" if approval.decision == "grant" else ""
+    note = f" · {approval.note}" if approval.note else ""
+    return (
+        f"{icon} {approval.api_name} `{approval.operation}` {approval.state}{who}{remembered}{note}"
+    )
+
+
+def write_blocks(
+    approval: WriteApproval, link: str | None, people: list[str]
+) -> list[dict[str, Any]]:
+    pending = approval.state is ApprovalState.PENDING
+    title = (
+        f":pencil2: Write approval needed: {approval.api_name}"
+        if pending
+        else write_outcome_text(approval)
+    )
+    request = approval.request
+    fields = [
+        f"*Operation:*\n`{approval.operation}`\n{approval.method} {approval.path}",
+        f"*Agent:*\n{approval.agent}",
+        f"*For:*\n{approval.principal or '(no person; autonomous)'}",
+        f"*Arguments:*\n`{json.dumps(request.args)[:500]}`",
+    ]
+    if request.reason:
+        fields.append(f"*Why:*\n{request.reason[:500]}")
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
+        {"type": "section", "fields": [{"type": "mrkdwn", "text": f} for f in fields]},
+    ]
+    if request.body is not None:
+        body = json.dumps(request.body, indent=2, default=str)
+        if len(body) > 1500:
+            body = body[:1500] + "\n…(truncated; full body on the review page)"
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"```{body}```"}})
+    if pending and link:
+        who = " ".join(
+            people + ([mention(approval.approver_group)] if approval.approver_group else [])
+        )
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (f"{who} " if who else "")
+                    + "Approve once, approve and allow similar writes, or deny.",
+                },
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Review write"},
+                    "url": link,
+                    "style": "danger",
+                    "action_id": "librarian_review_write",
+                },
+            }
+        )
+    return blocks
 
 
 def mention(group: str | None) -> str:

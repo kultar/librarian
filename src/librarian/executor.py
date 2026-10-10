@@ -20,12 +20,13 @@ import httpx
 
 from librarian import __version__, telemetry
 from librarian.audit import AuditEvent, AuditSink
-from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance
+from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance, WriteRequest
 from librarian.net import BlockedAddress, pin
 from librarian.policy import PolicyEngine
 from librarian.registry.models import (
     ApiEntry,
     ApiKeyAuth,
+    AuthSpec,
     BasicAuth,
     BearerAuth,
     EntryStatus,
@@ -244,6 +245,92 @@ class Executor:
             provenance=provenance,
         )
 
+    async def execute_write(
+        self, entry: ApiEntry, op: Operation, request: WriteRequest, caller: Caller
+    ) -> CallResult:
+        """Send one approved write. Callers must have checked policy and approval first.
+
+        The request is sent exactly once and redirects are never followed: a 307/308
+        would replay the write against another URL.
+        """
+        auth = entry.write_auth
+        ref = entry.write_secret_ref
+        if auth is None or ref is None or is_reserved_secret(ref):
+            raise PolicyDenied(f"API {entry.id!r} has no usable write credential")
+        secret = await self.secrets.get(ref)
+        if secret is None:
+            raise CredentialMissing(entry, reason=f"write credential {ref!r} is missing")
+        url, headers, query = _build_request(entry, op, request.args)
+        _apply_auth_headers(entry, secret, headers, auth)
+        params: dict[str, ArgValue] = {**query, **_auth_query(entry, secret, auth)}
+        if request.idempotency_key:
+            headers.setdefault("Idempotency-Key", request.idempotency_key)
+        attributes = {
+            "librarian.api": entry.id,
+            "librarian.operation": op.id,
+            "librarian.caller": caller.agent,
+            "librarian.write": "true",
+        }
+        started = time.monotonic()
+        with telemetry.tracer.start_as_current_span(
+            "librarian.write", attributes=attributes
+        ) as span:
+            _assert_same_origin(entry, url)
+            http_request = self.client.build_request(
+                op.method,
+                url,
+                params=params or None,
+                headers=headers,
+                json=request.body if request.body is not None else None,
+            )
+            response = await self.client.send(http_request, stream=True)
+            try:
+                body, cut = await _read_capped(response, self.max_response_bytes)
+            finally:
+                await response.aclose()
+            span.set_attribute("http.response.status_code", response.status_code)
+        content_type = response.headers.get("content-type", "")
+        status_code = response.status_code
+        excerpt = json.dumps(request.body, default=str)[:2000] if request.body is not None else None
+        await self.audit.record(
+            AuditEvent(
+                event="write",
+                caller=caller.agent,
+                principal=caller.principal,
+                api=entry.id,
+                operation=op.id,
+                status_code=status_code,
+                bytes=len(body),
+                duration_ms=int((time.monotonic() - started) * 1000),
+                extra={"args": request.args, "body_excerpt": excerpt},
+            )
+        )
+        error = None
+        if status_code in (401, 403):
+            error = (
+                f"{entry.name} refused the write (HTTP {status_code}): check the write credential"
+            )
+        elif response.is_redirect:
+            error = f"{entry.name} answered with a redirect; writes are never re-sent elsewhere"
+        return CallResult(
+            status_code=status_code,
+            ok=200 <= status_code < 300,
+            data=_decode(body, content_type, cut),
+            truncated=cut,
+            content_type=content_type,
+            error=error,
+            provenance=Provenance(
+                api=entry.id,
+                api_status=entry.status,
+                operation=op.id,
+                method=op.method,
+                url=_redact(url, query, entry),
+                caller=caller.agent,
+                principal=caller.principal,
+                credential_ref=ref,
+            ),
+        )
+
     async def _resolve_secret(self, entry: ApiEntry) -> str | None:
         ref = entry.secret_ref
         if ref is None:
@@ -337,8 +424,10 @@ def _build_request(
     return url, headers, query
 
 
-def _apply_auth_headers(entry: ApiEntry, secret: str | None, headers: dict[str, str]) -> None:
-    auth = entry.auth
+def _apply_auth_headers(
+    entry: ApiEntry, secret: str | None, headers: dict[str, str], auth: AuthSpec | None = None
+) -> None:
+    auth = auth if auth is not None else entry.auth
     if secret is None or isinstance(auth, NoAuth):
         return
     if isinstance(auth, BearerAuth):
@@ -349,8 +438,10 @@ def _apply_auth_headers(entry: ApiEntry, secret: str | None, headers: dict[str, 
         headers[auth.name] = secret
 
 
-def _auth_query(entry: ApiEntry, secret: str | None) -> dict[str, str]:
-    auth = entry.auth
+def _auth_query(
+    entry: ApiEntry, secret: str | None, auth: AuthSpec | None = None
+) -> dict[str, str]:
+    auth = auth if auth is not None else entry.auth
     if secret is not None and isinstance(auth, ApiKeyAuth) and auth.location == "query":
         return {auth.name: secret}
     return {}

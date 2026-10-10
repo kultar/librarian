@@ -8,12 +8,14 @@ passed to any agent.
 from __future__ import annotations
 
 import html
+import json
 from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
 from starlette.routing import Route
 
+from librarian.approvals import ApprovalBroker, ApprovalError, WriteApproval
 from librarian.config import ApproverSettings
 from librarian.credentials import CredentialBroker, CredentialRequest
 
@@ -33,7 +35,10 @@ margin:16px 0}dt{font-weight:600;margin-top:8px}dd{margin:0}code{background:#f0f
 border-radius:4px}input,select,button{font:inherit;padding:8px 10px;border-radius:6px;
 border:1px solid #bbb;width:100%;box-sizing:border-box;margin-top:6px}button{cursor:pointer;
 background:#1d6ef7;color:#fff;border:0;margin-top:10px}button.deny{background:#c0392b}
-.muted{color:#666;font-size:13px}.err{color:#b00020}.ok{color:#137333}
+.muted{color:#666;font-size:13px}
+pre{background:#f0f0f0;padding:10px;border-radius:6px;overflow:auto;max-height:400px}
+table{border-collapse:collapse}td{padding:2px 8px;border-bottom:1px solid #ddd}
+label{display:block;margin-top:6px}.err{color:#b00020}.ok{color:#137333}
 @media (prefers-color-scheme:dark){body{background:#111;color:#eee}.card{background:#1b1b1b;
 border-color:#333}code{background:#2a2a2a}.muted{color:#aaa}}
 """
@@ -89,12 +94,19 @@ def _form(request_obj: CredentialRequest, token: str, names: list[str], error: s
         else ""
     )
     instructions = f"<p>{e(request_obj.instructions)}</p>" if request_obj.instructions else ""
+    writes = (
+        "<label class=muted><input type=checkbox name=allow_writes value=1 style='width:auto'> "
+        "Also allow <b>approved writes</b> with this key (every write is still approved "
+        "individually or by a grant)</label>"
+        if request_obj.writes_possible
+        else ""
+    )
     options = "".join(f"<option>{e(n)}</option>" for n in names)
     existing = (
         f"""<div class=card><h2>Use an existing secret</h2>
 <form method=post><input type=hidden name=t value="{e(token)}">
 <input type=hidden name=action value=existing>
-<select name=existing_ref required>{options}</select>
+<select name=existing_ref required>{options}</select>{writes}
 <button>Use this secret</button></form></div>"""
         if names
         else ""
@@ -106,7 +118,7 @@ def _form(request_obj: CredentialRequest, token: str, names: list[str], error: s
 <form method=post autocomplete=off><input type=hidden name=t value="{e(token)}">
 <input type=hidden name=action value=add>
 <input type=password name=value required placeholder="Paste the key" autocomplete=off>
-<button>Save and test</button></form>
+{writes}<button>Save and test</button></form>
 <p class=muted>The key goes straight to the secret store. It is never shown again,
 logged, or shared with any agent. Prefer a dedicated read-only account.</p></div>
 {existing}
@@ -141,11 +153,14 @@ def credential_routes(broker: CredentialBroker, approvers: ApproverSettings) -> 
             )
         action = str(form.get("action", ""))
         try:
+            allow_writes = req.writes_possible and form.get("allow_writes") == "1"
             if action == "add":
-                error = await broker.provide_value(req.id, str(form.get("value", "")), approver)
+                error = await broker.provide_value(
+                    req.id, str(form.get("value", "")), approver, allow_writes
+                )
             elif action == "existing":
                 error = await broker.use_existing(
-                    req.id, str(form.get("existing_ref", "")), approver
+                    req.id, str(form.get("existing_ref", "")), approver, allow_writes
                 )
             elif action == "deny":
                 await broker.deny(req.id, approver)
@@ -167,4 +182,139 @@ def credential_routes(broker: CredentialBroker, approvers: ApproverSettings) -> 
     return [
         Route("/credentials/{request_id}", show, methods=["GET"]),
         Route("/credentials/{request_id}", submit, methods=["POST"]),
+    ]
+
+
+def _identity(
+    request: Request, settings: ApproverSettings
+) -> tuple[str | None, set[str], str | None]:
+    """(identity, groups, error). Identity is None in `token` mode (link possession)."""
+    if settings.mode == "token":
+        return None, set(), None
+    user = request.headers.get(settings.user_header, "").strip()
+    if not user:
+        return None, set(), "You are not signed in (no identity from the auth proxy)."
+    groups = {g.strip() for g in request.headers.get(settings.groups_header, "").split(",")}
+    return user, groups - {""}, None
+
+
+def _approval_form(approval: WriteApproval, token: str, error: str | None) -> str:
+    e = html.escape
+    req = approval.request
+    rows = [
+        ("API", f"{e(approval.api_name)} <span class=muted>({e(approval.host)})</span>"),
+        (
+            "Operation",
+            f"<code>{e(approval.operation)}</code> {e(approval.method)} {e(approval.path)}",
+        ),
+        ("Agent", e(approval.agent)),
+        ("On behalf of", e(approval.principal or "nobody (autonomous agent)")),
+    ]
+    if approval.summary:
+        rows.append(("What it does", e(approval.summary)))
+    if req.reason:
+        rows.append(("Agent's reason", e(req.reason)))
+    details = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows)
+    args = "".join(
+        f"<tr><td><code>{e(k)}</code></td><td>{e(json.dumps(v))}</td></tr>"
+        for k, v in req.args.items()
+    )
+    args_html = f"<h2>Arguments</h2><table>{args}</table>" if args else ""
+    body_html = (
+        f"<h2>Request body</h2><pre>{e(json.dumps(req.body, indent=2, default=str))}</pre>"
+        if req.body is not None
+        else ""
+    )
+    hidden = f'<input type=hidden name=t value="{e(token)}">'
+    remember = ""
+    if approval.rememberable:
+        pins = "".join(
+            f"<label><input type=checkbox name=pin value='{e(k)}' checked style='width:auto'> "
+            f"keep <code>{e(k)}</code> = {e(json.dumps(v))}</label><br>"
+            for k, v in req.args.items()
+        )
+        for_whom = f" for {e(approval.principal)}" if approval.principal else ""
+        remember = f"""<div class=card><h2>Approve and allow similar writes</h2>
+<p class=muted>Lets <b>{e(approval.agent)}</b> run <code>{e(approval.operation)}</code>
+again without asking{for_whom}. Unchecked arguments may differ; the request body may
+always differ. You can revoke this at any time.</p>
+<form method=post>{hidden}<input type=hidden name=action value=grant>{pins}
+<label>For <select name=days><option value=1>1 day</option><option value=7 selected>7 days</option>
+<option value=30>30 days</option></select></label>
+<label>At most <input name=max_uses type=number min=1 placeholder="unlimited"> uses</label>
+<button>Approve and allow similar</button></form></div>"""
+    err = f"<p class=err>{e(error)}</p>" if error else ""
+    return f"""<h1>Approve a write: {e(approval.api_name)}</h1>{err}
+<div class=card><dl>{details}</dl>{args_html}{body_html}</div>
+<div class=card><h2>Approve once</h2><p class=muted>Runs exactly this request, once.</p>
+<form method=post>{hidden}<input type=hidden name=action value=once>
+<button>Approve this write</button></form></div>
+{remember}
+<div class=card><h2>Deny</h2><form method=post>{hidden}<input type=hidden name=action value=deny>
+<button class=deny>Deny</button></form></div>"""
+
+
+def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> list[Route]:
+    async def authorized(
+        request: Request, token: str
+    ) -> tuple[WriteApproval | None, str | None, Response | None]:
+        approval = await approvals.load(request.path_params["approval_id"])
+        if approval is None or not approvals.check_token(approval, token):
+            return None, None, _page("Link expired", "<h1>This link is no longer valid</h1>", 404)
+        identity, groups, problem = _identity(request, settings)
+        problem = problem or approvals.may_approve(approval, identity, groups)
+        if problem:
+            return (
+                None,
+                None,
+                _page("Not allowed", f"<h1>Not allowed</h1><p>{html.escape(problem)}</p>", 403),
+            )
+        return approval, identity or "link holder", None
+
+    async def show(request: Request) -> Response:
+        token = request.query_params.get("t", "")
+        approval, _, denied = await authorized(request, token)
+        if denied is not None or approval is None:
+            return denied or _page("Error", "<h1>Error</h1>", 400)
+        return _page(f"Approve a write: {approval.api_name}", _approval_form(approval, token, None))
+
+    async def submit(request: Request) -> Response:
+        form: Any = await request.form()
+        token = str(form.get("t", ""))
+        approval, approver, denied = await authorized(request, token)
+        if denied is not None or approval is None or approver is None:
+            return denied or _page("Error", "<h1>Error</h1>", 400)
+        action = str(form.get("action", ""))
+        try:
+            if action == "deny":
+                await approvals.deny(approval.id, approver)
+                return _page("Denied", "<h1>Write denied</h1><p>The agent was told.</p>")
+            if action == "once":
+                await approvals.approve(approval.id, approver)
+            elif action == "grant":
+                max_uses = str(form.get("max_uses", "")).strip()
+                await approvals.approve(
+                    approval.id,
+                    approver,
+                    remember=True,
+                    pin=[str(p) for p in form.getlist("pin")],
+                    grant_days=int(str(form.get("days", "7")) or 7),
+                    grant_uses=int(max_uses) if max_uses.isdigit() else None,
+                )
+            else:
+                return _page("Error", _approval_form(approval, token, "Unknown action."), 400)
+        except LookupError:
+            return _page("Already handled", "<h1>This write was already decided</h1>", 409)
+        except (ApprovalError, ValueError) as exc:
+            return _page("Error", _approval_form(approval, token, str(exc)), 400)
+        extra = " Similar writes are now allowed by a grant." if action == "grant" else ""
+        return _page(
+            "Approved",
+            f"<h1 class=ok>Approved</h1><p>The write is being made now.{extra} "
+            "The outcome is posted to the notification thread.</p>",
+        )
+
+    return [
+        Route("/approvals/{approval_id}", show, methods=["GET"]),
+        Route("/approvals/{approval_id}", submit, methods=["POST"]),
     ]

@@ -29,9 +29,23 @@ class Caller(BaseModel):
     # Glob patterns of API ids this caller may use; None = every API.
     apis: tuple[str, ...] | None = None
     can_onboard: bool = True
+    # Glob patterns of API ids this caller may *request writes* on. Empty = none.
+    write_apis: tuple[str, ...] = ()
+    # The human (email) or team responsible for this agent. For autonomous agents
+    # with no principal, the owner stands in as the requester for approvals.
+    owner: str | None = None
+    # Seconds to wait for a write approval before returning "pending" (0 = don't wait).
+    approval_wait_seconds: float | None = None
+
+    def requesters(self) -> set[str]:
+        """Humans who count as 'the requester' when approving this caller's writes."""
+        return {who.lower() for who in (self.principal, self.owner) if who}
 
     def may_use(self, api: str) -> bool:
         return self.apis is None or any(fnmatchcase(api, pattern) for pattern in self.apis)
+
+    def may_write(self, api: str) -> bool:
+        return self.may_use(api) and any(fnmatchcase(api, p) for p in self.write_apis)
 
 
 class CallRequest(BaseModel):
@@ -69,6 +83,28 @@ class Provenance(BaseModel):
     principal: str | None = None
     credential_ref: str | None = None
     pages: int = 1
+
+
+class WriteRequest(BaseModel):
+    """A request to change data. Always approved by a human or a matching grant."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    api: str = Field(min_length=1, max_length=64)
+    operation: str = Field(min_length=1, max_length=128)
+    args: dict[str, ArgValue] = Field(default_factory=dict[str, ArgValue])
+    body: dict[str, Any] | list[Any] | None = None
+    # Lets a caller retry safely: a second request with the same key returns the
+    # first result instead of writing again.
+    idempotency_key: str | None = Field(default=None, max_length=128)
+    reason: str = Field(default="", max_length=2000)  # shown to the approver
+
+    def fingerprint(self, caller: Caller) -> str:
+        """Identity of exactly this change by this caller (binds approval to request)."""
+        import hashlib
+
+        payload = self.model_dump_json(exclude={"reason", "idempotency_key"})
+        return hashlib.sha256(f"{caller.agent}|{caller.principal}|{payload}".encode()).hexdigest()
 
 
 class CallResult(BaseModel):

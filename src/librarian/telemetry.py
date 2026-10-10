@@ -30,6 +30,11 @@ denials = _meter.create_counter(
 call_duration = _meter.create_histogram(
     "librarian.api.call.duration", unit="ms", description="Outbound API call duration"
 )
+write_requests = _meter.create_counter(
+    "librarian.write.requests",
+    unit="{request}",
+    description="Write requests by outcome (approval_requested, granted, executed, denied)",
+)
 credential_requests = _meter.create_counter(
     "librarian.credential.requests", unit="{request}", description="Credential requests by state"
 )

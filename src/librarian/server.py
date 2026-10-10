@@ -56,11 +56,12 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from librarian import __version__, telemetry
-from librarian.calls import Caller, CallRequest
+from librarian.approvals import WriteApproval
+from librarian.calls import Caller, CallRequest, WriteRequest
 from librarian.credentials import CredentialRequest
 from librarian.executor import PolicyDenied
-from librarian.service import CredentialUnavailable, Librarian, LibrarianError
-from librarian.web import credential_routes
+from librarian.service import CredentialUnavailable, Librarian, LibrarianError, WriteRefused
+from librarian.web import approval_routes, credential_routes
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +107,19 @@ def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) 
                 tags=["onboarding"],
             )
         )
+    skills.append(
+        AgentSkill(
+            id="write",
+            name="Request a write",
+            description=(
+                "Change data through an API, subject to human approval (or a standing grant). "
+                'Send {"skill":"write","api":"jira","operation":"addComment","args":{...},'
+                '"body":{...},"reason":"why","idempotency_key":"optional"}. The task waits in '
+                "AUTH_REQUIRED until an approver decides; poll or subscribe for the result."
+            ),
+            tags=["api", "write", "approval"],
+        )
+    )
     if librarian.planner is not None:
         skills.append(
             AgentSkill(
@@ -192,6 +206,27 @@ class LibrarianExecutor(AgentExecutor):
                 )
             )
 
+        async def on_approval_required(approval: WriteApproval) -> None:
+            await updater.requires_auth(
+                updater.new_agent_message(
+                    [
+                        new_text_part(
+                            f"Write to {approval.api_name} ({approval.operation}) is waiting for "
+                            f"human approval (approval {approval.id}). This task continues "
+                            "automatically once someone approves or denies it."
+                        ),
+                        new_data_part(
+                            {
+                                "write_approval": approval.id,
+                                "api": approval.api,
+                                "operation": approval.operation,
+                                "state": approval.state.value,
+                            }
+                        ),
+                    ]
+                )
+            )
+
         await updater.start_work()
         skill = str(command.get("skill") or "fetch")
         carrier = context.call_context.state.get(TRACE_STATE_KEY)
@@ -202,11 +237,16 @@ class LibrarianExecutor(AgentExecutor):
         )
         try:
             with trace.use_span(span, end_on_exit=True):
-                result = await self._run(skill, command, caller, on_auth_required)
+                result = await self._run(
+                    skill, command, caller, on_auth_required, on_approval_required
+                )
         except PolicyDenied as exc:
             await updater.reject(
                 updater.new_agent_message([new_text_part(f"Refused: {exc.reason}")])
             )
+            return
+        except WriteRefused as exc:
+            await updater.reject(updater.new_agent_message([new_text_part(str(exc))]))
             return
         except CredentialUnavailable as exc:
             await updater.failed(updater.new_agent_message([new_text_part(str(exc))]))
@@ -224,6 +264,7 @@ class LibrarianExecutor(AgentExecutor):
         command: dict[str, Any],
         caller: Caller,
         on_auth_required: Any,
+        on_approval_required: Any = None,
     ) -> dict[str, Any]:
         librarian = self.librarian
         if skill == "execute":
@@ -236,6 +277,21 @@ class LibrarianExecutor(AgentExecutor):
             )
             result = await librarian.execute(request, caller, on_auth_required)
             return result.model_dump(mode="json")
+        if skill == "write":
+            write_request = WriteRequest.model_validate(
+                {
+                    k: command[k]
+                    for k in ("api", "operation", "args", "body", "idempotency_key", "reason")
+                    if k in command
+                }
+            )
+            outcome = await librarian.write(write_request, caller, on_approval_required)
+            return {
+                "how": outcome.how,
+                "approval": outcome.approval_id,
+                "grant": outcome.grant_id,
+                "result": outcome.result.model_dump(mode="json"),
+            }
         if skill == "capabilities":
             query = command.get("query")
             return {"apis": librarian.capabilities(str(query) if query else None, caller)}
@@ -408,6 +464,7 @@ def create_app(librarian: Librarian, caller_keys: dict[str, str] | None = None) 
         *create_agent_card_routes(card),
         *create_jsonrpc_routes(handler, RPC_PATH, context_builder=CallerContextBuilder()),
         *credential_routes(librarian.broker, librarian.settings.approvers),
+        *approval_routes(librarian.approvals, librarian.settings.approvers),
         Route("/healthz", healthz, methods=["GET"]),
     ]
 
@@ -426,7 +483,14 @@ def create_app(librarian: Librarian, caller_keys: dict[str, str] | None = None) 
             await librarian.aclose()
 
     profiles = {
-        c.agent: Caller(agent=c.agent, apis=tuple(c.apis), can_onboard=c.can_onboard)
+        c.agent: Caller(
+            agent=c.agent,
+            apis=tuple(c.apis),
+            can_onboard=c.can_onboard,
+            write_apis=tuple(c.write_apis),
+            owner=c.owner,
+            approval_wait_seconds=c.approval_wait_seconds,
+        )
         for c in librarian.settings.callers
     }
     app = Starlette(routes=routes, lifespan=lifespan)

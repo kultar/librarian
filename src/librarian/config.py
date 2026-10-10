@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from librarian.registry.models import RESERVED_SECRET_PREFIX
@@ -58,6 +59,27 @@ class PublishSettings(BaseModel):
     api_url: str = "https://api.github.com"
 
 
+class GrantSettings(BaseModel):
+    """A standing grant declared by the operator (typically for autonomous agents)."""
+
+    agent: str
+    api: str
+    operation: str
+    principal: str | None = None
+    pinned_args: dict[str, str] = Field(default_factory=dict[str, str])
+    max_uses_per_day: int | None = None
+    notify_owner: bool = True
+
+
+class WriteSettings(BaseModel):
+    # Who may approve a write: the requester (the person the agent acts for, or the
+    # agent's owner), members of the approver group, or either.
+    approvers: Literal["requester", "group", "requester_or_group"] = "requester_or_group"
+    approval_expire_hours: float = 24
+    rate_limit_per_minute: int = 10
+    grants: list[GrantSettings] = Field(default_factory=list[GrantSettings])
+
+
 class CallerKey(BaseModel):
     """A calling agent and the secret reference holding its API key."""
 
@@ -67,6 +89,25 @@ class CallerKey(BaseModel):
     # Narrow this in shared deployments; "*" lets the agent use every API.
     apis: list[str] = Field(default_factory=lambda: ["*"])
     can_onboard: bool = True
+    # APIs this agent may request writes on (each write still needs approval or a
+    # grant). Empty by default: no writes.
+    write_apis: list[str] = Field(default_factory=list[str])
+    # Human (email) responsible for this agent. Required for autonomous agents that
+    # write: approvals for requests with no principal are routed to the owner.
+    owner: str | None = None
+    # How long this agent's write requests wait for approval; 0 returns "pending"
+    # at once (autonomous agents poll the A2A task). None = the global default.
+    approval_wait_seconds: float | None = None
+
+    @model_validator(mode="after")
+    def _warn_unowned_writer(self) -> CallerKey:
+        if self.write_apis and not self.owner:
+            logging.getLogger(__name__).warning(
+                "caller %r may request writes but has no owner: its writes can only be "
+                "approved by an approver group (or run under grants)",
+                self.agent,
+            )
+        return self
 
     @field_validator("key_ref")
     @classmethod
@@ -138,6 +179,7 @@ class Settings(BaseSettings):
 
     notifier: NotifierSettings = Field(default_factory=NotifierSettings)
     publish: PublishSettings = Field(default_factory=PublishSettings)
+    writes: WriteSettings = Field(default_factory=WriteSettings)
     approvers: ApproverSettings = Field(default_factory=ApproverSettings)
 
     @classmethod

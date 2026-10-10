@@ -136,6 +136,11 @@ class Operation(StrictModel):
     # Only meaningful for reviewed reads that need a JSON body (POST search).
     accepts_body: bool = False
     pagination: Pagination | None = None  # overrides the entry's default
+    # Writes: a reviewer must opt each write operation in. Even then every call
+    # needs human approval (or a matching grant) and a write credential.
+    writable: bool = False
+    # May an approval of this operation be remembered as a grant? Never for DELETE.
+    rememberable: bool | None = None
 
     @field_validator("id")
     @classmethod
@@ -177,6 +182,14 @@ class Operation(StrictModel):
             self.read_basis = None
         if self.accepts_body and self.method in READ_METHODS:
             raise ValueError(f"operation {self.id!r}: GET/HEAD operations cannot take a body")
+        if self.writable and self.access is not Access.WRITE:
+            raise ValueError(
+                f"operation {self.id!r}: only access: write operations can be writable"
+            )
+        if self.rememberable is None:
+            self.rememberable = self.method != "DELETE"
+        elif self.rememberable and self.method == "DELETE":
+            raise ValueError(f"operation {self.id!r}: DELETE approvals can never be remembered")
         return self
 
     @property
@@ -244,6 +257,9 @@ class ApiEntry(StrictModel):
     base_url: str
     status: EntryStatus = EntryStatus.PROVISIONAL
     auth: AuthSpec = Field(default_factory=NoAuth)
+    # Credential used for writes. Kept separate so the read path never holds a key
+    # that can change data; without it the API cannot be written to.
+    write_auth: AuthSpec | None = None
     credential: CredentialGuidance = Field(default_factory=CredentialGuidance)
     operations: list[Operation] = Field(default_factory=list[Operation])
     pagination: Pagination | None = None  # default for all operations
@@ -278,8 +294,9 @@ class ApiEntry(StrictModel):
             if op.id in seen:
                 raise ValueError(f"duplicate operation id {op.id!r}")
             seen.add(op.id)
-        auth = self.auth
-        if not isinstance(auth, NoAuth):
+        for auth in (self.auth, self.write_auth):
+            if auth is None or isinstance(auth, NoAuth):
+                continue
             if not SECRET_REF.match(auth.secret_ref):
                 raise ValueError(f"invalid secret_ref {auth.secret_ref!r}")
             if is_reserved_secret(auth.secret_ref):
@@ -301,6 +318,15 @@ class ApiEntry(StrictModel):
     @property
     def secret_ref(self) -> str | None:
         return None if isinstance(self.auth, NoAuth) else self.auth.secret_ref
+
+    @property
+    def write_secret_ref(self) -> str | None:
+        auth = self.write_auth
+        return None if auth is None or isinstance(auth, NoAuth) else auth.secret_ref
+
+    @property
+    def has_writable_operations(self) -> bool:
+        return any(op.writable for op in self.operations)
 
     def pagination_for(self, op: Operation) -> Pagination:
         return op.pagination or self.pagination or Pagination()

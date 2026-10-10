@@ -10,7 +10,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
-from librarian.calls import ArgValue, Caller, CallRequest
+from librarian.calls import ArgValue, Caller, CallRequest, WriteRequest
 from librarian.registry.models import (
     Access,
     ApiEntry,
@@ -62,11 +62,13 @@ class PolicyEngine:
         registry: Registry,
         *,
         rate_limit_per_minute: int = 60,
+        write_rate_limit_per_minute: int = 10,
         allow_provisional: bool = True,
         allowed_hosts: frozenset[str] | None = None,
     ) -> None:
         self.registry = registry
         self.rate_limiter = RateLimiter(rate_limit_per_minute)
+        self.write_rate_limiter = RateLimiter(write_rate_limit_per_minute)
         self.allow_provisional = allow_provisional
         # Optional extra guard: when set, entries outside these hosts are refused
         # even if they are in the registry.
@@ -107,6 +109,33 @@ class PolicyEngine:
             return Decision.deny(f"rate limit exceeded for {caller.agent!r} on {entry.id!r}")
 
         return Decision(True, "allowed", entry, op)
+
+    def check_write(self, request: WriteRequest, caller: Caller) -> Decision:
+        """Whether a write may be *requested*. Approval is still required to run it."""
+        if not caller.may_write(request.api):
+            return Decision.deny(f"caller {caller.agent!r} may not write to API {request.api!r}")
+        entry = self.registry.get(request.api)
+        if entry is None:
+            return Decision.deny(f"unknown API {request.api!r}")
+        if entry.status is not EntryStatus.VERIFIED:
+            return Decision.deny(f"API {entry.id!r} is not verified; writes need a reviewed entry")
+        if self.allowed_hosts is not None and entry.host.lower() not in self.allowed_hosts:
+            return Decision.deny(f"host {entry.host!r} is not on the allowlist")
+        op = entry.operation(request.operation)
+        if op is None:
+            return Decision.deny(f"unknown operation {request.operation!r} on {entry.id!r}")
+        if op.access is not Access.WRITE or not op.writable:
+            return Decision.deny(f"operation {op.id!r} is not enabled for writes")
+        if entry.write_auth is None:
+            return Decision.deny(f"API {entry.id!r} has no write credential configured")
+        if request.body is not None and not op.accepts_body:
+            return Decision.deny(f"operation {op.id!r} does not accept a request body")
+        problem = _check_args(op, request.args)
+        if problem:
+            return Decision.deny(problem)
+        if not self.write_rate_limiter.allow(caller.agent, entry.id):
+            return Decision.deny(f"write rate limit exceeded for {caller.agent!r} on {entry.id!r}")
+        return Decision(True, "write may be requested", entry, op)
 
 
 def _check_args(op: Operation, args: dict[str, ArgValue]) -> str | None:

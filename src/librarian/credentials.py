@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -59,6 +59,10 @@ class CredentialRequest(BaseModel):
     reminded: bool = False
     # Notifier bookkeeping (e.g. Slack channel + message ts), never secrets.
     notifier_ref: dict[str, str] = Field(default_factory=dict[str, str])
+    # The API has write operations enabled, so the approver may also allow this key
+    # to be used for (still individually approved) writes.
+    writes_possible: bool = False
+    writes_enabled: bool = False
     channel: str | None = None
     approver_group: str | None = None
 
@@ -84,6 +88,24 @@ class Notifier:
             request.state,
             request.resolved_by,
         )
+
+    # Write approvals (see librarian.approvals). Typed loosely to avoid an import cycle.
+    async def write_opened(self, approval: Any, link: str) -> None:
+        log.warning(
+            "write approval needed: %s.%s by %s; approve at %s",
+            approval.api,
+            approval.operation,
+            approval.agent,
+            link,
+        )
+
+    async def write_closed(self, approval: Any) -> None:
+        log.info(
+            "write %s on %s.%s: %s", approval.id, approval.api, approval.operation, approval.state
+        )
+
+    async def grant_used(self, grant: Any, approval_like: Any) -> None:
+        log.info("grant %s used by %s for %s.%s", grant.id, grant.agent, grant.api, grant.operation)
 
 
 class RequestStore(Protocol):
@@ -215,6 +237,7 @@ class CredentialBroker:
                     create_url=entry.credential.create_url,
                     instructions=entry.credential.instructions,
                     requested_by=[who],
+                    writes_possible=entry.has_writable_operations,
                     waiting=1,
                     expires_at=datetime.now(UTC) + self.expire_after,
                     channel=entry.owners.channel or self.default_channel,
@@ -299,16 +322,42 @@ class CredentialBroker:
 
     # -- resolving -------------------------------------------------------------
 
-    async def provide_value(self, request_id: str, value: str, approver: str) -> str | None:
+    async def provide_value(
+        self, request_id: str, value: str, approver: str, allow_writes: bool = False
+    ) -> str | None:
         """Store a pasted secret, validate it, and resolve. Returns an error or None."""
         request = await self._require_pending(request_id)
         value = value.strip()
         if not value:
             return "The key was empty."
         await self.secrets.put(request.secret_ref, value)
-        return await self._validate_and_resolve(request, approver, "new key added")
+        error = await self._validate_and_resolve(request, approver, "new key added")
+        if error is None and allow_writes:
+            await self._enable_writes(request, approver)
+        return error
 
-    async def use_existing(self, request_id: str, existing_ref: str, approver: str) -> str | None:
+    async def _enable_writes(self, request: CredentialRequest, approver: str) -> None:
+        """Use the same key for writes. Each write still needs approval or a grant."""
+        entry = self.registry.get(request.api)
+        if entry is None or not entry.has_writable_operations:
+            return
+        data = entry.model_dump(mode="json", by_alias=True)
+        data["write_auth"] = entry.auth.model_dump(mode="json", by_alias=True)
+        await self.registry.save(ApiEntry.model_validate(data))
+        request.writes_enabled = True
+        await self._persist(request)
+        await self.audit.record(
+            AuditEvent(
+                event="writes_enabled",
+                api=request.api,
+                caller=approver,
+                detail=f"write credential set to {request.secret_ref}",
+            )
+        )
+
+    async def use_existing(
+        self, request_id: str, existing_ref: str, approver: str, allow_writes: bool = False
+    ) -> str | None:
         """Point the API at an existing secret, validate it, and resolve."""
         request = await self._require_pending(request_id)
         if is_reserved_secret(existing_ref) or existing_ref not in await self.offerable_secrets():
@@ -321,7 +370,12 @@ class CredentialBroker:
             await self.registry.save(entry.model_copy(update={"auth": auth}))
             request.secret_ref = existing_ref
             await self._persist(request)
-        return await self._validate_and_resolve(request, approver, f"using existing {existing_ref}")
+        error = await self._validate_and_resolve(
+            request, approver, f"using existing {existing_ref}"
+        )
+        if error is None and allow_writes:
+            await self._enable_writes(request, approver)
+        return error
 
     async def offerable_secrets(self) -> list[str]:
         """Secret names an approver may pick; internal secrets are never offered."""
