@@ -1,5 +1,9 @@
 # librarian Helm chart
 
+**Setting up for a team? Follow [docs/deploy.md](../../../docs/deploy.md)**: it walks through
+everything this chart needs (registry repo, Slack, sign-in, secrets, database), in order. This
+page is the chart reference.
+
 ```bash
 helm install librarian ./deploy/helm/librarian -n librarian --create-namespace \
   --set publicUrl=https://librarian.example.com

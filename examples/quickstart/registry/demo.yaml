@@ -1,0 +1,29 @@
+# A reviewed ("verified") entry for the demo API. In a real deployment entries like this are
+# learned on demand and reviewed by pull request; this one is prewritten so the quick start can
+# show a credential request and a write approval against something that needs a key.
+id: demo
+name: Demo API
+description: go-httpbin, a request echo service standing in for an internal API.
+base_url: http://demo-api:8080
+status: verified
+auth: {type: bearer, secret_ref: demo/read}
+write_auth: {type: bearer, secret_ref: demo/write}
+credential:
+  validation_operation: whoami
+  instructions: Any value works for the demo API.
+operations:
+  - {id: whoami, method: GET, path: /bearer, access: read, summary: Check the key}
+  - id: getRecord
+    method: GET
+    path: /anything/records/{id}
+    access: read
+    summary: Read a record
+    parameters: [{name: id, in: path}]
+  - id: addComment
+    method: POST
+    path: /anything/records/{id}/comments
+    access: write
+    writable: true
+    accepts_body: true
+    summary: Comment on a record
+    parameters: [{name: id, in: path}]

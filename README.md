@@ -30,6 +30,33 @@ credential out.
 - **The LLM proposes, code decides.** The optional planner can suggest any call, but only the rule
   engine (no LLM) can approve it. No prompt can talk its way into a write.
 
+## Get started
+
+| I want to... | Go to |
+|---|---|
+| Try it on my laptop (10 minutes, Docker) | [docs/getting-started.md](docs/getting-started.md) |
+| Run it for my team (Kubernetes, step by step) | [docs/deploy.md](docs/deploy.md) |
+| Connect agents (LiteLLM, MCP clients, A2A) | [docs/integrations.md](docs/integrations.md) |
+| Fix something | [docs/troubleshooting.md](docs/troubleshooting.md) |
+
+```bash
+pip install librarian-a2a                  # the CLI and import are `librarian`
+docker pull ghcr.io/kultar/librarian:0.10.0
+```
+
+### What happens on a request
+
+1. An agent asks for data from an API librarian doesn't know yet.
+2. librarian learns it: from its OpenAPI spec, else its documentation (found by itself if
+   needed), else the model's knowledge. The API is usable for reads at once, and a pull request
+   is opened on your registry repo for a person to review.
+3. If the API needs a key, the agent's task waits and approvers get a Slack card. Someone follows
+   the link, signs in and adds the key (it goes straight to your secret store), and the task
+   carries on by itself.
+4. Writes wait for a person's approval every time, unless a narrow, expiring grant covers them.
+
+Nothing is set up per API in advance: the registry fills itself as agents need things.
+
 ## Skills (A2A)
 
 | Skill | What it does | LLM? |
@@ -52,51 +79,6 @@ Results are A2A artifacts with the data plus **provenance**: which API and opera
 When a credential is missing, the task enters A2A's `TASK_STATE_AUTH_REQUIRED`, approvers are
 notified (Slack by default), and the task **resumes on its own** once someone adds the key. The
 caller polls or subscribes to the task as usual.
-
-## Install
-
-```bash
-pip install librarian-a2a            # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian
-helm install librarian ./deploy/helm/librarian   # see deploy/helm/librarian/README.md
-```
-
-Integrations (any A2A client, LiteLLM, kagent): [docs/integrations.md](docs/integrations.md).
-Example client: [examples/client](examples/client/ask_librarian.py). librarian + LiteLLM in
-Docker Compose: [examples/compose](examples/compose).
-
-## Quick start
-
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
-
-```bash
-git clone https://github.com/kultar/librarian && cd librarian
-uv sync
-
-# Learn a real public API from its OpenAPI spec (no credential needed)
-uv run librarian learn apisguru --spec-url https://api.apis.guru/v2/openapi.yaml
-
-# Call it locally, through the same policy engine the server uses
-uv run librarian call apisguru getMetrics
-
-# Or ask in plain language (needs a model, e.g. ANTHROPIC_API_KEY)
-uv run librarian ask "How many APIs does APIs.guru track?" --model anthropic:claude-sonnet-5-5
-
-# Run the A2A server
-uv run librarian serve --config examples/librarian.yaml
-curl -s localhost:8080/.well-known/agent-card.json | jq '.skills[].id'
-```
-
-Send an A2A message (JSON-RPC):
-
-```bash
-curl -s localhost:8080/ -H 'content-type: application/json' -H 'A2A-Version: 1.0' \
-  -H 'Authorization: Bearer <agent key>' -d '{
-  "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
-  "params": {"message": {"messageId": "1", "role": "ROLE_USER",
-    "parts": [{"data": {"skill": "execute", "api": "apisguru", "operation": "getMetrics"}}]},
-    "metadata": {"principal": "kim@example.com"}}}'
-```
 
 ## Configuration
 

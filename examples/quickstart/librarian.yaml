@@ -1,0 +1,18 @@
+# Quick start settings. For every option see examples/librarian.yaml.
+host: 0.0.0.0
+port: 8080
+public_url: http://localhost:8080        # where your browser opens approval links
+registry_dir: /registry                  # reviewed entries (here: the demo API)
+registry_overlay_dir: /data/registry     # APIs librarian learns on demand
+secrets_dir: /data/secrets               # keys people add (one owner-only file each)
+database_url: sqlite+aiosqlite:////data/librarian.db
+allow_private_networks: true             # the demo API is on the compose network (local only!)
+
+callers:
+  - agent: demo-agent                    # its key: LIBRARIAN_SECRET_LIBRARIAN_CALLERS_DEMO_AGENT
+    key_ref: librarian/callers/demo-agent
+    write_apis: [demo]                   # may request writes on the demo API (with approval)
+    owner: you@example.com               # who approves this agent's writes
+
+approvers:
+  mode: token                            # local only: whoever has the link may approve

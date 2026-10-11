@@ -1,0 +1,25 @@
+# librarian quick start: librarian + a demo API that needs a key. See docs/getting-started.md.
+services:
+  librarian:
+    image: ghcr.io/kultar/librarian:0.10.0
+    ports: ["8080:8080"]
+    command: [serve, --config, /config/librarian.yaml]
+    environment:
+      # The key the demo agent uses to call librarian (librarian/callers/demo-agent).
+      LIBRARIAN_SECRET_LIBRARIAN_CALLERS_DEMO_AGENT: demo-agent-key
+      # The demo API's write credential, so the write example can run once approved.
+      LIBRARIAN_SECRET_DEMO_WRITE: demo-write-key
+      # For a model (see "Using a model" in docs/getting-started.md):
+      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    volumes:
+      - ./librarian.yaml:/config/librarian.yaml:ro
+      - ./registry:/registry:ro            # the prewritten demo entry
+      - librarian-data:/data               # state, keys, and APIs learned on demand
+    depends_on: [demo-api]
+
+  # go-httpbin echoes requests back: a safe stand-in for "an internal API that needs a key".
+  demo-api:
+    image: mccutchen/go-httpbin:v2.15.0
+
+volumes:
+  librarian-data:

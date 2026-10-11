@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Talk to librarian as the demo agent (A2A JSON-RPC over HTTP).
+#   ./ask '{"skill":"capabilities"}'      send a request; prints the task
+#   ./ask task <task-id>                  check on a task
+set -euo pipefail
+URL="${LIBRARIAN_URL:-http://localhost:8080}"
+KEY="${LIBRARIAN_KEY:-demo-agent-key}"
+if [[ "${1:-}" == "task" ]]; then
+  body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"GetTask\",\"params\":{\"id\":\"$2\"}}"
+else
+  body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"SendMessage\",\"params\":{\"message\":{\"messageId\":\"$RANDOM$RANDOM\",\"role\":\"ROLE_USER\",\"parts\":[{\"data\":$1}]}}}"
+fi
+out=$(curl -sS "$URL/" -H 'content-type: application/json' -H 'A2A-Version: 1.0' \
+  -H "Authorization: Bearer $KEY" -d "$body")
+if command -v jq >/dev/null; then echo "$out" | jq '.result.task // .result // .'; else echo "$out"; fi
