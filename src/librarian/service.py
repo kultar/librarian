@@ -1145,12 +1145,20 @@ def _default_notifier(settings: Settings) -> Notifier:
     return Notifier()
 
 
+NO_GATEWAY_KEY = "no-key-configured"  # sent to a gateway that needs no key
+
+
 def _model_from_settings(settings: Settings) -> Model | str | None:
     if settings.model is None:
         return None
     if settings.model_base_url is None:
         return settings.model  # e.g. "anthropic:claude-sonnet-5-5"; provider reads its own env
-    api_key = settings.model_api_key.get_secret_value() if settings.model_api_key else None
+    # Only ever the key configured for the gateway. Left unset, the provider libraries
+    # would pick up OPENAI_API_KEY / ANTHROPIC_API_KEY from the environment and send that
+    # real provider key to the gateway URL.
+    api_key = (
+        settings.model_api_key.get_secret_value() if settings.model_api_key else NO_GATEWAY_KEY
+    )
     name = settings.model.split(":", 1)[1] if ":" in settings.model else settings.model
     if settings.model_api == "anthropic":
         from pydantic_ai.models.anthropic import AnthropicModel

@@ -67,6 +67,10 @@ high-value target. This document lists what we defend against, how, and what is 
   entries only allow GET/HEAD to the given host, and review before `verified` is the control.
 
 ### T3. Credential theft
+- **Model gateway keys.** With `model_base_url` set, librarian sends only `model_api_key` to the
+  gateway. (Before 0.9.0, with no key configured, the model libraries fell back to
+  `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` from the environment and sent that provider key to the
+  gateway URL.)
 - Secrets never enter A2A messages, Slack, logs, audit events, provenance or LLM context.
   Query-string keys are redacted in provenance URLs.
 - Secrets are only accepted through the secure page and written straight to the store

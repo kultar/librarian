@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from librarian.calls import Caller
 from librarian.config import SearchSettings
@@ -197,7 +198,8 @@ async def test_search_is_used_only_when_configured(librarian: Librarian, router:
     assert any(str(r.url).startswith("https://searx.internal.test/search") for r in router.requests)
 
 
-def test_gateway_can_use_the_anthropic_format() -> None:
+def test_gateway_can_use_the_anthropic_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)  # as in CI
     from pydantic_ai.models.anthropic import AnthropicModel
 
     from librarian.config import Settings
@@ -245,3 +247,21 @@ async def test_model_search_detects_a_silently_dropped_search() -> None:
     )
     with pytest.raises(SearchDidNotRun, match="answered without searching"):
         await model_searcher(claims_search, 5)("Gizmo API documentation")
+
+
+@pytest.mark.parametrize("api", ["openai", "anthropic"])
+def test_gateway_never_receives_a_provider_key_from_the_environment(
+    api: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from librarian.config import Settings
+    from librarian.service import NO_GATEWAY_KEY, _model_from_settings  # pyright: ignore[reportPrivateUsage]
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-openai")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-real")
+    settings = Settings(model="m", model_base_url="https://gateway.test/v1", model_api=api)  # pyright: ignore[reportArgumentType]
+    model: Any = _model_from_settings(settings)
+    assert model.client.api_key == NO_GATEWAY_KEY  # what the gateway would receive
+
+    settings.model_api_key = SecretStr("sk-gateway")
+    model = _model_from_settings(settings)
+    assert model.client.api_key == "sk-gateway"
