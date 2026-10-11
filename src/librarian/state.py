@@ -61,7 +61,10 @@ def make_engine(url: str) -> AsyncEngine:
         path = url.split("///", 1)[-1]
         if path and path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-    return create_async_engine(url)
+        return create_async_engine(url)
+    # Test each pooled connection before use and replace old ones, so a database
+    # failover (or an idle timeout) costs a reconnect, not a failed request.
+    return create_async_engine(url, pool_pre_ping=True, pool_recycle=1800)
 
 
 async def retry_already_exists(setup: Callable[[], Awaitable[None]]) -> None:

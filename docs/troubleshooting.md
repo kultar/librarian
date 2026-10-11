@@ -99,6 +99,10 @@ Kubernetes put `LIBRARIAN_PORT=tcp://...` into the pod for a Service named `libr
 collides with librarian's settings. Fixed in 0.10.0 (the chart sets `enableServiceLinks: false`,
 and librarian ignores such a value). Without the chart, set `enableServiceLinks: false`.
 
+**Requests fail with `connection is closed` after a database failover or restart.**
+Fixed in 0.10.0 (connections are checked before use). Also make sure the URL is the writer
+endpoint: read replicas are not supported.
+
 **"replicas=N needs a shared database / a shared secret store".**
 With more than one replica, set `LIBRARIAN_DATABASE_URL` (Postgres) and
 `secrets_backend: aws` ([deploy.md, Replicas](deploy.md#replicas)).

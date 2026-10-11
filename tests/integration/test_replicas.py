@@ -213,3 +213,39 @@ def test_an_api_learned_on_a_is_usable_on_b_at_once() -> None:
     assert read["status"]["state"] == "TASK_STATE_COMPLETED", read["status"]
     assert artifact(read)["data"]["numAPIs"] > 0
     assert httpx.get(f"{B}/healthz").json()["apis"] == 2  # B lists it now too
+
+
+def test_both_replicas_survive_a_database_restart() -> None:
+    """Like a writer failover: pooled connections die; requests must not fail."""
+    for base in (A, B):  # make sure both replicas hold pooled connections
+        assert send(base, {"skill": "capabilities"})["status"]["state"] == "TASK_STATE_COMPLETED"
+    subprocess.run(
+        ["docker", "compose", "-p", "libint", "-f", str(COMPOSE), "restart", "postgres"],
+        check=True,
+        capture_output=True,
+    )
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        ready = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                "libint",
+                "-f",
+                str(COMPOSE),
+                "exec",
+                "-T",
+                "postgres",
+                "pg_isready",
+                "-U",
+                "lib",
+            ],
+            capture_output=True,
+        )
+        if ready.returncode == 0:
+            break
+        time.sleep(1)
+    for base in (A, B):  # the first request after the restart, on each replica
+        task = send(base, {"skill": "capabilities"})
+        assert task["status"]["state"] == "TASK_STATE_COMPLETED", task["status"]

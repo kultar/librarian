@@ -140,6 +140,11 @@ Create a PostgreSQL database and user for librarian. The URL goes in the `librar
 `LIBRARIAN_DATABASE_URL=postgresql+asyncpg://librarian:<password>@<host>:5432/librarian`.
 librarian creates its tables on start. (Without it, SQLite on the volume: one replica only.)
 
+Point it at the **writer** (on Aurora, the cluster endpoint), never a read replica or reader
+endpoint: replicas read each other's writes straight away (approvals, newly learned APIs), and
+"run exactly once" relies on conditional updates. The load is small. A writer failover or
+restart costs a reconnect, not failed requests.
+
 ## 6. A model (optional)
 
 Needed for plain-language requests (`fetch`) and for learning APIs that have no OpenAPI spec.
