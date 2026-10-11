@@ -35,7 +35,7 @@ credential out.
 | I want to... | Go to |
 |---|---|
 | Try it on my laptop (10 minutes, Docker) | [docs/getting-started.md](docs/getting-started.md) |
-| Run it for my team (Kubernetes, step by step) | [docs/deploy.md](docs/deploy.md) |
+| Run it for my team (Kubernetes, step by step) | [docs/deploy.md](docs/deploy.md) (no internet exposure needed: [network](docs/deploy.md#network-what-must-reach-what)) |
 | Connect agents (LiteLLM, MCP clients, A2A) | [docs/integrations.md](docs/integrations.md) |
 | Fix something | [docs/troubleshooting.md](docs/troubleshooting.md) |
 

@@ -43,6 +43,58 @@ API token; the service account only carries the AWS role in step 4.
 kubectl create namespace librarian
 ```
 
+## Network: what must reach what
+
+librarian does not need to be reachable from the internet. Everything it talks to, it calls
+out to; the only thing that connects *in* is approvers' browsers.
+
+**Inbound**
+
+| From | To | Notes |
+|---|---|---|
+| Agents, LiteLLM | `librarian.librarian.svc:8080` (A2A at `/`, MCP at `/mcp`) | Inside the cluster. For agents elsewhere, `ingress.a2a` on an internal address. |
+| Approvers' browsers | the approval pages (`ingress.pages`, at `publicUrl`) | Only approvers need to reach them: an **internal** address on your VPN or office network is enough. |
+
+Nothing else connects in. Slack only shows a link (no webhooks or interactive buttons), the
+GitHub App has no webhook, your identity provider sends the *browser* back to the callback
+URL (so an internal `publicUrl` works for sign-in too), and `librarian github-app create`
+uses a callback on `127.0.0.1` of the machine you run it on.
+
+If approvers should be able to approve from outside your network (say, from a phone), give
+only the **pages** a public address, behind your edge (e.g. a CDN or identity-aware proxy) as
+well as librarian's own sign-in. Never expose the A2A/MCP port publicly.
+
+An internal-only pages ingress, e.g. with the AWS Load Balancer Controller:
+
+```yaml
+ingress:
+  pages:
+    enabled: true
+    className: alb
+    host: librarian.internal.example.com
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internal
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+publicUrl: https://librarian.internal.example.com
+```
+
+**Outbound** (allow these if your cluster's egress is restricted)
+
+| To | Why |
+|---|---|
+| `slack.com` | posting and updating cards |
+| `api.github.com`, `github.com` | review pull requests (librarian), pulling the registry (git-sync) |
+| AWS Secrets Manager and STS in your region | keys, and assuming the pod's role |
+| your identity provider (OIDC issuer) | sign-in for the approval pages (oauth2-proxy) |
+| your model or LiteLLM | `fetch`, learning APIs without a spec |
+| your search provider (if `learning.search` is on) | finding API documentation |
+| the APIs your agents use | the calls themselves, plus their specs and docs when learning them |
+
+The last row is open-ended by design (agents bring APIs on demand). Calls to private
+addresses are refused unless `allow_private_networks` is set; restrict egress further with
+your cluster's network policies or egress proxy if you need to.
+
 ## 1. The registry repo and its GitHub App
 
 The registry is a git repo with one YAML file per API. librarian proposes new entries there as
