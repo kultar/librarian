@@ -348,29 +348,42 @@ uv run pytest
 
 ## Roadmap
 
-- **v0.2** ✅: durable state (SQLite/Postgres) and stable approval links; per-agent API
+### Done
+
+- **v0.2**: durable state (SQLite/Postgres) and stable approval links; per-agent API
   allowlists; 401 vs 403 handling; DNS-rebinding-proof SSRF guard; GitHub review PRs + hot reload;
   AWS Secrets Manager; field selection and pagination styles; OpenTelemetry
-- **v0.3** ✅: writes behind human approval; grants (approve-and-allow-similar, config grants for
+- **v0.3**: writes behind human approval; grants (approve-and-allow-similar, config grants for
   autonomous agents); agent owners; planner write proposals; grants/approvals CLI
-- **v0.4** ✅: Helm chart (oauth2-proxy sign-in, git-sync registry, hardened pod), separate
-  pages listener, registry overlay, release workflow (GHCR, PyPI), example client, LiteLLM compose
-- **v0.5** ✅: verified principals (signed tokens from your identity provider; optional and
-  required modes); claimed principals no longer count as requesters once verification is on
-- **v0.6** ✅: big APIs: ranked operation search, discovery-built glossary (e.g. Jira custom
+- **v0.4**: Helm chart (oauth2-proxy sign-in, git-sync registry, hardened pod), separate pages
+  listener, registry overlay, release workflow, example client, LiteLLM compose
+- **v0.5**: verified principals (signed tokens from your identity provider; optional and
+  required modes)
+- **v0.6**: big APIs: ranked operation search, discovery-built glossary (e.g. Jira custom
   fields), recipes replayed without the LLM
-- **v0.7** ✅: MCP endpoint; LiteLLM agent gateway (MCP + A2A); exactly-once writes across
+- **v0.7**: MCP endpoint; LiteLLM agent gateway (MCP + A2A); exactly-once writes across
   replicas; integration suite
-- **v0.8** ✅: APIs without a spec (documentation, model knowledge) with quote-checked
-  extraction and confirm-on-use; change detection (spec/docs re-checks, deprecation and
-  removal signals, response shape) with suspensions and review proposals
-- **v0.9** ✅: finding documentation from just a base URL (usual places, then web search via
-  the model or SearXNG/Brave), trust-ranked sources; Anthropic API format for gateways
-- **v0.10** ✅: GitHub App for the registry repo (review PRs and git-sync), created in one step
-  with `librarian github-app create`; several replicas with no volumes (learned APIs in Postgres,
-  PodDisruptionBudget, spread across nodes); step-by-step docs
-- **Later**: Vault/GCP/Azure secret stores; per-user OAuth; per-API approver routing in Slack;
-  community registry with signed entries
+- **v0.8**: APIs without a spec (documentation, model knowledge) with quote-checked extraction
+  and confirm-on-use; change detection (spec/docs re-checks, deprecation, removal and
+  response-shape signals) with suspensions and review proposals
+- **v0.9**: finding documentation from just a base URL (usual places, then web search via the
+  model or SearXNG/Brave), trust-ranked sources; Anthropic API format for gateways
+- **v0.10**: production replicas with no volumes (learned APIs in Postgres, disruption budget,
+  spread across nodes, survives a database failover); GitHub App for the registry repo, created
+  with one command; step-by-step docs; on PyPI as `librarian-a2a`
+
+### Next
+
+- **Internal APIs, scoped**: let agents learn internal APIs on demand within domains you list
+  (e.g. `*.internal.example.com`), instead of all-or-nothing `allow_private_networks`.
+
+### Later
+
+- Rate limits shared across replicas (today each replica counts on its own)
+- Acting as the person: per-user OAuth for APIs that need the user's own access
+- More secret stores: Vault, GCP Secret Manager, Azure Key Vault
+- kagent: a tested recipe for using librarian as a `RemoteMCPServer`
+- A community registry of reviewed, signed entries
 
 ## License
 
