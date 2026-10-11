@@ -67,6 +67,11 @@ high-value target. This document lists what we defend against, how, and what is 
   entries only allow GET/HEAD to the given host, and review before `verified` is the control.
 
 ### T3. Credential theft
+- **Registry repo access.** Prefer the GitHub App: its installation tokens last under an hour and
+  are requested for the registry repo only, with contents and pull requests permissions. Its
+  private key is the long-lived secret: keep it in a Kubernetes Secret (or Secrets Manager via
+  ExternalSecrets), mounted read-only. `github-app create` writes it to an owner-only file and
+  never prints it; its one-time callback listens on 127.0.0.1 and checks a random `state`.
 - **Model gateway keys.** With `model_base_url` set, librarian sends only `model_api_key` to the
   gateway. (Before 0.9.0, with no key configured, the model libraries fell back to
   `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` from the environment and sent that provider key to the

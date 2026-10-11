@@ -30,12 +30,39 @@ people ──HTTPS──► │ oauth2-proxy :4180 ──► 127.0.0.1:8081     
 |---|---|
 | Approver sign-in | `oauth2Proxy.enabled=true`, `oauth2Proxy.existingSecret`, `oauth2Proxy.oidcIssuerUrl`, `oauth2Proxy.approverGroup`, `ingress.pages` |
 | Reviewed registry | `registry.gitSync.enabled=true`, `registry.gitSync.repo`, `.path` |
+| Registry repo access (GitHub App) | `githubApp.enabled=true`, `githubApp.appId`, `githubApp.installationId`, `githubApp.secretName` (see below) |
 | Caller keys | `config.callers` + caller keys as `LIBRARIAN_SECRET_LIBRARIAN_CALLERS_<AGENT>` via `envFrom` |
 | Secrets in AWS | `config.secrets_backend: aws`, `serviceAccount.annotations` (IRSA role) |
 | Several replicas | `replicaCount>1` + `config.database_url: postgresql+asyncpg://...` + shared secrets (aws) |
 | Slack | `config.notifier.type: slack`, `config.notifier.slack.channel`, token via `envFrom` |
 | Model for `fetch` | `config.model`, optionally `config.model_base_url` (LiteLLM), key via `envFrom` |
 | Telemetry | `otel.enabled=true`, `otel.endpoint` |
+
+### GitHub App for the registry repo
+
+One GitHub App, owned by your organization, lets git-sync read the (private) registry repo and
+lets librarian open review pull requests on it. Its tokens are minted per use, last under an
+hour, and cover only that repo. Create it in one step:
+
+```bash
+librarian github-app create --repo acme/api-registry
+# opens GitHub: click "Create", then install it on acme/api-registry only.
+# Saves the private key to .librarian/github-app.pem and prints the values below.
+
+kubectl -n librarian create secret generic librarian-github-app \
+  --from-file=private-key.pem=.librarian/github-app.pem
+```
+
+```yaml
+registry:
+  gitSync: {enabled: true, repo: https://github.com/acme/api-registry.git}
+githubApp: {enabled: true, appId: "123456", installationId: 7890123, secretName: librarian-github-app}
+```
+
+The chart mounts the key into git-sync and librarian, and points librarian's review pull
+requests at the same repo. `librarian github-app check --repo ... --app-id ... --key-file ...`
+verifies the App can reach the repo. To keep the key in AWS Secrets Manager instead, sync it
+into that Secret with ExternalSecrets.
 
 Example secret for the environment:
 

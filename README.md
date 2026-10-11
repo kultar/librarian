@@ -17,7 +17,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.9)**. Expect breaking changes.
+> Status: **alpha (v0.10)**. Expect breaking changes.
 
 ## Why
 
@@ -328,10 +328,17 @@ the registry hot-reloads when files change.
 ```yaml
 publish:
   type: github
-  repo: acme/api-registry          # token needs contents:write + pull_requests:write
+  repo: acme/api-registry
   directory: registry
-  # token: set via LIBRARIAN_PUBLISH__TOKEN
+  github_app:                      # recommended: owned by the org, short-lived tokens
+    app_id: "123456"
+    private_key_file: .librarian/github-app.pem
+  # or token: via LIBRARIAN_PUBLISH__TOKEN (contents:write + pull_requests:write)
 ```
+
+`librarian github-app create --repo acme/api-registry` creates that GitHub App in one step:
+one click on GitHub, install it on the repo, and it saves the key and prints the settings.
+The same App lets git-sync read a private registry repo (see the Helm chart README).
 
 When learning an API, the librarian also looks for a cheap "who am I" read (`/me`, `/myself`,
 `/user`, ...) and uses it to test every new credential.
@@ -375,6 +382,8 @@ uv run pytest
   removal signals, response shape) with suspensions and review proposals
 - **v0.9** ✅: finding documentation from just a base URL (usual places, then web search via
   the model or SearXNG/Brave), trust-ranked sources; Anthropic API format for gateways
+- **v0.10** ✅: GitHub App for the registry repo (review PRs and git-sync), created in one step
+  with `librarian github-app create`
 - **Later**: Vault/GCP/Azure secret stores; per-user OAuth; per-API approver routing in Slack;
   community registry with signed entries
 
