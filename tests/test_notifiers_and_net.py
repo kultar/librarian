@@ -61,7 +61,64 @@ async def test_slack_posts_card_then_updates_and_threads() -> None:
     assert [c[0] for c in calls[2:]] == ["chat.update", "chat.postMessage"]
     assert "Review request" not in json.dumps(calls[2][1]["blocks"])  # button removed
     assert calls[3][1]["thread_ts"] == "123.456"
-    assert "sam" in calls[3][1]["text"]
+    # The thread reply says what happened, rather than repeating the card's headline.
+    assert calls[3][1]["text"] == (
+        ":white_check_mark: Done by sam: new key added; tested OK. 2 waiting request(s) resumed."
+    )
+
+
+def test_thread_replies_say_what_happened() -> None:
+    from librarian.approvals import ApprovalState, WriteApproval
+    from librarian.calls import WriteRequest
+    from librarian.notifiers import resolution_reply, write_reply
+
+    approval = WriteApproval(
+        fingerprint="f",
+        api="tracker",
+        api_name="Tracker",
+        host="t.test",
+        operation="addComment",
+        method="POST",
+        path="/c",
+        request=WriteRequest(api="tracker", operation="addComment"),
+        agent="bot",
+        expires_at=datetime.now(UTC),
+    )
+    approval.state, approval.result, approval.decision = (
+        ApprovalState.EXECUTED,
+        {"status_code": 201.0},
+        "grant",
+    )
+    assert write_reply(approval) == (
+        ":white_check_mark: Done: Tracker answered HTTP 201. "
+        "Similar writes are now allowed by a grant."
+    )
+    approval.state, approval.decided_by, approval.note = ApprovalState.FAILED, "kim", "HTTP 409"
+    assert write_reply(approval) == ":x: Approved by kim, but the write failed: HTTP 409"
+    approval.state = ApprovalState.DENIED
+    assert "Nothing was sent" in write_reply(approval)
+    approval.state = ApprovalState.EXECUTING  # rendering any state must not fail
+    assert write_reply(approval)
+    request = make_request(state=RequestState.DENIED, resolved_by="sam")
+    assert (
+        resolution_reply(request) == ":no_entry: Denied by sam. Agents asking for Jira are told no."
+    )
+
+
+async def test_urgent_api_change_notices_mention_the_group() -> None:
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "channel": "C1", "ts": "1.2"})
+
+    notifier = SlackNotifier(
+        "xoxb-test", "#api", client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    await notifier.api_changed("jira", "Jira changed", ["x"], None, "#jira")
+    await notifier.api_changed("jira", "Jira changed", ["x"], None, "#jira", "S0APPROVE1")
+    assert not sent[0]["text"].startswith("<!subteam")
+    assert sent[1]["text"].startswith("<!subteam^S0APPROVE1> ")
 
 
 def test_card_never_contains_secret_material() -> None:

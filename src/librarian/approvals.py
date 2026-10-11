@@ -94,7 +94,7 @@ class Grant(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source: Literal["approval", "config"] = "approval"
     revoked: bool = False
-    notify_owner: bool = False
+    notify_owner: bool = True  # post a notice each time the grant is used
 
     def usable(self, now: datetime) -> bool:
         if self.revoked:
@@ -341,7 +341,21 @@ class ApprovalBroker:
             )
         )
         await self.notifier.write_opened(approval, self.link(approval))
+        await self._save_notifier_ref(approval)
         return approval
+
+    async def _save_notifier_ref(self, approval: WriteApproval) -> None:
+        """Store where the notifier posted, so the replica that closes the approval can
+        update that message. Only while still pending: never overwrites a decision."""
+        if self.store is None or not approval.notifier_ref:
+            return
+        data = await self.store.get_doc("approval", approval.id)
+        stored = WriteApproval.model_validate_json(data) if data else approval
+        stored.notifier_ref = dict(approval.notifier_ref)
+        pending = ApprovalState.PENDING.value
+        await self.store.transition_doc(
+            "approval", approval.id, pending, pending, stored.model_dump_json()
+        )
 
     async def wait(self, approval_id: str, max_wait: float | None = None) -> WriteApproval:
         approval = self._approvals[approval_id]

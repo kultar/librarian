@@ -137,6 +137,7 @@ async def test_verified_entry_changes_are_held_back_and_proposed(
 ) -> None:
     proposals = Proposals()
     librarian.publisher = proposals
+    librarian.settings.notifier.slack.approver_group = "S0APIOWNERS"
     entry = await save_items(librarian, EntryStatus.VERIFIED)
     assert (await librarian.recheck("items")).status == "unchanged"
 
@@ -165,8 +166,9 @@ async def test_verified_entry_changes_are_held_back_and_proposed(
     old = await librarian.execute(CallRequest(api="items", operation="oldThing"), AGENT)
     assert any("no longer in the source" in w for w in old.warnings)
 
-    # The owners hear about it, with the review link.
+    # The owners hear about it, with the review link, and the approver group is pinged.
     assert notifier.changes[-1]["link"] == report.review_url
+    assert notifier.changes[-1]["group"] == "S0APIOWNERS"
     assert any("[safety]" in d for d in notifier.changes[-1]["details"])
 
     # The proposal keeps the reviewed decisions and leaves the rest to the reviewer.
@@ -257,6 +259,7 @@ async def test_deprecation_headers_warn_callers_and_owners_once(
     assert [c["title"] for c in notifier.changes] == [
         "Status page: the API marks an operation deprecated"
     ]
+    assert notifier.changes[0]["group"] is None  # informational: no ping
 
 
 async def test_repeated_gone_responses_are_reported(

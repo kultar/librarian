@@ -108,9 +108,16 @@ class Notifier:
         log.info("grant %s used by %s for %s.%s", grant.id, grant.agent, grant.api, grant.operation)
 
     async def api_changed(
-        self, api: str, title: str, details: list[str], link: str | None, channel: str | None
+        self,
+        api: str,
+        title: str,
+        details: list[str],
+        link: str | None,
+        channel: str | None,
+        mention_group: str | None = None,
     ) -> None:
-        """An API changed or is misbehaving in a way a human should look at."""
+        """An API changed or is misbehaving in a way a human should look at.
+        `mention_group` is set when something broke or was suspended."""
         log.warning(
             "API change: %s: %s%s%s",
             api,
@@ -124,6 +131,7 @@ class RequestStore(Protocol):
     """Durable storage for requests (see `librarian.state.StateStore`)."""
 
     async def save_request(self, request: CredentialRequest) -> None: ...
+    async def update_request_if_pending(self, request: CredentialRequest) -> bool: ...
     async def get_request(self, request_id: str) -> CredentialRequest | None: ...
     async def pending_for(self, api: str) -> CredentialRequest | None: ...
     async def list_requests(self, state: RequestState | None = None) -> list[CredentialRequest]: ...
@@ -273,9 +281,19 @@ class CredentialBroker:
                 )
             )
             await self.notifier.opened(request, self.link(request))
+            await self._save_notifier_ref(request)
         else:
             await self.notifier.updated(request)
         return request
+
+    async def _save_notifier_ref(self, request: CredentialRequest) -> None:
+        """Store where the notifier posted (e.g. the Slack message), so whichever replica
+        resolves the request can update that message. Never overwrites a resolution."""
+        if self.store is None or not request.notifier_ref:
+            return
+        stored = await self.store.get_request(request.id) or request
+        stored.notifier_ref = dict(request.notifier_ref)
+        await self.store.update_request_if_pending(stored)
 
     async def wait(self, request_id: str, max_wait: float | None = None) -> CredentialRequest:
         """Block until the request is resolved, expired, or `max_wait` seconds pass."""

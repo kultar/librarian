@@ -68,7 +68,13 @@ class WebhookNotifier(Notifier):
         await self._post_write("write_approval.closed", {"approval": data})
 
     async def api_changed(
-        self, api: str, title: str, details: list[str], link: str | None, channel: str | None
+        self,
+        api: str,
+        title: str,
+        details: list[str],
+        link: str | None,
+        channel: str | None,
+        mention_group: str | None = None,
     ) -> None:
         await self._post_write(
             "api.changed", {"api": api, "title": title, "details": details, "link": link}
@@ -163,7 +169,7 @@ class SlackNotifier(Notifier):
             {
                 "channel": ref["channel"],
                 "thread_ts": ref["ts"],
-                "text": resolution_text(request),
+                "text": resolution_reply(request),
             },
         )
 
@@ -220,7 +226,7 @@ class SlackNotifier(Notifier):
             {
                 "channel": ref["channel"],
                 "thread_ts": ref["ts"],
-                "text": write_outcome_text(approval),
+                "text": write_reply(approval),
             },
         )
 
@@ -241,14 +247,19 @@ class SlackNotifier(Notifier):
         )
 
     async def api_changed(
-        self, api: str, title: str, details: list[str], link: str | None, channel: str | None
+        self,
+        api: str,
+        title: str,
+        details: list[str],
+        link: str | None,
+        channel: str | None,
+        mention_group: str | None = None,
     ) -> None:
+        text = _api_changed_text(api, title, details, link)
+        if mention_group:
+            text = f"{mention(mention_group)} {text}"
         await self._call(
-            "chat.postMessage",
-            {
-                "channel": channel or self.default_channel,
-                "text": _api_changed_text(api, title, details, link),
-            },
+            "chat.postMessage", {"channel": channel or self.default_channel, "text": text}
         )
 
 
@@ -268,6 +279,7 @@ def write_outcome_text(approval: WriteApproval) -> str:
         ApprovalState.DENIED: ":no_entry:",
         ApprovalState.EXPIRED: ":hourglass:",
         ApprovalState.APPROVED: ":ballot_box_with_check:",
+        ApprovalState.EXECUTING: ":hourglass_flowing_sand:",
         ApprovalState.PENDING: ":pencil2:",
     }[approval.state]
     who = f" by {approval.decided_by}" if approval.decided_by else ""
@@ -276,6 +288,25 @@ def write_outcome_text(approval: WriteApproval) -> str:
     return (
         f"{icon} {approval.api_name} `{approval.operation}` {approval.state}{who}{remembered}{note}"
     )
+
+
+def write_reply(approval: WriteApproval) -> str:
+    """The thread reply under a write card: what actually happened, in a few words."""
+    who = f" by {approval.decided_by}" if approval.decided_by else ""
+    if approval.state is ApprovalState.EXECUTED:
+        status = (approval.result or {}).get("status_code")
+        code = f"HTTP {int(status)}" if isinstance(status, int | float) else "a response"
+        grant = (
+            " Similar writes are now allowed by a grant." if approval.decision == "grant" else ""
+        )
+        return f":white_check_mark: Done: {approval.api_name} answered {code}.{grant}"
+    if approval.state is ApprovalState.FAILED:
+        return f":x: Approved{who}, but the write failed: {approval.note or 'unknown error'}"
+    if approval.state is ApprovalState.DENIED:
+        return f":no_entry: Denied{who}. Nothing was sent."
+    if approval.state is ApprovalState.EXPIRED:
+        return ":hourglass: Expired without a decision. Nothing was sent."
+    return write_outcome_text(approval)
 
 
 def write_blocks(
@@ -345,6 +376,20 @@ def resolution_text(request: CredentialRequest) -> str:
     who = f" by {request.resolved_by}" if request.resolved_by else ""
     note = f" · {request.resolution_note}" if request.resolution_note else ""
     return f"{icon} {request.api_name} {request.state}{who}{note}"
+
+
+def resolution_reply(request: CredentialRequest) -> str:
+    """The thread reply under a credential card: the outcome, in a few words."""
+    who = f" by {request.resolved_by}" if request.resolved_by else ""
+    if request.state is RequestState.FULFILLED:
+        note = request.resolution_note or "credential provided"
+        waiting = f" {request.waiting} waiting request(s) resumed." if request.waiting else ""
+        return f":white_check_mark: Done{who}: {note}.{waiting}"
+    if request.state is RequestState.DENIED:
+        return f":no_entry: Denied{who}. Agents asking for {request.api_name} are told no."
+    if request.state is RequestState.EXPIRED:
+        return ":hourglass: Expired without a decision. Agents can ask again."
+    return resolution_text(request)
 
 
 def card_blocks(request: CredentialRequest, link: str | None) -> list[dict[str, Any]]:

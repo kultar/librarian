@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -134,3 +135,63 @@ async def test_replicas_starting_together_share_one_signing_key(
     assert b.broker.link(loaded) == a.broker.link(request)
     await a.aclose()
     await b.aclose()
+
+
+class PostingNotifier(RecordingNotifier):
+    """Like Slack: remembers where each card was posted, and needs it to update the card."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed_refs: list[dict[str, str]] = []
+
+    async def opened(self, request: Any, link: str) -> None:
+        await super().opened(request, link)
+        request.notifier_ref = {"channel": "C1", "ts": f"cred-{request.id}"}
+
+    async def closed(self, request: Any) -> None:
+        await super().closed(request)
+        self.closed_refs.append(dict(request.notifier_ref))
+
+    async def write_opened(self, approval: Any, link: str) -> None:
+        await super().write_opened(approval, link)
+        approval.notifier_ref = {"channel": "C1", "ts": f"write-{approval.id}"}
+
+    async def write_closed(self, approval: Any) -> None:
+        await super().write_closed(approval)
+        self.closed_refs.append(dict(approval.notifier_ref))
+
+
+async def test_another_replica_can_update_the_posted_message(
+    tmp_path: Path, router: Router
+) -> None:
+    from librarian.calls import WriteRequest
+
+    first, second = replica(tmp_path, router), replica(tmp_path, router)
+    posting = PostingNotifier()
+    first.broker.notifier = first.approvals.notifier = posting
+    second.broker.notifier = second.approvals.notifier = posting
+    await first.start()
+    await second.start()
+    entry = first.registry.get("tracker")
+    assert entry is not None
+
+    # Credential request: opened (and posted) on one replica, resolved on the other.
+    router.add("GET", f"{BASE}/v1/me", lambda r: httpx.Response(200, json={}))
+    request = await first.broker.open(entry, A, "missing")
+    assert await second.broker.provide_value(request.id, "read-key", "kim@x.test") is None
+    assert posting.closed_refs[-1] == {"channel": "C1", "ts": f"cred-{request.id}"}
+
+    # Write approval: the same.
+    await first.secrets.put("tracker/write", "w")
+    kim = Caller(agent="notes-bot", principal="kim@x.test", write_apis=("tracker",))
+    # The A2A path (a caller waiting on the approval), which does not save it again.
+    approval = await first._start_write(  # pyright: ignore[reportPrivateUsage]
+        WriteRequest(api="tracker", operation="addComment", args={"key": "PAY-1"}, body={}), kim
+    )
+    from librarian.approvals import WriteApproval
+
+    assert isinstance(approval, WriteApproval)
+    await second.approvals.deny(approval.id, "kim@x.test")
+    assert posting.closed_refs[-1] == {"channel": "C1", "ts": f"write-{approval.id}"}
+    await first.aclose()
+    await second.aclose()

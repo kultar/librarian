@@ -144,9 +144,17 @@ class RecordingNotifier(Notifier):
         self.write_events.append(("grant_used", grant))
 
     async def api_changed(
-        self, api: str, title: str, details: list[str], link: str | None, channel: str | None
+        self,
+        api: str,
+        title: str,
+        details: list[str],
+        link: str | None,
+        channel: str | None,
+        mention_group: str | None = None,
     ) -> None:
-        self.changes.append({"api": api, "title": title, "details": details, "link": link})
+        self.changes.append(
+            {"api": api, "title": title, "details": details, "link": link, "group": mention_group}
+        )
 
 
 Handler = Callable[[httpx.Request], httpx.Response]

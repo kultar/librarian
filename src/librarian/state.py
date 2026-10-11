@@ -105,6 +105,17 @@ class StateStore:
             )
             await conn.execute(insert(credential_requests).values(**row))
 
+    async def update_request_if_pending(self, request: CredentialRequest) -> bool:
+        """Save a request only if it is still pending in the store (no lost resolutions)."""
+        async with self.engine.begin() as conn:
+            result = await conn.execute(
+                update(credential_requests)
+                .where(credential_requests.c.id == request.id)
+                .where(credential_requests.c.state == RequestState.PENDING.value)
+                .values(data=request.model_dump_json(), updated_at=datetime.now(UTC))
+            )
+            return result.rowcount == 1
+
     async def get_request(self, request_id: str) -> CredentialRequest | None:
         async with self.engine.connect() as conn:
             result = await conn.execute(

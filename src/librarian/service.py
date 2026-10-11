@@ -784,7 +784,11 @@ class Librarian:
         actions, review_url = await self._apply_changes(entry, fresh, changes)
         details = [f"[{c.severity}] {c.detail}" for c in changes] + actions
         await self._notify_change(
-            entry, f"{entry.name} changed ({worst(changes)})", details, review_url
+            entry,
+            f"{entry.name} changed ({worst(changes)})",
+            details,
+            review_url,
+            urgent=worst(changes) != "additive",
         )
         await self.audit.record(
             AuditEvent(
@@ -888,11 +892,19 @@ class Librarian:
             )
         )
         title = _FINDING_TITLES.get(finding.kind, finding.kind)
-        await self._notify_change(entry, f"{entry.name}: {title}", [finding.detail], None)
+        await self._notify_change(
+            entry, f"{entry.name}: {title}", [finding.detail], None, finding.severity != "info"
+        )
 
     async def _notify_change(
-        self, entry: ApiEntry, title: str, details: list[str], link: str | None
+        self,
+        entry: ApiEntry,
+        title: str,
+        details: list[str],
+        link: str | None,
+        urgent: bool = False,
     ) -> None:
+        group = entry.owners.approver_group or self.settings.notifier.slack.approver_group
         try:
             await self.notifier.api_changed(
                 entry.id,
@@ -900,6 +912,7 @@ class Librarian:
                 details,
                 link,
                 entry.owners.channel or self.settings.notifier.slack.channel,
+                mention_group=group if urgent else None,
             )
         except Exception:
             log.exception("notifying about %s failed", entry.id)
