@@ -35,6 +35,10 @@ You need:
 Every value below goes into one Helm values file (`values.yaml`) and one Secret
 (`librarian-env`, for the sensitive ones). The complete example is in [step 9](#9-the-values-file).
 
+librarian runs in its own namespace with its own service account (the chart creates it,
+named `librarian`). It needs no Kubernetes permissions at all, and the pod gets no Kubernetes
+API token; the service account only carries the AWS role in step 4.
+
 ```bash
 kubectl create namespace librarian
 ```
@@ -129,6 +133,24 @@ person, and only members of your approver group can add keys.
    `ListSecrets` lets an approver pick an *existing* secret instead of pasting a key; drop it if
    you don't want that. Add `kms:Decrypt` / `kms:GenerateDataKey` if you encrypt with your own
    KMS key.
+
+   The role's trust policy must name librarian's service account exactly, namespace included
+   (IRSA shown; with EKS Pod Identity, associate the role with `librarian/librarian` instead):
+
+   ```json
+   {
+     "Effect": "Allow",
+     "Principal": {"Federated": "arn:aws:iam::<account>:oidc-provider/<cluster OIDC issuer>"},
+     "Action": "sts:AssumeRoleWithWebIdentity",
+     "Condition": {"StringEquals": {
+       "<cluster OIDC issuer>:sub": "system:serviceaccount:librarian:librarian",
+       "<cluster OIDC issuer>:aud": "sts.amazonaws.com"
+     }}
+   }
+   ```
+
+   If you install under another release name or namespace, the service account is
+   `<namespace>:<release name>` (or set `serviceAccount.name`).
 2. In the values: `serviceAccount.annotations` with the role, and
    `config.secrets_backend: aws`, `config.aws_secrets.prefix: librarian/`.
 

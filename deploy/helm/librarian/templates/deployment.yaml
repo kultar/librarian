@@ -49,6 +49,7 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "librarian.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

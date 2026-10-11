@@ -38,10 +38,14 @@ envFrom: []
 #  - secretRef:
 #      name: librarian-secrets
 
+# librarian's own service account. It needs no Kubernetes RBAC (librarian never calls the
+# Kubernetes API); it carries the IAM role for Secrets Manager (IRSA / Pod Identity).
 serviceAccount:
   create: true
   name: ""
   annotations: {}          # e.g. eks.amazonaws.com/role-arn for Secrets Manager (IRSA)
+  # No Kubernetes API token in the pod: nothing uses it. IRSA mounts its own AWS token.
+  automountToken: false
 
 # /data holds the SQLite database, file secrets and learned APIs when there is no
 # Postgres. With Postgres and AWS secrets nothing needs it: disable it for several replicas.

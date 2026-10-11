@@ -114,6 +114,12 @@ Replicas need no volume ([deploy.md, Replicas](deploy.md#replicas)).
 The pod's role needs the policy in [deploy.md, step 4](deploy.md#4-where-keys-are-stored),
 scoped to your `aws_secrets.prefix`.
 
+**Secrets Manager calls fail with "not authorized to perform sts:AssumeRoleWithWebIdentity"
+or use the node's role.** The role's trust policy must name the service account exactly:
+`system:serviceaccount:<namespace>:<service account>` (`librarian:librarian` with the guide's
+names), and `serviceAccount.annotations` must carry the role ARN. Restart the pods after
+fixing either.
+
 **A config value seems ignored.**
 Environment variables (`LIBRARIAN_...`, nested with `__`) override the config file. In YAML,
 quote `"off"`, `"on"`, `"yes"` and `"no"`: unquoted they are true/false.
