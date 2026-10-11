@@ -17,7 +17,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.8)**. Expect breaking changes.
+> Status: **alpha (v0.9)**. Expect breaking changes.
 
 ## Why
 
@@ -175,10 +175,29 @@ The JSONL audit log is separate and always on.
 **Learning without a spec** (needs `model`). librarian learns from, in order of preference:
 
 1. **An OpenAPI spec**: given, found at a well-known path, or linked from the docs.
-2. **Documentation pages** (`docs_url` + `base_url`): the model reads the page and related pages
-   on the same site and lists the operations, each with a verbatim quote. librarian checks every
-   quote against the fetched page and drops operations it can't find there.
-3. **The model's own knowledge** (`base_url` only, no spec found): reads only, for well-known APIs.
+2. **Documentation pages**: the model reads the page and related pages on the same site and
+   lists the operations, each with a verbatim quote. librarian checks every quote against the
+   fetched page and drops operations it can't find there. With only a `base_url`, librarian
+   **finds the docs itself**: the usual places first (`/llms.txt`, `/docs`, `docs.<domain>`,
+   links on the homepage, one click further), then a **web search** if configured.
+3. **The model's own knowledge** (nothing found): reads only, for well-known APIs.
+
+Search results are untrusted (anyone can publish "Acme API docs"), so sources are ranked:
+the API's own domain first, then well-known docs hosts (GitHub, ReadMe, GitBook, ...);
+other sites are skipped unless `learning.search.allow_third_party: true`. The review PR says
+how the docs were found and how far they are trusted.
+
+```yaml
+learning:
+  search:
+    provider: model        # off | model | searxng | brave
+    # url: https://searx.internal          (searxng)
+    # api_key: via LIBRARIAN_LEARNING__SEARCH__API_KEY   (brave)
+```
+
+`provider: model` uses the model's own web search. Through a gateway such as LiteLLM that
+needs the Anthropic API format (`model_api: anthropic`); with the OpenAI formats the search is
+refused or silently dropped by the gateway, and librarian reports that instead of guessing.
 
 Documentation is untrusted, so the model never decides anything that matters: it has no tools;
 the API host is always the `base_url` you gave (never one from the docs); read vs write is decided
@@ -354,6 +373,8 @@ uv run pytest
 - **v0.8** ✅: APIs without a spec (documentation, model knowledge) with quote-checked
   extraction and confirm-on-use; change detection (spec/docs re-checks, deprecation and
   removal signals, response shape) with suspensions and review proposals
+- **v0.9** ✅: finding documentation from just a base URL (usual places, then web search via
+  the model or SearXNG/Brave), trust-ranked sources; Anthropic API format for gateways
 - **Later**: Vault/GCP/Azure secret stores; per-user OAuth; per-API approver routing in Slack;
   community registry with signed entries
 

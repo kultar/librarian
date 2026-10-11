@@ -24,6 +24,7 @@ database_url: sqlite+aiosqlite:///.librarian/librarian.db   # or postgresql+asyn
 # model: claude-sonnet-5-5
 # model_base_url: http://litellm:4000/v1
 # model_api_key: set-via-LIBRARIAN_MODEL_API_KEY
+# model_api: openai                   # gateway API format: openai | anthropic (needed for web search)
 max_calls_per_fetch: 8
 
 rate_limit_per_minute: 60              # per calling agent, per API
@@ -98,6 +99,12 @@ approvers:
 # model's own knowledge (reads only). Both are unconfirmed until a real call succeeds.
 learning:
   docs_max_pages: 8
+  find_docs: true                      # look in the usual places when only base_url is given
+  search:
+    provider: "off"                    # off | model | searxng | brave
+    # url: https://searx.internal       # searxng
+    # api_key: set-via-LIBRARIAN_LEARNING__SEARCH__API_KEY   # brave
+    allow_third_party: false           # only the API's own domain and known docs hosts
   model_knowledge: true
 
 # Re-read each API's spec or docs this often and handle changes (0 = never).

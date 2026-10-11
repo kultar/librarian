@@ -291,6 +291,11 @@ class SpecSource(StrictModel):
     fetched_at: datetime | None = None
     content_hash: str | None = None  # of the spec / docs text when last learned or checked
     checked_at: datetime | None = None
+    # How the spec/docs were found when nobody gave their URL: well-known (usual places),
+    # homepage (a link on the API's site) or search; and how far the source is trusted:
+    # official (the API's own domain), docs-host (GitHub, ReadMe, ...) or third-party.
+    found_by: Literal["given", "well-known", "homepage", "search"] | None = None
+    trust: Literal["official", "docs-host", "third-party"] | None = None
 
 
 class Owners(StrictModel):

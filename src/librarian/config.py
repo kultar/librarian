@@ -109,12 +109,35 @@ class WriteSettings(BaseModel):
     grants: list[GrantSettings] = Field(default_factory=list[GrantSettings])
 
 
+class SearchSettings(BaseModel):
+    """Finding an API's documentation on the web when it is not in the usual places.
+
+    - off:     never search
+    - model:   the model's own web search (Anthropic models; through a gateway, set
+               model_api: anthropic)
+    - searxng: a SearXNG instance (`url`), e.g. self-hosted
+    - brave:   the Brave Search API (`api_key`)
+    """
+
+    provider: Literal["off", "model", "searxng", "brave"] = "off"
+    url: str | None = None
+    api_key: SecretStr | None = None
+    # Only use docs on the API's own domain or a well-known docs host (GitHub, ReadMe,
+    # GitBook, ...). Pages elsewhere could be planted to steer what is learned.
+    allow_third_party: bool = False
+    max_results: int = Field(default=8, ge=1, le=20)
+
+
 class LearningSettings(BaseModel):
     """Learning APIs that have no machine-readable spec (needs `model`)."""
 
     docs_max_pages: int = Field(default=8, ge=1, le=20)
-    # With only a base URL and no spec found: describe the API from the model's own
-    # knowledge (reads only, unconfirmed until a call succeeds).
+    # With only a base URL: look for documentation in the usual places (/docs,
+    # docs.<domain>, /llms.txt, links on the homepage) before anything else.
+    find_docs: bool = True
+    search: SearchSettings = Field(default_factory=SearchSettings)
+    # With only a base URL and no spec or docs found: describe the API from the model's
+    # own knowledge (reads only, unconfirmed until a call succeeds).
     model_knowledge: bool = True
 
 
@@ -217,6 +240,9 @@ class Settings(BaseSettings):
     model: str | None = None
     model_base_url: str | None = None
     model_api_key: SecretStr | None = None
+    # The API format used with model_base_url (a gateway such as LiteLLM): "openai" (Chat
+    # Completions) or "anthropic" (Messages). Web search through a gateway needs "anthropic".
+    model_api: Literal["openai", "anthropic"] = "openai"
     max_calls_per_fetch: int = 8
     # Save successful plain-language plans as templates and replay them without the LLM.
     recipes_enabled: bool = True

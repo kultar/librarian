@@ -76,6 +76,19 @@ model_base_url: http://litellm:4000/v1
 # model_api_key: via LIBRARIAN_MODEL_API_KEY
 ```
 
+To let librarian search the web for API documentation through the gateway, talk to it in
+the Anthropic format (LiteLLM serves `/v1/messages`); verified with LiteLLM v1.104.2 and an
+Anthropic model:
+
+```yaml
+model_api: anthropic                     # default: openai (Chat Completions)
+learning: {search: {provider: model}}
+```
+
+With the OpenAI Chat Completions format web search is unsupported, and with the Responses
+format LiteLLM dropped the search tool silently in testing; librarian detects that (no search
+call in the reply) and refuses rather than use an answer from memory.
+
 Through a gateway, the planner asks for its answer as JSON in the reply (`planner_output:
 prompted`, the default with `model_base_url`), because some providers reject the forced tool use
 that structured output otherwise needs. [`examples/compose`](../examples/compose) runs librarian

@@ -57,6 +57,11 @@ high-value target. This document lists what we defend against, how, and what is 
   `<script>`); the host is the onboarding caller's `base_url`, never the docs'; read/write comes
   from the HTTP method; the secret location never comes from the docs. Model-knowledge entries
   are reads only. Both start unconfirmed, and repeated failures suspend an operation.
+- **Search results are untrusted too.** Docs found by search are ranked by trust (the API's own
+  domain, then well-known docs hosts); third-party sites are not even fetched unless allowed,
+  and a redirect off the official site makes a page third-party. The source and its trust
+  level are recorded on the entry and shown in the review PR. The model's own search must
+  visibly run (a search call in the reply), so an answer from memory is never mistaken for one.
 - **Residual risk:** a docs page can describe a real GET operation misleadingly (e.g. one with
   side effects). This is the same trust level as an agent-supplied OpenAPI spec: provisional
   entries only allow GET/HEAD to the given host, and review before `verified` is the control.

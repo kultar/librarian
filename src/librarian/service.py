@@ -33,6 +33,15 @@ from librarian.docs import (
 )
 from librarian.drift import Change, diff, proposed_update, review_body, worst
 from librarian.executor import CredentialMissing, Executor, PolicyDenied
+from librarian.finddocs import (
+    SearchDidNotRun,
+    Searcher,
+    brave_searcher,
+    find_docs,
+    model_searcher,
+    searxng_searcher,
+    trust_of,
+)
 from librarian.notifiers import SlackNotifier, WebhookNotifier
 from librarian.observations import Finding, Observations
 from librarian.openapi import SpecError, discover_spec, entry_from_spec, fetch_spec, spec_hash
@@ -133,6 +142,19 @@ class RecheckReport:
     actions: list[str] = field(default_factory=list[str])
     review_url: str | None = None
     detail: str | None = None
+
+
+def _with_source(entry: ApiEntry, provenance: dict[str, Any]) -> ApiEntry:
+    note = (
+        f"\nThe source was found by {provenance['found_by']} ({provenance['trust']}): "
+        f"{entry.source.url}. Check it is the API's real documentation."
+    )
+    return entry.model_copy(
+        update={
+            "source": entry.source.model_copy(update=provenance),
+            "notes": (entry.notes + note)[:8000],
+        }
+    )
 
 
 def _keep_human_fields(existing: ApiEntry, fresh: ApiEntry) -> ApiEntry:
@@ -237,6 +259,7 @@ class Librarian:
         self.extractor: Agent[None, Any] | None = (
             build_extractor(model, mode) if model is not None else None
         )
+        self.search_model: Model | str | None = model
         self._last_hashes: dict[str, str] = {}  # without a database
         # Fetches specs and docs pages (a fresh client each time: they are rare).
         self.source_client_factory: Callable[[], httpx.AsyncClient] = lambda: httpx.AsyncClient(
@@ -678,29 +701,107 @@ class Librarian:
                 extracted, found = await extract_from_docs(
                     extractor, crawl, base_url=base_url, api_name=name
                 )
-                return entry_from_docs(
+                entry = entry_from_docs(
                     extracted, found, api_id=api_id, base_url=base_url, crawl=crawl, name=name
                 ).entry
+                trust = trust_of(docs_url, base_url)
+                return entry.model_copy(
+                    update={
+                        "source": entry.source.model_copy(
+                            update={"found_by": "given", "trust": trust}
+                        )
+                    }
+                )
             if base_url is None:
                 raise LibrarianError("onboarding needs spec_url, docs_url or base_url")
             try:
                 found_url, spec = await discover_spec(base_url, client, allow_private=private)
-            except SpecError:
-                if self.extractor is None or not self.settings.learning.model_knowledge:
-                    raise
-                extracted = await extract_from_knowledge(
-                    self.extractor, base_url=base_url, api_name=name or api_id
-                )
-                return entry_from_knowledge(
-                    extracted, api_id=api_id, base_url=base_url, name=name or api_id
-                ).entry
+            except SpecError as no_spec:
+                return await self._learn_without_spec(api_id, base_url, name, client, no_spec)
             return entry_from_spec(
                 spec, api_id=api_id, spec_url=found_url, base_url=base_url, name=name
             )
-        except (SpecError, httpx.HTTPError, ValueError, AgentRunError) as exc:
+        except (SpecError, httpx.HTTPError, ValueError, AgentRunError, SearchDidNotRun) as exc:
             raise LibrarianError(f"could not learn {api_id!r}: {exc}") from exc
         finally:
             await client.aclose()
+
+    async def _learn_without_spec(
+        self,
+        api_id: str,
+        base_url: str,
+        name: str | None,
+        client: httpx.AsyncClient,
+        no_spec: SpecError,
+    ) -> ApiEntry:
+        """No spec at the usual paths: find documentation (usual places, then a web
+        search if configured), else fall back to the model's own knowledge."""
+        learning = self.settings.learning
+        private = self.settings.allow_private_networks
+        notes: list[str] = [str(no_spec)]
+        searcher = self._searcher(client)
+        if learning.find_docs or searcher is not None:
+            found, tried = await find_docs(
+                base_url,
+                client,
+                name=name,
+                searcher=searcher,
+                allow_private=private,
+                allow_third_party=learning.search.allow_third_party,
+                look_nearby=learning.find_docs,
+            )
+            notes += tried
+            if found is not None:
+                provenance = {"found_by": found.found_by, "trust": found.trust}
+                if found.spec is not None:
+                    entry = entry_from_spec(
+                        found.spec, api_id=api_id, spec_url=found.url, base_url=base_url, name=name
+                    )
+                    return _with_source(entry, provenance)
+                extractor = self._require_extractor("learning from documentation")
+                crawl = await crawl_docs(
+                    found.url, client, allow_private=private, max_pages=learning.docs_max_pages
+                )
+                if crawl.spec is not None:
+                    entry = entry_from_spec(
+                        crawl.spec,
+                        api_id=api_id,
+                        spec_url=crawl.spec_url,
+                        base_url=base_url,
+                        name=name,
+                    )
+                    return _with_source(entry, provenance)
+                extracted, pages = await extract_from_docs(
+                    extractor, crawl, base_url=base_url, api_name=name
+                )
+                entry = entry_from_docs(
+                    extracted, pages, api_id=api_id, base_url=base_url, crawl=crawl, name=name
+                ).entry
+                return _with_source(entry, provenance)
+        if self.extractor is None or not learning.model_knowledge:
+            raise SpecError("; ".join(notes))
+        extracted = await extract_from_knowledge(
+            self.extractor, base_url=base_url, api_name=name or api_id
+        )
+        return entry_from_knowledge(
+            extracted, api_id=api_id, base_url=base_url, name=name or api_id
+        ).entry
+
+    def _searcher(self, client: httpx.AsyncClient) -> Searcher | None:
+        search = self.settings.learning.search
+        if search.provider == "searxng":
+            if not search.url:
+                raise LibrarianError("learning.search.provider searxng needs learning.search.url")
+            return searxng_searcher(search.url, client, search.max_results)
+        if search.provider == "brave":
+            if search.api_key is None:
+                raise LibrarianError("learning.search.provider brave needs an api_key")
+            return brave_searcher(search.api_key.get_secret_value(), client, search.max_results)
+        if search.provider == "model":
+            if self.search_model is None:
+                raise LibrarianError("learning.search.provider model needs `model` to be set")
+            return model_searcher(self.search_model, search.max_results)
+        return None
 
     def _require_extractor(self, what: str) -> Agent[None, Any]:
         if self.extractor is None:
@@ -1049,13 +1150,18 @@ def _model_from_settings(settings: Settings) -> Model | str | None:
         return None
     if settings.model_base_url is None:
         return settings.model  # e.g. "anthropic:claude-sonnet-5-5"; provider reads its own env
+    api_key = settings.model_api_key.get_secret_value() if settings.model_api_key else None
+    name = settings.model.split(":", 1)[1] if ":" in settings.model else settings.model
+    if settings.model_api == "anthropic":
+        from pydantic_ai.models.anthropic import AnthropicModel
+        from pydantic_ai.providers.anthropic import AnthropicProvider
+
+        # LiteLLM and other gateways serve the Anthropic Messages API at the root.
+        base = settings.model_base_url.removesuffix("/v1").rstrip("/")
+        return AnthropicModel(name, provider=AnthropicProvider(base_url=base, api_key=api_key))
     from pydantic_ai.models.openai import OpenAIChatModel
     from pydantic_ai.providers.openai import OpenAIProvider
 
-    api_key = settings.model_api_key.get_secret_value() if settings.model_api_key else None
-    name = (
-        settings.model.split(":", 1)[1] if settings.model.startswith("openai:") else settings.model
-    )
     return OpenAIChatModel(
         name, provider=OpenAIProvider(base_url=settings.model_base_url, api_key=api_key)
     )
