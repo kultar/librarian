@@ -23,7 +23,7 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from librarian.credentials import CredentialRequest, RequestState
@@ -144,6 +144,19 @@ class StateStore:
                     kind=kind, id=doc_id, state=state, data=data, updated_at=datetime.now(UTC)
                 )
             )
+
+    async def create_doc_if_absent(self, kind: str, doc_id: str, state: str, data: str) -> bool:
+        """Insert a document unless it exists. True if this call created it."""
+        try:
+            async with self.engine.begin() as conn:
+                await conn.execute(
+                    insert(documents).values(
+                        kind=kind, id=doc_id, state=state, data=data, updated_at=datetime.now(UTC)
+                    )
+                )
+        except IntegrityError:
+            return False
+        return True
 
     async def get_doc(self, kind: str, doc_id: str) -> str | None:
         async with self.engine.connect() as conn:

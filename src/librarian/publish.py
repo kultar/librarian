@@ -34,6 +34,10 @@ class Publisher(Protocol):
         """Propose the entry for review; returns a URL (e.g. the pull request)."""
         ...
 
+    async def propose_update(self, entry: ApiEntry, title: str, body: str) -> str:
+        """Propose a change to an existing (possibly verified) entry; returns a URL."""
+        ...
+
 
 class GitHubPublisher:
     def __init__(
@@ -68,10 +72,7 @@ class GitHubPublisher:
         return response
 
     async def publish(self, entry: ApiEntry, learned_by: str) -> str:
-        stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-        branch = f"librarian/onboard-{entry.id}-{stamp}"
-        file_path = f"{self.directory}/{entry.id}.yaml" if self.directory else f"{entry.id}.yaml"
-
+        file_path = self._file_path(entry)
         existing = await self._call(
             "GET", f"/contents/{quote(file_path)}", params={"ref": self.base_branch}
         )
@@ -80,6 +81,44 @@ class GitHubPublisher:
             raise PublishError(
                 f"{file_path} is already verified in {self.repo}; not proposing a replacement"
             )
+        return await self._open_pr(
+            entry,
+            existing,
+            branch_kind="onboard",
+            message=f"registry: learn {entry.id} ({entry.name})",
+            title=f"registry: review learned API `{entry.id}`",
+            body=review_body(entry, learned_by),
+        )
+
+    async def propose_update(self, entry: ApiEntry, title: str, body: str) -> str:
+        file_path = self._file_path(entry)
+        existing = await self._call(
+            "GET", f"/contents/{quote(file_path)}", params={"ref": self.base_branch}
+        )
+        return await self._open_pr(
+            entry,
+            existing,
+            branch_kind="update",
+            message=f"registry: update {entry.id} ({entry.name})",
+            title=title,
+            body=body,
+        )
+
+    def _file_path(self, entry: ApiEntry) -> str:
+        return f"{self.directory}/{entry.id}.yaml" if self.directory else f"{entry.id}.yaml"
+
+    async def _open_pr(
+        self,
+        entry: ApiEntry,
+        existing: httpx.Response,
+        *,
+        branch_kind: str,
+        message: str,
+        title: str,
+        body: str,
+    ) -> str:
+        stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        branch = f"librarian/{branch_kind}-{entry.id}-{stamp}"
         base = await self._call("GET", f"/git/ref/heads/{quote(self.base_branch)}")
         if base.status_code == 404:
             raise PublishError(f"base branch {self.base_branch!r} not found in {self.repo}")
@@ -87,23 +126,18 @@ class GitHubPublisher:
         await self._call("POST", "/git/refs", json={"ref": f"refs/heads/{branch}", "sha": sha})
 
         payload: dict[str, Any] = {
-            "message": f"registry: learn {entry.id} ({entry.name})",
+            "message": message,
             "content": base64.b64encode(dump_entry(entry).encode()).decode(),
             "branch": branch,
         }
         if existing.status_code == 200:
             payload["sha"] = existing.json()["sha"]
-        await self._call("PUT", f"/contents/{quote(file_path)}", json=payload)
+        await self._call("PUT", f"/contents/{quote(self._file_path(entry))}", json=payload)
 
         pr = await self._call(
             "POST",
             "/pulls",
-            json={
-                "title": f"registry: review learned API `{entry.id}`",
-                "head": branch,
-                "base": self.base_branch,
-                "body": review_body(entry, learned_by),
-            },
+            json={"title": title, "head": branch, "base": self.base_branch, "body": body},
         )
         return str(pr.json()["html_url"])
 
@@ -132,7 +166,7 @@ def review_body(entry: ApiEntry, learned_by: str) -> str:
         f"| Auth | `{entry.auth.type}`"
         + (f", secret `{entry.secret_ref}`" if entry.secret_ref else "")
         + " |",
-        f"| Spec | {entry.source.url or 'n/a'} |",
+        f"| Learned from | {_source_label(entry)} |",
         f"| Reads | {len(reads)} |",
         f"| Need review | {len(unknown)} |",
         f"| Writes (refused unless a reviewer enables them) | {writes} |",
@@ -149,9 +183,33 @@ def review_body(entry: ApiEntry, learned_by: str) -> str:
             "`read_basis: reviewed` and explain why it cannot change data:"
         )
         lines.extend(f"  - `{op}`" for op in unknown[:30])
+    if entry.source.kind in ("docs", "inferred"):
+        lines.append(
+            "- [ ] Spot-check operations against the API's documentation (they were read by "
+            "a model; each docs-derived one quotes its source below)"
+        )
     lines += [
         "- [ ] Set `status: verified` when satisfied",
         "",
         "_Opened automatically by librarian._",
     ]
+    quoted = [op for op in entry.operations if op.evidence][:40]
+    if quoted:
+        lines += ["", "<details><summary>Where each operation came from</summary>", ""]
+        lines += [
+            f'- `{op.method} {op.path}`: "{(op.evidence or "")[:200]}" ({op.evidence_url})'
+            for op in quoted
+        ]
+        lines += ["", "</details>"]
     return "\n".join(lines)
+
+
+def _source_label(entry: ApiEntry) -> str:
+    source = entry.source
+    if source.kind == "openapi":
+        return f"OpenAPI spec {source.url or ''}".strip()
+    if source.kind == "docs":
+        return f"documentation, {len(source.pages)} page(s) from {source.url}"
+    if source.kind == "inferred":
+        return "the model's own knowledge (no spec or docs): every operation is unconfirmed"
+    return "written by hand"

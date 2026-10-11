@@ -132,10 +132,15 @@ def build_agent(
         if entry is None or not ctx.deps.caller.may_use(api):
             raise ModelRetry(f"unknown API {api!r}; use search_apis first")
         can_write = ctx.deps.caller.may_write(api) and entry.write_auth is not None
+        observations = ctx.deps.executor.observations
         usable = [
             op
             for op in entry.operations
-            if op.access is Access.READ or (op.access is Access.WRITE and op.writable and can_write)
+            if (
+                op.access is Access.READ
+                or (op.access is Access.WRITE and op.writable and can_write)
+            )
+            and not observations.suspended(entry, op)
         ]
         chosen = rank(entry, filter_text, usable, limit=15) if filter_text.strip() else usable[:40]
         ops: list[dict[str, Any]] = []
@@ -148,6 +153,11 @@ def build_agent(
                     "path": op.path,
                     "summary": op.summary[:200],
                     "kind": "write (propose only; needs human approval)" if is_write else "read",
+                    **(
+                        {"note": "learned from docs/model knowledge; not yet confirmed"}
+                        if not observations.confirmed(entry, op)
+                        else {}
+                    ),
                     "parameters": [
                         {
                             "name": p.name,

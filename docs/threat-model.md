@@ -52,6 +52,15 @@ high-value target. This document lists what we defend against, how, and what is 
   data the same caller is allowed to read and include it in the answer. Per-agent API allowlists
   bound this to what the caller could already read through `execute`.
 
+- **Documentation is input too.** When learning from docs, the model has no tools and only fills
+  a fixed structure. Each operation must quote the page (checked against the fetched text, outside
+  `<script>`); the host is the onboarding caller's `base_url`, never the docs'; read/write comes
+  from the HTTP method; the secret location never comes from the docs. Model-knowledge entries
+  are reads only. Both start unconfirmed, and repeated failures suspend an operation.
+- **Residual risk:** a docs page can describe a real GET operation misleadingly (e.g. one with
+  side effects). This is the same trust level as an agent-supplied OpenAPI spec: provisional
+  entries only allow GET/HEAD to the given host, and review before `verified` is the control.
+
 ### T3. Credential theft
 - Secrets never enter A2A messages, Slack, logs, audit events, provenance or LLM context.
   Query-string keys are redacted in provenance URLs.
@@ -90,6 +99,11 @@ high-value target. This document lists what we defend against, how, and what is 
 - Strict validation: unknown fields rejected, absolute/protocol-relative paths rejected, base URLs
   cannot embed credentials, file names must match ids, invalid files are skipped not fatal.
 - Review registry changes by pull request; run `librarian registry validate` in CI.
+
+- **APIs change under a reviewed entry.** Re-checks compare the source with the entry; an
+  operation whose HTTP method changed, or a writable one whose request changed, is suspended
+  until a reviewer merges the proposed update. Suspensions live in the state database (tied to
+  the operation's definition), so they cannot be undone by a registry file being re-synced.
 
 ### T7. Abuse / resource exhaustion
 - Per-(caller, API) rate limits, request timeouts, response size caps, spec size caps, operation

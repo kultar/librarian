@@ -116,6 +116,9 @@ async def test_onboard_publishes_and_survives_publish_failure(
         async def publish(self, entry: Any, learned_by: str) -> str:
             raise PublishError("GitHub is down")
 
+        async def propose_update(self, entry: Any, title: str, body: str) -> str:
+            raise PublishError("GitHub is down")
+
     librarian.publisher = Failing()
     outcome = await librarian.onboard("jira", spec_url="https://x.example/spec.json")
     assert outcome.review_url is None
@@ -127,3 +130,14 @@ async def test_never_proposes_replacing_a_verified_entry() -> None:
     with pytest.raises(PublishError, match="already verified"):
         await publisher(fake).publish(entry_from_spec(SPEC, api_id="jira"), "agent")
     assert not [c for c in fake.calls if c[0] in ("POST", "PUT")]  # no branch, no PR
+
+
+async def test_updates_to_verified_entries_are_proposed_not_refused() -> None:
+    fake = FakeGitHub(file_exists=True, existing_status="verified")
+    entry = entry_from_spec(SPEC, api_id="jira", spec_url="https://x.example/spec.json")
+    url = await publisher(fake).propose_update(entry, "registry: `jira` changed", "body")
+    assert url == "https://github.com/acme/registry/pull/7"
+    put = next(body for method, _, body in fake.calls if method == "PUT")
+    assert put["sha"] == "old-sha" and put["branch"].startswith("librarian/update-jira-")
+    pr = next(body for _, path, body in fake.calls if path == "/pulls")
+    assert pr["title"] == "registry: `jira` changed"

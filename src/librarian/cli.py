@@ -16,7 +16,7 @@ from librarian.calls import Caller, CallRequest
 from librarian.config import Settings
 from librarian.executor import CredentialMissing, PolicyDenied
 from librarian.registry.models import Access
-from librarian.service import Librarian, LibrarianError
+from librarian.service import SOURCE_LABELS, Librarian, LibrarianError
 
 # librarian is a server/CLI: keep Pydantic AI's interactive banner out of its output.
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
@@ -90,25 +90,37 @@ def learn(
     base_url: Annotated[
         str | None, typer.Option(help="API base URL (spec auto-discovered if no spec_url)")
     ] = None,
+    docs_url: Annotated[
+        str | None,
+        typer.Option(
+            help="Documentation page to learn from when there is no spec (needs base_url)"
+        ),
+    ] = None,
     name: Annotated[str | None, typer.Option(help="Display name")] = None,
     config: ConfigOption = None,
 ) -> None:
-    """Learn an API from its OpenAPI spec and save a provisional registry entry."""
+    """Learn an API (spec, docs, or model knowledge) and save a provisional entry."""
 
     async def run() -> None:
         librarian = Librarian(_settings(config))
         librarian.load()
         try:
             outcome = await librarian.onboard(
-                api_id, spec_url=spec_url, base_url=base_url, name=name
+                api_id, spec_url=spec_url, base_url=base_url, docs_url=docs_url, name=name
             )
         finally:
             await librarian.aclose()
         typer.echo(
             f"Saved {outcome.path}: {len(outcome.entry.operations)} operations, "
             f"{outcome.read_operations} read, {outcome.needs_review} need review "
-            f"(auth: {outcome.entry.auth.type})"
+            f"(auth: {outcome.entry.auth.type}, "
+            f"learned from {SOURCE_LABELS[outcome.entry.source.kind]})"
         )
+        if outcome.entry.source.kind in ("docs", "inferred"):
+            typer.echo(
+                "Operations are unconfirmed until a real call succeeds; ones that keep "
+                "failing are suspended."
+            )
         if outcome.review_url:
             typer.echo(f"Review: {outcome.review_url}")
         if outcome.review_error:
@@ -233,6 +245,66 @@ def recipes_delete(recipe_id: str, config: ConfigOption = None) -> None:
         finally:
             await librarian.aclose()
         typer.echo(f"deleted {recipe_id}")
+
+    _run(run())
+
+
+@registry_app.command("recheck")
+def registry_recheck(
+    api_id: Annotated[str | None, typer.Argument(help="One API (default: all)")] = None,
+    config: ConfigOption = None,
+) -> None:
+    """Re-read APIs' specs or docs now and report (and handle) any changes."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        await librarian.start()
+        try:
+            ids = [api_id] if api_id else [e.id for e in librarian.registry.all()]
+            for item in ids:
+                report = await librarian.recheck(item)
+                typer.echo(
+                    f"{report.api:<24} {report.status}"
+                    + (f"  {report.detail}" if report.detail else "")
+                )
+                for change in report.changes:
+                    typer.echo(f"    [{change.severity}] {change.detail}")
+                for action in report.actions:
+                    typer.echo(f"    -> {action}")
+                if report.review_url:
+                    typer.echo(f"    review: {report.review_url}")
+        finally:
+            await librarian.aclose()
+
+    _run(run())
+
+
+@registry_app.command("clear")
+def registry_clear(
+    api_id: str,
+    operation: str,
+    config: ConfigOption = None,
+) -> None:
+    """Lift a suspension or warning on one operation after checking it by hand."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        await librarian.start()
+        try:
+            entry = librarian.registry.get(api_id)
+            op = entry.operation(operation) if entry is not None else None
+            if entry is None or op is None:
+                raise typer.BadParameter(f"unknown operation {api_id}.{operation}")
+            if op.suspended:
+                typer.echo(
+                    "This suspension is in the registry entry itself; remove `suspended` "
+                    "there (via review).",
+                    err=True,
+                )
+            cleared = await librarian.observations.clear(entry, op)
+        finally:
+            await librarian.aclose()
+        typer.echo("cleared" if cleared else "nothing to clear")
 
     _run(run())
 

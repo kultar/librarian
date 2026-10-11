@@ -11,6 +11,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 
 from librarian.calls import ArgValue, Caller, CallRequest, WriteRequest
+from librarian.observations import Observations
 from librarian.registry.models import (
     Access,
     ApiEntry,
@@ -65,8 +66,11 @@ class PolicyEngine:
         write_rate_limit_per_minute: int = 10,
         allow_provisional: bool = True,
         allowed_hosts: frozenset[str] | None = None,
+        observations: Observations | None = None,
     ) -> None:
         self.registry = registry
+        # Runtime facts about operations, including suspensions after an API changed.
+        self.observations = observations or Observations()
         self.rate_limiter = RateLimiter(rate_limit_per_minute)
         self.write_rate_limiter = RateLimiter(write_rate_limit_per_minute)
         self.allow_provisional = allow_provisional
@@ -94,6 +98,9 @@ class PolicyEngine:
             return Decision.deny(f"unknown operation {request.operation!r} on {entry.id!r}")
         if op.access is not Access.READ:
             return Decision.deny(f"operation {op.id!r} is not a read (access={op.access})")
+        suspended = self.observations.suspended(entry, op)
+        if suspended:
+            return Decision.deny(f"operation {op.id!r} is suspended until reviewed: {suspended}")
         if op.read_basis is ReadBasis.REVIEWED and entry.status is not EntryStatus.VERIFIED:
             return Decision.deny(
                 f"operation {op.id!r} is a reviewed read and API {entry.id!r} is not verified"
@@ -126,6 +133,9 @@ class PolicyEngine:
             return Decision.deny(f"unknown operation {request.operation!r} on {entry.id!r}")
         if op.access is not Access.WRITE or not op.writable:
             return Decision.deny(f"operation {op.id!r} is not enabled for writes")
+        suspended = self.observations.suspended(entry, op)
+        if suspended:
+            return Decision.deny(f"operation {op.id!r} is suspended until reviewed: {suspended}")
         if entry.write_auth is None:
             return Decision.deny(f"API {entry.id!r} has no write credential configured")
         if request.body is not None and not op.accepts_body:

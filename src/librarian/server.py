@@ -3,7 +3,7 @@
 Message format (A2A `SendMessage`):
 - a data part `{"skill": "execute", "api": ..., "operation": ..., "args": {...}}`
 - a data part `{"skill": "capabilities", "query": "..."}`         (optional query)
-- a data part `{"skill": "onboard", "api": ..., "spec_url" | "base_url": ...}`
+- a data part `{"skill": "onboard", "api": ..., "spec_url" | "docs_url" | "base_url": ...}`
 - a data part `{"skill": "fetch", "intent": "..."}`, or plain text (= fetch)
 An optional `"principal"` (in the data part or message metadata) names who the
 calling agent acts for; it is recorded for audit.
@@ -108,7 +108,8 @@ def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) 
                 description=(
                     "Learn an API from its OpenAPI spec and register it (provisional, read-only "
                     'until reviewed). {"skill":"onboard","api":"jira","spec_url":"https://..."} '
-                    'or {"skill":"onboard","api":"x","base_url":"https://..."} to auto-discover.'
+                    'or {"skill":"onboard","api":"x","base_url":"https://..."} to auto-discover. '
+                    'No spec? Add "docs_url" (with base_url) to learn from documentation.'
                 ),
                 tags=["onboarding"],
             )
@@ -337,6 +338,7 @@ class LibrarianExecutor(AgentExecutor):
                 api,
                 spec_url=_opt_str(command.get("spec_url")),
                 base_url=_opt_str(command.get("base_url")),
+                docs_url=_opt_str(command.get("docs_url")),
                 name=_opt_str(command.get("name")),
                 caller=caller,
             )
@@ -348,6 +350,7 @@ class LibrarianExecutor(AgentExecutor):
                 "read_operations": outcome.read_operations,
                 "needs_review": outcome.needs_review,
                 "auth": outcome.entry.auth.type,
+                "learned_from": outcome.entry.source.kind,
                 "review_url": outcome.review_url,
                 "review_error": outcome.review_error,
             }
@@ -668,3 +671,17 @@ async def _sweep_forever(librarian: Librarian) -> None:
                 await librarian.broker.sweep()
             except Exception:
                 log.exception("credential sweep failed")
+            try:
+                # Pick up suspensions and confirmations recorded by other replicas.
+                await librarian.observations.load()
+            except Exception:
+                log.exception("loading observations failed")
+        if ticks % 40 == 0:
+            try:
+                for report in await librarian.recheck_all_if_due():
+                    if report.status in ("changed", "error"):
+                        log.info(
+                            "recheck %s: %s %s", report.api, report.status, report.detail or ""
+                        )
+            except Exception:
+                log.exception("API re-check failed")

@@ -121,6 +121,7 @@ class RecordingNotifier(Notifier):
         self.events: list[tuple[str, CredentialRequest]] = []
         self.write_links: list[str] = []
         self.write_events: list[tuple[str, Any]] = []
+        self.changes: list[dict[str, Any]] = []
 
     async def opened(self, request: CredentialRequest, link: str) -> None:
         self.opened_links.append(link)
@@ -141,6 +142,11 @@ class RecordingNotifier(Notifier):
 
     async def grant_used(self, grant: Any, approval_like: Any) -> None:
         self.write_events.append(("grant_used", grant))
+
+    async def api_changed(
+        self, api: str, title: str, details: list[str], link: str | None, channel: str | None
+    ) -> None:
+        self.changes.append({"api": api, "title": title, "details": details, "link": link})
 
 
 Handler = Callable[[httpx.Request], httpx.Response]

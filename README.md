@@ -4,7 +4,8 @@
 
 Agents shouldn't each carry their own Jira token, GitHub token and API client. With librarian,
 agents ask one specialist, over [A2A](https://a2a-protocol.org), for the data they need. The
-librarian learns the API from its OpenAPI spec the first time it is needed, asks a human for a
+librarian learns the API the first time it is needed (from its OpenAPI spec, or from its
+documentation when there is no spec), asks a human for a
 credential (once, out of band), and from then on serves every agent, without ever handing the
 credential out.
 
@@ -16,7 +17,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.6)**. Expect breaking changes.
+> Status: **alpha (v0.8)**. Expect breaking changes.
 
 ## Why
 
@@ -35,7 +36,7 @@ credential out.
 |---|---|---|
 | `execute` | Run one read operation: `{"skill":"execute","api":"jira","operation":"getIssue","args":{"issueIdOrKey":"ABC-1"}}`. Optional `select` (dotted paths, e.g. `["fields.summary"]`) and `max_pages` | No |
 | `capabilities` | List APIs and read operations: `{"skill":"capabilities","query":"issues"}` | No |
-| `onboard` | Learn an API: `{"skill":"onboard","api":"jira","spec_url":"https://..."}` or `"base_url"` to auto-discover | No |
+| `onboard` | Learn an API: `{"skill":"onboard","api":"jira","spec_url":"https://..."}`, `"base_url"` to auto-discover, or `"docs_url"` + `"base_url"` when there is no spec | No |
 | `write` | Change data, with human approval or a grant: `{"skill":"write","api":"jira","operation":"addComment","args":{...},"body":{...},"reason":"why"}` | No |
 | `fetch` | Plain language: *"open bugs assigned to the payments team"* (only when a model is configured) | Yes |
 
@@ -168,6 +169,44 @@ The JSONL audit log is separate and always on.
   (still policy-checked, with the caller's permissions). Plans whose later calls use values from
   earlier results are never saved. `librarian recipes list|delete`; `recipes_enabled: false`
   turns it off.
+
+## APIs without a spec, and APIs that change
+
+**Learning without a spec** (needs `model`). librarian learns from, in order of preference:
+
+1. **An OpenAPI spec**: given, found at a well-known path, or linked from the docs.
+2. **Documentation pages** (`docs_url` + `base_url`): the model reads the page and related pages
+   on the same site and lists the operations, each with a verbatim quote. librarian checks every
+   quote against the fetched page and drops operations it can't find there.
+3. **The model's own knowledge** (`base_url` only, no spec found): reads only, for well-known APIs.
+
+Documentation is untrusted, so the model never decides anything that matters: it has no tools;
+the API host is always the `base_url` you gave (never one from the docs); read vs write is decided
+by HTTP method; the auth *type* may come from the docs but where the key is stored never does.
+Operations from docs or model knowledge are **unconfirmed** until a real call succeeds (callers
+see a warning). One that keeps answering 404 is **suspended** and its owners are told.
+
+```bash
+uv run librarian learn dogs --docs-url https://dog.ceo/dog-api/documentation/ \
+    --base-url https://dog.ceo/api --name "Dog CEO"
+```
+
+**Noticing changes.** Every `drift.recheck_hours` (default 24), one replica re-reads each entry's
+spec or docs. A new model read only happens when the docs' text actually changed.
+
+| Change | Provisional entry | Verified entry |
+|---|---|---|
+| New operations, optional parameters | updated, re-proposed | proposed for review |
+| Removed operation, new required parameter, moved path | updated, re-proposed | callers warned; writes **suspended**; proposed |
+| HTTP method changed (a read may now change data) | updated, re-proposed | **suspended**; proposed |
+
+Verified entries are never changed automatically. The proposal PR keeps reviewed decisions
+(writes enabled, reviewed reads, pagination); merging it lifts the suspensions it addresses.
+
+Calls also watch for change: `Deprecation`/`Sunset` headers, repeated 404/405/410 responses, and
+responses that lose most of the fields seen before are reported to the API's owners (once), and
+callers see a warning. `librarian registry recheck [api]` runs a check now;
+`librarian registry clear <api> <operation>` lifts a suspension after checking by hand.
 
 ## Verified principals
 
@@ -310,6 +349,11 @@ uv run pytest
   required modes); claimed principals no longer count as requesters once verification is on
 - **v0.6** ✅: big APIs: ranked operation search, discovery-built glossary (e.g. Jira custom
   fields), recipes replayed without the LLM
+- **v0.7** ✅: MCP endpoint; LiteLLM agent gateway (MCP + A2A); exactly-once writes across
+  replicas; integration suite
+- **v0.8** ✅: APIs without a spec (documentation, model knowledge) with quote-checked
+  extraction and confirm-on-use; change detection (spec/docs re-checks, deprecation and
+  removal signals, response shape) with suspensions and review proposals
 - **Later**: Vault/GCP/Azure secret stores; per-user OAuth; per-API approver routing in Slack;
   community registry with signed entries
 

@@ -234,3 +234,30 @@ async def test_mcp_accepts_requests_for_any_host_name(server: str) -> None:
             },
         )
     assert response.status_code == 200, response.text
+
+
+async def test_onboard_from_documentation_over_mcp(
+    connect: Connect, librarian: Librarian, router: Router
+) -> None:
+    from librarian.docs import build_extractor
+    from tests.test_learning import BASE_URL, DOCS, by_page, extractor_model
+
+    html = {"content-type": "text/html"}
+    from tests.test_learning import INDEX_HTML, REFERENCE, REFERENCE_HTML
+
+    router.add("GET", DOCS, lambda r: httpx.Response(200, text=INDEX_HTML, headers=html))
+    router.add("GET", REFERENCE, lambda r: httpx.Response(200, text=REFERENCE_HTML, headers=html))
+    librarian.source_client_factory = lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(router)
+    )
+    model, _ = extractor_model(by_page)
+    librarian.extractor = build_extractor(model)
+    librarian.settings.callers[0].apis.append("widgets")
+    async with connect() as session:
+        result = data(
+            await session.call_tool(
+                "onboard", {"api": "widgets", "docs_url": DOCS, "base_url": BASE_URL}
+            )
+        )
+    assert result["learned_from"] == "docs"
+    assert result["read_operations"] == 3

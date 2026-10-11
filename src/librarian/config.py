@@ -81,6 +81,12 @@ class PrincipalSettings(BaseModel):
     header: str = "X-Principal-Token"
     issuers: list[IssuerSettings] = Field(default_factory=list[IssuerSettings])
 
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _yaml_off(cls, value: object) -> object:
+        # YAML reads a bare `off` as false.
+        return "off" if value is False else value
+
 
 class GrantSettings(BaseModel):
     """A standing grant declared by the operator (typically for autonomous agents)."""
@@ -101,6 +107,23 @@ class WriteSettings(BaseModel):
     approval_expire_hours: float = 24
     rate_limit_per_minute: int = 10
     grants: list[GrantSettings] = Field(default_factory=list[GrantSettings])
+
+
+class LearningSettings(BaseModel):
+    """Learning APIs that have no machine-readable spec (needs `model`)."""
+
+    docs_max_pages: int = Field(default=8, ge=1, le=20)
+    # With only a base URL and no spec found: describe the API from the model's own
+    # knowledge (reads only, unconfirmed until a call succeeds).
+    model_knowledge: bool = True
+
+
+class DriftSettings(BaseModel):
+    """Noticing API changes."""
+
+    # Re-check each entry's spec or docs this often (0 = never). Changes to verified
+    # entries are proposed for review; risky operations are suspended meanwhile.
+    recheck_hours: float = Field(default=24, ge=0)
 
 
 class CallerKey(BaseModel):
@@ -230,6 +253,8 @@ class Settings(BaseSettings):
     notifier: NotifierSettings = Field(default_factory=NotifierSettings)
     publish: PublishSettings = Field(default_factory=PublishSettings)
     writes: WriteSettings = Field(default_factory=WriteSettings)
+    learning: LearningSettings = Field(default_factory=LearningSettings)
+    drift: DriftSettings = Field(default_factory=DriftSettings)
     principals: PrincipalSettings = Field(default_factory=PrincipalSettings)
     approvers: ApproverSettings = Field(default_factory=ApproverSettings)
 

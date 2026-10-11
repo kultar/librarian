@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import time
 from collections.abc import Callable
 from typing import Any, cast
@@ -22,6 +23,7 @@ from librarian import __version__, telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance, WriteRequest
 from librarian.net import BlockedAddress, pin
+from librarian.observations import Observations
 from librarian.policy import PolicyEngine
 from librarian.registry.models import (
     ApiEntry,
@@ -37,6 +39,8 @@ from librarian.registry.models import (
 )
 from librarian.secrets import SecretStore
 from librarian.shaping import get_path, select, set_path
+
+log = logging.getLogger(__name__)
 
 MAX_REDIRECTS = 3
 USER_AGENT = f"librarian/{__version__} (+https://github.com/kultar/librarian)"
@@ -69,8 +73,10 @@ class Executor:
         max_response_bytes: int = 2_000_000,
         allow_private_provisional: bool = False,
         pinned_client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        observations: Observations | None = None,
     ) -> None:
         self.policy = policy
+        self.observations = observations or policy.observations
         self.secrets = secrets
         self.audit = audit
         self.client = client or httpx.AsyncClient(
@@ -157,10 +163,16 @@ class Executor:
             else paging.first_page
         )
 
+        last_headers: dict[str, str] = {}
         while next_url is not None and page_count < request.max_pages:
             response, body, cut, final_url = await self._send(
                 entry, op, next_url, next_query, secret_query, headers, request.body
             )
+            last_headers = {
+                name: response.headers[name]
+                for name in ("deprecation", "sunset")
+                if name in response.headers
+            }
             page_count += 1
             status_code = response.status_code
             content_type = response.headers.get("content-type", "")
@@ -196,6 +208,14 @@ class Executor:
             next_url = url
 
         ok = 200 <= status_code < 300
+        data = _merge_pages(pages, paging.items_path)
+        # Record what happened before computing warnings, so a first success counts.
+        try:
+            await self.observations.observe(
+                entry, op, status_code, data if not truncated else None, last_headers
+            )
+        except Exception:  # observing must never break a call
+            log.exception("recording an observation for %s.%s failed", entry.id, op.id)
         provenance = Provenance(
             api=entry.id,
             api_status=entry.status,
@@ -207,6 +227,8 @@ class Executor:
             principal_verified=caller.principal_verified,
             credential_ref=entry.secret_ref,
             pages=page_count,
+            origin=op.origin.value,
+            confirmed=self.observations.confirmed(entry, op),
         )
         await self.audit.record(
             AuditEvent(
@@ -233,7 +255,6 @@ class Executor:
                 f"{entry.name} refused this request (HTTP 403): the credential is valid but "
                 "lacks permission for this resource"
             )
-        data = _merge_pages(pages, paging.items_path)
         if request.select:
             data = select(data, request.select)
         return CallResult(
@@ -243,6 +264,7 @@ class Executor:
             truncated=truncated,
             content_type=content_type,
             error=error,
+            warnings=self.observations.warnings(entry, op),
             provenance=provenance,
         )
 

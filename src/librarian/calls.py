@@ -95,6 +95,10 @@ class Provenance(BaseModel):
     principal_verified: bool = False
     credential_ref: str | None = None
     pages: int = 1
+    # Where the operation's description came from (spec, docs, model, manual) and
+    # whether a real call has confirmed it works.
+    origin: str = "manual"
+    confirmed: bool = True
 
 
 class WriteRequest(BaseModel):
@@ -128,4 +132,7 @@ class CallResult(BaseModel):
     # Set when the API refused the call for a reason the caller should see
     # (e.g. 403: the credential works but lacks permission for this resource).
     error: str | None = None
+    # Things the caller should know about this operation: unconfirmed, deprecated by
+    # the API, or changed since it was reviewed.
+    warnings: list[str] = Field(default_factory=list[str])
     provenance: Provenance

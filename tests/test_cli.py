@@ -49,3 +49,19 @@ def test_grants_list_and_revoke(state: Path, router: Router) -> None:
     assert runner.invoke(app, ["grants", "list"]).output.strip() == ""
     assert "revoked" in runner.invoke(app, ["grants", "list", "--all"]).output
     assert runner.invoke(app, ["grants", "revoke", "nope"]).exit_code == 1
+
+
+def test_example_config_loads() -> None:
+    from librarian.config import Settings
+
+    settings = Settings.load(Path(__file__).parent.parent / "examples" / "librarian.yaml")
+    assert settings.principals.mode == "off"
+    assert settings.drift.recheck_hours == 24
+
+
+def test_bare_yaml_off_means_off(tmp_path: Path) -> None:
+    from librarian.config import Settings
+
+    config = tmp_path / "c.yaml"
+    config.write_text("principals:\n  mode: off\n")
+    assert Settings.load(config).principals.mode == "off"

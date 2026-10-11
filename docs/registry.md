@@ -42,6 +42,25 @@ operations:
     accepts_body: true
 ```
 
+### Fields librarian sets when learning
+
+```yaml
+source:
+  kind: docs                      # openapi | docs | inferred (model knowledge) | manual
+  url: https://example.com/docs/api/
+  pages: [https://example.com/docs/api/, https://example.com/docs/api/reference]
+  content_hash: 3f1c...           # fingerprint used to notice changes
+operations:
+  - id: get_widgets_id
+    origin: docs                  # spec | docs | model | manual
+    evidence: "GET /v2/widgets/{id}"          # verbatim quote from evidence_url
+    evidence_url: https://example.com/docs/api/
+    confirmed_at: null            # set by a reviewer if wanted; runtime confirmations are stored
+                                  # in the state database
+    suspended: null               # a reason here refuses the operation until removed
+    warning: null                 # shown to callers with every result
+```
+
 ## Discovery and glossary
 
 ```yaml
@@ -113,6 +132,7 @@ issue. This keeps large responses under the size cap and saves LLM context.
 | Undeclared argument, missing required argument | No |
 | Path argument containing `/`, `.` or `..` | No |
 | Header argument named Authorization/Cookie/Host/X-Api-Key | No |
+| Operation `suspended` (in the entry, or by change detection) | No |
 
 ## Lifecycle
 
@@ -123,3 +143,6 @@ issue. This keeps large responses under the size cap and saves LLM context.
    `status: verified` in the pull request. Once merged and synced, the running librarian
    hot-reloads the file.
 3. **Block**: denying a credential request sets `status: blocked` so agents stop asking.
+4. **Change**: re-checks (`drift.recheck_hours`) compare the entry with its source. Provisional
+   entries follow the source; for verified entries librarian opens an update pull request and
+   suspends risky operations until it is merged (see the README).

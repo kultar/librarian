@@ -125,6 +125,18 @@ class Pagination(StrictModel):
         return self
 
 
+class Origin(StrEnum):
+    """Where an operation's description came from."""
+
+    SPEC = "spec"  # a machine-readable OpenAPI/Swagger document
+    DOCS = "docs"  # extracted from documentation pages by a model, with a verified quote
+    MODEL = "model"  # the model's own knowledge of the API: unconfirmed until it works
+    MANUAL = "manual"  # written by a person
+
+
+MAX_SHAPE_PATHS = 200
+
+
 class Operation(StrictModel):
     id: str
     method: str
@@ -142,6 +154,20 @@ class Operation(StrictModel):
     writable: bool = False
     # May an approval of this operation be remembered as a grant? Never for DELETE.
     rememberable: bool | None = None
+    origin: Origin = Origin.MANUAL
+    # For docs-learned operations: the verbatim passage that describes it, and where.
+    evidence: str | None = Field(default=None, max_length=1000)
+    evidence_url: str | None = None
+    # When a real call first succeeded. Docs/model operations are unconfirmed until then.
+    confirmed_at: datetime | None = None
+    # Field paths seen in a successful response (e.g. "issues[].key"); the baseline
+    # for noticing that the API's responses changed shape.
+    response_shape: list[str] | None = Field(default=None, max_length=MAX_SHAPE_PATHS)
+    # Set when the API changed in a way that needs a human; the operation is refused
+    # until a reviewer clears it.
+    suspended: str | None = Field(default=None, max_length=500)
+    # Shown to callers with every result (e.g. "the spec no longer lists this").
+    warning: str | None = Field(default=None, max_length=500)
 
     @field_validator("id")
     @classmethod
@@ -253,9 +279,18 @@ class Discovery(StrictModel):
 
 
 class SpecSource(StrictModel):
-    kind: Literal["openapi", "manual", "inferred"] = "manual"
+    """Where an entry was learned from, and a fingerprint for noticing changes.
+
+    kind: openapi (a spec), docs (documentation pages), inferred (the model's own
+    knowledge), manual (written by a person).
+    """
+
+    kind: Literal["openapi", "docs", "manual", "inferred"] = "manual"
     url: str | None = None
+    pages: list[str] = Field(default_factory=list[str], max_length=20)  # docs pages read
     fetched_at: datetime | None = None
+    content_hash: str | None = None  # of the spec / docs text when last learned or checked
+    checked_at: datetime | None = None
 
 
 class Owners(StrictModel):

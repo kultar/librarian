@@ -168,13 +168,24 @@ def build_mcp(librarian: Librarian) -> MCPServer:
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=True))
     async def onboard(
-        ctx: Context, api: str, spec_url: str | None = None, base_url: str | None = None
+        ctx: Context,
+        api: str,
+        spec_url: str | None = None,
+        base_url: str | None = None,
+        docs_url: str | None = None,
+        name: str | None = None,
     ) -> dict[str, Any]:
-        """Teach the librarian a new API from its OpenAPI spec (or auto-discover it from the
-        base URL). The API becomes usable read-only at once and is proposed for review."""
+        """Teach the librarian a new API: from its OpenAPI spec, by auto-discovery under
+        base_url, or from documentation pages (docs_url + base_url) when it has no spec.
+        The API becomes usable read-only at once and is proposed for review."""
         try:
             outcome = await librarian.onboard(
-                api, spec_url=spec_url, base_url=base_url, caller=_caller(ctx)
+                api,
+                spec_url=spec_url,
+                base_url=base_url,
+                docs_url=docs_url,
+                name=name,
+                caller=_caller(ctx),
             )
         except LibrarianError as exc:
             raise ToolError(str(exc)) from exc
@@ -183,6 +194,7 @@ def build_mcp(librarian: Librarian) -> MCPServer:
             "status": outcome.entry.status.value,
             "read_operations": outcome.read_operations,
             "needs_review": outcome.needs_review,
+            "learned_from": outcome.entry.source.kind,
             "review_url": outcome.review_url,
         }
 

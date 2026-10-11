@@ -67,6 +67,13 @@ class WebhookNotifier(Notifier):
         data = approval.model_dump(mode="json", exclude={"notifier_ref", "result"})
         await self._post_write("write_approval.closed", {"approval": data})
 
+    async def api_changed(
+        self, api: str, title: str, details: list[str], link: str | None, channel: str | None
+    ) -> None:
+        await self._post_write(
+            "api.changed", {"api": api, "title": title, "details": details, "link": link}
+        )
+
     async def grant_used(self, grant: Grant, approval_like: WriteApproval) -> None:
         await self._post_write(
             "grant.used",
@@ -232,6 +239,26 @@ class SlackNotifier(Notifier):
                 ),
             },
         )
+
+    async def api_changed(
+        self, api: str, title: str, details: list[str], link: str | None, channel: str | None
+    ) -> None:
+        await self._call(
+            "chat.postMessage",
+            {
+                "channel": channel or self.default_channel,
+                "text": _api_changed_text(api, title, details, link),
+            },
+        )
+
+
+def _api_changed_text(api: str, title: str, details: list[str], link: str | None) -> str:
+    lines = [f":warning: *{title}* (`{api}`)", *[f"• {d}" for d in details[:10]]]
+    if len(details) > 10:
+        lines.append(f"• ... and {len(details) - 10} more")
+    if link:
+        lines.append(f"<{link}|Review the proposed update>")
+    return "\n".join(lines)
 
 
 def write_outcome_text(approval: WriteApproval) -> str:

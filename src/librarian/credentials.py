@@ -107,6 +107,18 @@ class Notifier:
     async def grant_used(self, grant: Any, approval_like: Any) -> None:
         log.info("grant %s used by %s for %s.%s", grant.id, grant.agent, grant.api, grant.operation)
 
+    async def api_changed(
+        self, api: str, title: str, details: list[str], link: str | None, channel: str | None
+    ) -> None:
+        """An API changed or is misbehaving in a way a human should look at."""
+        log.warning(
+            "API change: %s: %s%s%s",
+            api,
+            title,
+            "".join(f"\n  - {d}" for d in details[:20]),
+            f"\n  review: {link}" if link else "",
+        )
+
 
 class RequestStore(Protocol):
     """Durable storage for requests (see `librarian.state.StateStore`)."""

@@ -50,7 +50,7 @@ callers: []
 
 # Who agents act for: off (claims trusted) | optional | required (proof via a signed token).
 principals:
-  mode: off
+  mode: "off"
   header: X-Principal-Token
   issuers: []
 #    - issuer: https://acme.okta.com/oauth2/default
@@ -93,3 +93,13 @@ approvers:
   # user_header: X-Auth-Request-Email
   # groups_header: X-Auth-Request-Groups
   # group: api-approvers
+
+# APIs with no OpenAPI spec (needs `model`): learn from documentation pages, or from the
+# model's own knowledge (reads only). Both are unconfirmed until a real call succeeds.
+learning:
+  docs_max_pages: 8
+  model_knowledge: true
+
+# Re-read each API's spec or docs this often and handle changes (0 = never).
+drift:
+  recheck_hours: 24

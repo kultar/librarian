@@ -10,6 +10,7 @@ Nothing here can mark a non-GET operation as a read; only a human can.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from librarian.registry.models import (
     EntryStatus,
     NoAuth,
     Operation,
+    Origin,
     Parameter,
     ParamLocation,
     SpecSource,
@@ -60,7 +62,19 @@ class SpecError(Exception):
 
 
 async def fetch_spec(url: str, client: httpx.AsyncClient, *, allow_private: bool = False) -> Json:
-    """Download and parse an OpenAPI/Swagger document (JSON or YAML), size-capped.
+    """Download and parse an OpenAPI/Swagger document (JSON or YAML), size-capped."""
+    text, _ = await fetch_text(url, client, allow_private=allow_private)
+    return parse_spec(text)
+
+
+async def fetch_text(
+    url: str,
+    client: httpx.AsyncClient,
+    *,
+    allow_private: bool = False,
+    max_bytes: int = MAX_SPEC_BYTES,
+) -> tuple[str, str]:
+    """Download a document (spec or docs page); returns (text, final URL).
 
     Redirects are followed manually so every hop passes the SSRF check.
     """
@@ -90,11 +104,17 @@ async def fetch_spec(url: str, client: httpx.AsyncClient, *, allow_private: bool
             size = 0
             async for chunk in response.aiter_bytes():
                 size += len(chunk)
-                if size > MAX_SPEC_BYTES:
-                    raise SpecError("spec is larger than the 25 MB limit")
+                if size > max_bytes:
+                    raise SpecError(f"{current} is larger than the {max_bytes:,} byte limit")
                 chunks.append(chunk)
-        return parse_spec(b"".join(chunks).decode("utf-8", errors="replace"))
-    raise SpecError("too many redirects fetching the spec")
+        return b"".join(chunks).decode("utf-8", errors="replace"), current
+    raise SpecError(f"too many redirects fetching {url}")
+
+
+def spec_hash(spec: Json) -> str:
+    """A stable fingerprint of a spec's content (key order and formatting ignored)."""
+    canonical = json.dumps(spec, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def parse_spec(text: str) -> Json:
@@ -174,7 +194,12 @@ def entry_from_spec(
         auth=auth,
         credential=CredentialGuidance(scopes=scopes[:50], validation_operation=validation),
         operations=operations,
-        source=SpecSource(kind="openapi", url=spec_url, fetched_at=datetime.now(UTC)),
+        source=SpecSource(
+            kind="openapi",
+            url=spec_url,
+            fetched_at=datetime.now(UTC),
+            content_hash=spec_hash(spec),
+        ),
         notes="\n".join(notes)[:8000],
     )
 
@@ -262,7 +287,7 @@ def _operations(spec: Json) -> list[Operation]:
             summary = str(op.get("summary") or op.get("description") or "").strip()
             if op.get("deprecated"):
                 summary = f"(deprecated) {summary}"
-            access, accepts_body = _classify(method.upper(), op_id, path, summary)
+            access, accepts_body = classify(method.upper(), op_id, path, summary)
             try:
                 operations.append(
                     Operation(
@@ -274,6 +299,7 @@ def _operations(spec: Json) -> list[Operation]:
                         parameters=params,
                         access=access,
                         accepts_body=accepts_body,
+                        origin=Origin.SPEC,
                     )
                 )
             except ValueError:
@@ -314,7 +340,8 @@ def _parameters(spec: Json, raw: list[Any]) -> list[Parameter]:
     return list(merged.values())
 
 
-def _classify(method: str, op_id: str, path: str, summary: str) -> tuple[Access, bool]:
+def classify(method: str, op_id: str, path: str, summary: str) -> tuple[Access, bool]:
+    """Read/write/unknown by HTTP method alone; descriptions never make a write a read."""
     if method in ("GET", "HEAD"):
         return Access.READ, False
     if method == "POST" and _SEARCH_HINT.search(f"{op_id} {path} {summary[:200]}"):
