@@ -103,7 +103,7 @@ def learn(
 
     async def run() -> None:
         librarian = Librarian(_settings(config))
-        librarian.load()
+        await librarian.start()  # registry incl. learned APIs (database), durable state
         try:
             outcome = await librarian.onboard(
                 api_id, spec_url=spec_url, base_url=base_url, docs_url=docs_url, name=name
@@ -111,7 +111,7 @@ def learn(
         finally:
             await librarian.aclose()
         typer.echo(
-            f"Saved {outcome.path}: {len(outcome.entry.operations)} operations, "
+            f"Saved {_where(outcome.path)}: {len(outcome.entry.operations)} operations, "
             f"{outcome.read_operations} read, {outcome.needs_review} need review "
             f"(auth: {outcome.entry.auth.type}, "
             f"learned from {SOURCE_LABELS[outcome.entry.source.kind]})"
@@ -153,7 +153,7 @@ def call(
 
     async def run() -> None:
         librarian = Librarian(_settings(config))
-        librarian.load()
+        await librarian.start()  # registry incl. learned APIs (database), durable state
         try:
             request = CallRequest(
                 api=api, operation=operation, args=dict(args), max_pages=pages, select=select or []
@@ -202,7 +202,7 @@ def discover(api: str, config: ConfigOption = None) -> None:
 
     async def run() -> None:
         librarian = Librarian(_settings(config))
-        librarian.load()
+        await librarian.start()  # registry incl. learned APIs (database), durable state
         try:
             count = await librarian.discover(api)
         finally:
@@ -393,19 +393,29 @@ def registry_clear(
 
 @registry_app.command("list")
 def registry_list(config: ConfigOption = None) -> None:
-    """List registered APIs."""
-    librarian = Librarian(_settings(config))
-    librarian.load()
-    for entry in librarian.registry.all():
-        reads = sum(1 for op in entry.operations if op.access is Access.READ)
-        typer.echo(f"{entry.id:<24} {entry.status.value:<12} {reads:>4} reads  {entry.base_url}")
-    for name, error in librarian.registry.errors.items():
-        typer.echo(f"INVALID {name}: {error}", err=True)
+    """List registered APIs, including those learned on demand."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        await librarian.start()
+        try:
+            for entry in librarian.registry.all():
+                reads = sum(1 for op in entry.operations if op.access is Access.READ)
+                typer.echo(
+                    f"{entry.id:<24} {entry.status.value:<12} {reads:>4} reads  {entry.base_url}"
+                )
+            for name, error in librarian.registry.errors.items():
+                typer.echo(f"INVALID {name}: {error}", err=True)
+        finally:
+            await librarian.aclose()
+
+    _run(run())
 
 
 @registry_app.command("validate")
 def registry_validate(config: ConfigOption = None) -> None:
-    """Validate every registry file; exits non-zero on errors (use in CI)."""
+    """Validate every registry file; exits non-zero on errors (use in CI). Files only:
+    APIs learned on demand are in the database until their review is merged."""
     librarian = Librarian(_settings(config))
     librarian.load()
     errors = librarian.registry.errors
@@ -413,6 +423,13 @@ def registry_validate(config: ConfigOption = None) -> None:
         typer.echo(f"{name}: {error}", err=True)
     typer.echo(f"{len(librarian.registry.all())} valid, {len(errors)} invalid")
     raise typer.Exit(code=1 if errors else 0)
+
+
+def _where(path: Path) -> str:
+    text = str(path)
+    if text.startswith("db:"):
+        return f"{text.rsplit('/', 1)[-1]} (in the database)"
+    return text
 
 
 def _run(coro: object) -> None:

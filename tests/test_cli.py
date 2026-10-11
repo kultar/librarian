@@ -65,3 +65,27 @@ def test_bare_yaml_off_means_off(tmp_path: Path) -> None:
     config = tmp_path / "c.yaml"
     config.write_text("principals:\n  mode: off\n")
     assert Settings.load(config).principals.mode == "off"
+
+
+def test_learn_then_list_in_a_fresh_folder_with_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a new user does first: no config, the default SQLite database, an empty folder."""
+    from typing import Any
+
+    from librarian import service as service_module
+    from librarian.cli import app
+    from tests.test_openapi import SPEC
+
+    async def fake_fetch(url: str, client: Any, *, allow_private: bool) -> Any:
+        return SPEC
+
+    monkeypatch.setattr(service_module, "fetch_spec", fake_fetch)
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    learned = runner.invoke(app, ["learn", "jira", "--spec-url", "https://x.example/spec.json"])
+    assert learned.exit_code == 0, learned.output
+    assert "Saved jira (in the database)" in learned.output
+    listed = runner.invoke(app, ["registry", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert "jira" in listed.output and "provisional" in listed.output
