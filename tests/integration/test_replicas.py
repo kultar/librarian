@@ -194,3 +194,22 @@ def test_pending_request_and_its_link_survive_a_restart() -> None:
             pass
         time.sleep(1)
     assert httpx.get(link).status_code == 200  # same link, after the restart
+
+
+def test_an_api_learned_on_a_is_usable_on_b_at_once() -> None:
+    """No shared volume: the learned entry travels through Postgres."""
+    learned = send(
+        A,
+        {
+            "skill": "onboard",
+            "api": "apisguru",
+            "spec_url": "https://api.apis.guru/v2/openapi.yaml",
+        },
+    )
+    assert learned["status"]["state"] == "TASK_STATE_COMPLETED", learned["status"]
+    read = send(
+        B, {"skill": "execute", "api": "apisguru", "operation": "getMetrics", "select": ["numAPIs"]}
+    )
+    assert read["status"]["state"] == "TASK_STATE_COMPLETED", read["status"]
+    assert artifact(read)["data"]["numAPIs"] > 0
+    assert httpx.get(f"{B}/healthz").json()["apis"] == 2  # B lists it now too

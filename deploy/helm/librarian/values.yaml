@@ -6,8 +6,10 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
-# More than one replica requires Postgres (config.database_url) and a secret store
-# shared by all replicas (config.secrets_backend: aws, or a ReadWriteMany volume).
+# More than one replica: state must be shared, so set Postgres (LIBRARIAN_DATABASE_URL or
+# config.database_url) and config.secrets_backend: aws, and persistence.enabled: false
+# (nothing per-pod is needed then). librarian refuses to start otherwise. With more than
+# one replica the chart adds a PodDisruptionBudget and spreads pods across nodes.
 replicaCount: 1
 
 # URL where approvers' browsers reach the approval pages (used in Slack links), e.g.
@@ -41,7 +43,8 @@ serviceAccount:
   name: ""
   annotations: {}          # e.g. eks.amazonaws.com/role-arn for Secrets Manager (IRSA)
 
-# /data holds the SQLite database, file secrets and (without git-sync) the registry.
+# /data holds the SQLite database, file secrets and learned APIs when there is no
+# Postgres. With Postgres and AWS secrets nothing needs it: disable it for several replicas.
 persistence:
   enabled: true
   size: 1Gi
@@ -136,6 +139,9 @@ resources:
     memory: 256Mi
   limits:
     memory: 512Mi
+# Used as given; with more than one replica and none set, pods are spread across nodes.
+topologySpreadConstraints: []
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

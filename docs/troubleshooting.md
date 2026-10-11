@@ -53,8 +53,8 @@ By default librarian only learns and calls public addresses, because any agent c
 URL. `allow_private_networks: true` allows private ones (all of them).
 
 **Learned APIs disappear after a restart.**
-They live in the registry overlay on the pod's volume (`/data/registry` in the chart) until their
-pull request is merged. Keep `persistence.enabled: true`.
+With Postgres they are stored there. Without a database they are files on the pod's volume
+(`/data/registry`): keep `persistence.enabled: true`.
 
 ## Slack
 
@@ -94,9 +94,17 @@ least one commit, and the App must be installed on it.
 
 ## Kubernetes
 
-**The second replica is stuck in `Pending`.**
-The default volume is ReadWriteOnce. Use one replica, or a ReadWriteMany volume
-([deploy.md](deploy.md#more-than-one-replica)).
+**The pod crashes with `port ... unable to parse string as an integer ... 'tcp://...'`.**
+Kubernetes put `LIBRARIAN_PORT=tcp://...` into the pod for a Service named `librarian`, which
+collides with librarian's settings. Fixed in 0.10.0 (the chart sets `enableServiceLinks: false`,
+and librarian ignores such a value). Without the chart, set `enableServiceLinks: false`.
+
+**"replicas=N needs a shared database / a shared secret store".**
+With more than one replica, set `LIBRARIAN_DATABASE_URL` (Postgres) and
+`secrets_backend: aws` ([deploy.md, Replicas](deploy.md#replicas)).
+
+**Helm says "replicaCount > 1: set persistence.enabled=false ...".**
+Replicas need no volume ([deploy.md, Replicas](deploy.md#replicas)).
 
 **The pod can't write keys to Secrets Manager: `AccessDeniedException`.**
 The pod's role needs the policy in [deploy.md, step 4](deploy.md#4-where-keys-are-stored),

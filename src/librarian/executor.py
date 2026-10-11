@@ -126,6 +126,8 @@ class Executor:
             return result
 
     async def _execute(self, request: CallRequest, caller: Caller) -> CallResult:
+        if self.policy.registry.get(request.api) is None:
+            await self.policy.registry.refresh_stored()  # learned on another replica?
         decision = self.policy.check(request, caller)
         if not decision.allowed or decision.entry is None or decision.operation is None:
             await self.audit.record(

@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import yaml
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from librarian.registry.models import Access, ApiEntry, EntryStatus
 
@@ -30,23 +31,53 @@ class SearchHit:
     score: float
 
 
+class EntryStore(Protocol):
+    """Shared storage for the librarian's own changes (see `librarian.state.StateStore`)."""
+
+    async def save_doc(self, kind: str, doc_id: str, state: str, data: str) -> None: ...
+    async def list_docs(self, kind: str, state: str | None = None) -> list[str]: ...
+    async def docs_version(self, kind: str) -> str: ...
+
+
+STORED_KIND = "registry-entry"
+
+
+class StoredEntry(BaseModel):
+    entry: ApiEntry
+    # Fingerprint of the reviewed (git) version this copy was made from; None when the
+    # API was learned and has no reviewed version yet.
+    base: str | None = None
+
+
+def _content_hash(entry: ApiEntry) -> str:
+    return hashlib.sha256(entry.model_dump_json(by_alias=True).encode()).hexdigest()
+
+
 class Registry:
     """Loads, searches and saves API entries.
 
     `directory` is the reviewed registry (often a git checkout kept current by
-    git-sync). `overlay`, if set, is where the librarian writes its own changes
-    (learned entries, blocks, write enablement) so they survive git-sync replacing
-    the checkout. For each API the entry with the newest `updated_at` wins; on a tie
-    the reviewed one wins, so a reviewer's merge takes effect.
+    git-sync). The librarian's own changes (learned entries, blocks, write
+    enablement, glossaries) go to the shared database when `store` is set, so every
+    replica sees an API the moment another one learned it; otherwise to `overlay`
+    (files), which suits a single instance. For each API the entry with the newest
+    `updated_at` wins; on a tie the reviewed one wins, so a reviewer's merge takes
+    effect.
 
     Invalid files are logged and skipped rather than crashing the server, so one
     bad community entry cannot take the librarian down.
     """
 
-    def __init__(self, directory: Path, overlay: Path | None = None) -> None:
+    def __init__(
+        self, directory: Path, overlay: Path | None = None, store: EntryStore | None = None
+    ) -> None:
         self.directory = directory
         self.overlay = overlay
+        self.store = store
         self._entries: dict[str, ApiEntry] = {}
+        self._from_files: dict[str, ApiEntry] = {}
+        self._stored: dict[str, tuple[ApiEntry, str | None]] = {}
+        self._stored_version: str | None = None
         self._errors: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._fingerprint: tuple[tuple[str, int, int], ...] = ()
@@ -85,10 +116,41 @@ class Registry:
                 reviewed = entries.get(api_id)
                 if reviewed is None or local.updated_at > reviewed.updated_at:
                     entries[api_id] = local
-        self._entries = entries
-        self._errors = errors
+        self._from_files = entries
+        self._errors = {**errors, **{k: v for k, v in self._errors.items() if k.startswith("db/")}}
         self._fingerprint = self._current_fingerprint()
-        log.info("registry loaded: %d APIs, %d invalid files", len(entries), len(errors))
+        self._merge()
+        log.info("registry loaded: %d APIs, %d invalid files", len(self._entries), len(errors))
+
+    def _merge(self) -> None:
+        entries = dict(self._from_files)
+        for api_id, (stored, base) in self._stored.items():
+            reviewed = entries.get(api_id)
+            # The librarian's copy applies on top of the reviewed version it was made from.
+            # Any change a reviewer merges since (status: verified, fixes, ...) wins.
+            if reviewed is None or base == _content_hash(reviewed):
+                entries[api_id] = stored
+        self._entries = entries
+
+    async def refresh_stored(self, force: bool = False) -> bool:
+        """Pick up entries other replicas saved. Cheap when nothing changed."""
+        if self.store is None:
+            return False
+        version = await self.store.docs_version(STORED_KIND)
+        if version == self._stored_version and not force:
+            return False
+        stored: dict[str, tuple[ApiEntry, str | None]] = {}
+        errors = {k: v for k, v in self._errors.items() if not k.startswith("db/")}
+        for data in await self.store.list_docs(STORED_KIND, "active"):
+            try:
+                doc = StoredEntry.model_validate_json(data)
+            except ValidationError as exc:
+                errors[f"db/{data[:40]}"] = str(exc)
+                continue
+            stored[doc.entry.id] = (doc.entry, doc.base)
+        self._stored, self._stored_version, self._errors = stored, version, errors
+        self._merge()
+        return True
 
     def _current_fingerprint(self) -> tuple[tuple[str, int, int], ...]:
         stats: list[tuple[str, int, int]] = []
@@ -136,7 +198,20 @@ class Registry:
         return hits[:limit]
 
     async def save(self, entry: ApiEntry) -> Path:
-        """Write an entry (to the overlay when configured), stamping `updated_at`."""
+        """Save the librarian's change to an entry, stamping `updated_at`: to the shared
+        database when there is one, else to the overlay (or registry) directory. Returns
+        where it went (a `db:` pseudo-path for the database)."""
+        if self.store is not None:
+            entry = entry.model_copy(update={"updated_at": datetime.now(UTC)})
+            reviewed = self._from_files.get(entry.id)
+            base = _content_hash(reviewed) if reviewed is not None else None
+            doc = StoredEntry(entry=entry, base=base)
+            await self.store.save_doc(
+                STORED_KIND, entry.id, "active", doc.model_dump_json(by_alias=True)
+            )
+            self._stored[entry.id] = (entry, base)
+            self._entries[entry.id] = entry
+            return Path(f"db:{STORED_KIND}/{entry.id}")
         async with self._lock:
             target = self.overlay or self.directory
             target.mkdir(parents=True, exist_ok=True)

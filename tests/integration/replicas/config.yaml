@@ -1,7 +1,8 @@
 host: 0.0.0.0
 port: 8080
 registry_dir: /registry
-registry_overlay_dir: /data/registry   # shared by both replicas (like a ReadWriteMany volume)
+registry_overlay_dir: /data/registry   # per replica, like a pod with no shared volume
+replicas: 2                             # refuse to start without shared state
 database_url: postgresql+asyncpg://lib:lib@postgres:5432/lib
 secrets_backend: aws
 aws_secrets: {prefix: "lib/", cache_seconds: 1}

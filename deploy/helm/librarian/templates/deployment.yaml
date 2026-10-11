@@ -1,6 +1,10 @@
 {{- $git := .Values.registry.gitSync -}}
 {{- $proxy := .Values.oauth2Proxy -}}
 {{- $app := .Values.githubApp -}}
+{{- $p := .Values.persistence -}}
+{{- if and (gt (int .Values.replicaCount) 1) $p.enabled (not (has "ReadWriteMany" $p.accessModes)) -}}
+{{- fail "replicaCount > 1: set persistence.enabled=false (state is in Postgres and Secrets Manager) or use a ReadWriteMany volume" -}}
+{{- end -}}
 {{- if and $app.enabled (not (and $app.appId $app.installationId $app.secretName)) -}}
 {{- fail "githubApp.appId, githubApp.installationId and githubApp.secretName are required when githubApp.enabled is true" -}}
 {{- end -}}
@@ -49,6 +53,8 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # No LIBRARIAN_* service variables: they would collide with librarian's settings.
+      enableServiceLinks: false
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- if $git.enabled }}
@@ -191,6 +197,18 @@ spec:
         - name: git
           emptyDir: {}
         {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- else if gt (int .Values.replicaCount) 1 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "librarian.selectorLabels" . | nindent 14 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

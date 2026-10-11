@@ -664,6 +664,7 @@ async def _sweep_forever(librarian: Librarian) -> None:
         try:
             if librarian.registry.reload_if_changed():
                 log.info("registry reloaded: %d APIs", len(librarian.registry.all()))
+            await librarian.registry.refresh_stored()  # changes saved by other replicas
         except Exception:
             log.exception("registry reload failed")
         if ticks % 4 == 0:
@@ -672,8 +673,9 @@ async def _sweep_forever(librarian: Librarian) -> None:
             except Exception:
                 log.exception("credential sweep failed")
             try:
-                # Pick up suspensions and confirmations recorded by other replicas.
+                # Pick up suspensions, confirmations and recipes from other replicas.
                 await librarian.observations.load()
+                await librarian.reload_recipes()
             except Exception:
                 log.exception("loading observations failed")
         if ticks % 40 == 0:

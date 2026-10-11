@@ -19,6 +19,7 @@ from sqlalchemy import (
     Table,
     Text,
     delete,
+    func,
     insert,
     select,
     update,
@@ -177,6 +178,18 @@ class StateStore:
                 .where(documents.c.id == doc_id)
             )
             return result.scalar_one_or_none()
+
+    async def docs_version(self, kind: str) -> str:
+        """Changes whenever a document of this kind is added or updated."""
+        async with self.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(func.count(), func.max(documents.c.updated_at)).where(
+                        documents.c.kind == kind
+                    )
+                )
+            ).one()
+        return f"{row[0]}:{row[1]}"
 
     async def list_docs(self, kind: str, state: str | None = None) -> list[str]:
         query = select(documents.c.data).where(documents.c.kind == kind)

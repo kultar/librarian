@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic_core import PydanticUseDefault
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from librarian.registry.models import RESERVED_SECRET_PREFIX
@@ -286,6 +287,9 @@ class Settings(BaseSettings):
     allow_private_networks: bool = False
     onboarding_enabled: bool = True
     # Serve librarian's skills as MCP tools at /mcp (Streamable HTTP) on the A2A listener.
+    # How many replicas run (the Helm chart sets this). Above 1, all state must be shared:
+    # librarian refuses to start with SQLite or file secrets rather than diverge silently.
+    replicas: int = Field(default=1, ge=1)
     mcp_enabled: bool = True
     # Host headers accepted on /mcp (the MCP SDK's DNS-rebinding guard, e.g.
     # ["librarian.internal:8080"]). Empty = any host: every MCP request already needs a
@@ -309,6 +313,31 @@ class Settings(BaseSettings):
     drift: DriftSettings = Field(default_factory=DriftSettings)
     principals: PrincipalSettings = Field(default_factory=PrincipalSettings)
     approvers: ApproverSettings = Field(default_factory=ApproverSettings)
+
+    @field_validator("port", mode="before")
+    @classmethod
+    def _not_a_service_link(cls, value: object) -> object:
+        # Kubernetes injects LIBRARIAN_PORT=tcp://10.0.0.1:8080 for a Service named
+        # "librarian". That is not our setting: keep the default.
+        if isinstance(value, str) and value.startswith("tcp://"):
+            raise PydanticUseDefault
+        return value
+
+    @model_validator(mode="after")
+    def _shared_state_for_replicas(self) -> Settings:
+        if self.replicas > 1:
+            url = self.database_url or ""
+            if not url.startswith("postgresql"):
+                raise ValueError(
+                    f"replicas={self.replicas} needs a shared database: set database_url to "
+                    "postgresql+asyncpg://... (SQLite is per replica)"
+                )
+            if self.secrets_backend != "aws":
+                raise ValueError(
+                    f"replicas={self.replicas} needs a shared secret store: set "
+                    "secrets_backend: aws (file secrets are per replica)"
+                )
+        return self
 
     @classmethod
     def load(cls, config_file: Path | None = None) -> Settings:

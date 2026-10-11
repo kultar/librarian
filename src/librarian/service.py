@@ -188,6 +188,9 @@ class Librarian:
         )
         self.engine = make_engine(settings.database_url) if settings.database_url else None
         self.state = StateStore(self.engine) if self.engine is not None else None
+        if self.state is not None and self.registry.store is None:
+            # Learned APIs live in the shared database, so every replica sees them.
+            self.registry.store = self.state
         self.observations = Observations(self.state)
         self.observations.on_finding = self._report_finding
         self.policy = PolicyEngine(
@@ -276,6 +279,7 @@ class Librarian:
         self.load()
         if self.state is not None:
             await self.state.initialize()
+            await self.registry.refresh_stored(force=True)
             await self.observations.load()
             restored = await self.broker.restore()
             if restored:
@@ -412,6 +416,15 @@ class Librarian:
             AuditEvent(event="recipe_learned", detail=f"{recipe.id}: {recipe.template}")
         )
 
+    async def reload_recipes(self) -> None:
+        """Pick up recipes saved by other replicas (and deletions)."""
+        if self.state is None:
+            return
+        active = [
+            Recipe.model_validate_json(d) for d in await self.state.list_docs("recipe", "active")
+        ]
+        self.recipes = {r.id: self.recipes.get(r.id, r) for r in active}
+
     async def _save_recipe(self, recipe: Recipe) -> None:
         if self.state is not None:
             await self.state.save_doc("recipe", recipe.id, "active", recipe.model_dump_json())
@@ -488,6 +501,8 @@ class Librarian:
                 return WriteOutcome(
                     CallResult.model_validate(prior.result), "idempotent", prior.id, prior.grant_id
                 )
+        if self.registry.get(request.api) is None:
+            await self.registry.refresh_stored()  # learned on another replica?
         decision = self.policy.check_write(request, caller)
         if not decision.allowed or decision.entry is None or decision.operation is None:
             await self.audit.record(
@@ -623,6 +638,7 @@ class Librarian:
             raise LibrarianError("onboarding is disabled on this librarian")
         if not caller.can_onboard:
             raise LibrarianError(f"caller {caller.agent!r} is not allowed to onboard APIs")
+        await self.registry.refresh_stored()  # another replica may have learned it
         existing = self.registry.get(api_id)
         if existing is not None and (
             existing.status is not EntryStatus.PROVISIONAL or not replace_provisional

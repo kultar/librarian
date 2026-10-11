@@ -106,10 +106,12 @@ model_api_key: sk-litellm-...       # or LIBRARIAN_MODEL_API_KEY
 Environment variables are always checked last (`jira/readonly` → `LIBRARIAN_SECRET_JIRA_READONLY`).
 Internal secrets (caller keys, the link-signing key) live under the reserved `librarian/` prefix.
 
-**State.** Credential requests and A2A tasks are stored in SQLite by default
-(`.librarian/librarian.db`), so pending approvals and their links survive restarts. For several
-replicas, install the `postgres` extra and set `database_url: postgresql+asyncpg://...`; an
-approval handled by any replica wakes the task waiting on another. Rate limits are per replica.
+**State.** Credential requests, approvals, A2A tasks and APIs learned on demand are stored in
+SQLite by default (`.librarian/librarian.db`), so they survive restarts. For several replicas use
+Postgres (`database_url: postgresql+asyncpg://...`, the `postgres` extra; in the image) and
+`secrets_backend: aws`: then every replica shares everything, an API learned through one is usable
+through the others at once, and pods need no volume. Set `replicas` (the Helm chart does) and
+librarian refuses to start with per-replica state. Rate limits are per replica.
 
 **Caller authentication.** List agents and the secret holding each one's key:
 
@@ -365,7 +367,8 @@ uv run pytest
 - **v0.9** ✅: finding documentation from just a base URL (usual places, then web search via
   the model or SearXNG/Brave), trust-ranked sources; Anthropic API format for gateways
 - **v0.10** ✅: GitHub App for the registry repo (review PRs and git-sync), created in one step
-  with `librarian github-app create`
+  with `librarian github-app create`; several replicas with no volumes (learned APIs in Postgres,
+  PodDisruptionBudget, spread across nodes); step-by-step docs
 - **Later**: Vault/GCP/Azure secret stores; per-user OAuth; per-API approver routing in Slack;
   community registry with signed entries
 

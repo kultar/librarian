@@ -28,7 +28,7 @@ You need:
 | An OIDC identity provider (Okta, Entra ID, Google, Keycloak, ...) | approvers sign in; approvals record who decided |
 | A Slack workspace where you can install apps | where approvers are asked |
 | A GitHub organization where you can create an App and a repo | the reviewed registry |
-| PostgreSQL | durable, shared state (requests, approvals, tasks) |
+| PostgreSQL | shared state for all replicas (requests, approvals, learned APIs) |
 | AWS Secrets Manager *(optional)* | where keys are stored; without it they go to files on the pod's volume (one replica only) |
 | A model, directly or through LiteLLM *(optional)* | plain-language requests, and learning APIs that have no spec |
 
@@ -195,7 +195,9 @@ Secret called `librarian-env`.
 image:
   tag: "0.10.0"
 
-replicaCount: 1                          # see "More than one replica" below
+replicaCount: 2                          # needs steps 4 and 5; see "Replicas" below
+persistence:
+  enabled: false                         # everything lives in Postgres, Secrets Manager, git
 publicUrl: https://librarian.example.com # the approval pages' address
 
 envFrom:
@@ -289,17 +291,20 @@ and add the key. That is the whole loop.
 - **Directly**: A2A at `http://librarian.librarian.svc:8080/`, MCP at `.../mcp`, with
   `Authorization: Bearer <caller key>`.
 
-## More than one replica
+## Replicas
 
-One replica restarts quickly and is the simple choice. For more, every replica must see the same
-state and the same APIs learned on demand, which live on the pod's volume until their pull request
-is merged:
+Run two or more for production. Everything a replica needs is shared: requests, approvals, tasks,
+APIs learned on demand and what librarian has observed live in **Postgres**; keys in **Secrets
+Manager**; the reviewed registry in **git** (each pod pulls it). An API learned through one
+replica is usable through the others immediately. So replicas need no volume:
+`persistence.enabled: false`.
 
-- Postgres (step 5) and AWS Secrets Manager (step 4), and
-- a **ReadWriteMany** volume (e.g. EFS):
-  `persistence: {accessModes: [ReadWriteMany], storageClass: <rwx class>}`.
+With `replicaCount` above 1 the chart passes the count to librarian, which refuses to start
+without Postgres and `secrets_backend: aws` (rather than let replicas drift apart), adds a
+PodDisruptionBudget (`maxUnavailable: 1`), and spreads pods across nodes. It refuses a
+ReadWriteOnce volume with several replicas.
 
-With the default ReadWriteOnce volume, keep `replicaCount: 1`: a second pod could not mount it.
+Per-replica on purpose: rate limits (`rate_limit_per_minute` applies per replica).
 
 ## Running it
 

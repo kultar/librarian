@@ -37,7 +37,7 @@ people ──HTTPS──► │ oauth2-proxy :4180 ──► 127.0.0.1:8081     
 | Registry repo access (GitHub App) | `githubApp.enabled=true`, `githubApp.appId`, `githubApp.installationId`, `githubApp.secretName` (see below) |
 | Caller keys | `config.callers` + caller keys as `LIBRARIAN_SECRET_LIBRARIAN_CALLERS_<AGENT>` via `envFrom` |
 | Secrets in AWS | `config.secrets_backend: aws`, `serviceAccount.annotations` (IRSA role) |
-| Several replicas | `replicaCount>1` + `config.database_url: postgresql+asyncpg://...` + shared secrets (aws) |
+| Several replicas | `replicaCount>1`, `persistence.enabled=false`, Postgres (`LIBRARIAN_DATABASE_URL`), `config.secrets_backend: aws` |
 | Slack | `config.notifier.type: slack`, `config.notifier.slack.channel`, token via `envFrom` |
 | Model for `fetch` | `config.model`, optionally `config.model_base_url` (LiteLLM), key via `envFrom` |
 | Telemetry | `otel.enabled=true`, `otel.endpoint` |

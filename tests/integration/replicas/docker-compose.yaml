@@ -1,5 +1,6 @@
-# Two librarian replicas sharing Postgres, AWS Secrets Manager (LocalStack) and a registry
-# overlay, in front of a go-httpbin test API.   See tests/integration/README.md.
+# Two librarian replicas sharing Postgres and AWS Secrets Manager (LocalStack), and nothing
+# else (no shared volume, as in Kubernetes), in front of a go-httpbin test API.
+# See tests/integration/README.md.
 x-librarian: &librarian
   image: librarian:integration
   command: [serve, --config, /config/config.yaml]
@@ -12,7 +13,6 @@ x-librarian: &librarian
   volumes:
     - ./config.yaml:/config/config.yaml:ro
     - ../registry:/registry:ro
-    - overlay:/data/registry
   depends_on:
     postgres: {condition: service_healthy}
     localstack: {condition: service_healthy}
@@ -52,6 +52,3 @@ services:
       retries: 40
   httpbin:
     image: mccutchen/go-httpbin:latest
-
-volumes:
-  overlay:
