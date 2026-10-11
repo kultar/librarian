@@ -212,6 +212,88 @@ def discover(api: str, config: ConfigOption = None) -> None:
     _run(run())
 
 
+github_app_cli = typer.Typer(
+    help="Set up the GitHub App librarian uses for the registry repo.", no_args_is_help=True
+)
+app.add_typer(github_app_cli, name="github-app")
+
+
+@github_app_cli.command("create")
+def github_app_create(
+    repo: Annotated[str, typer.Option(help="Registry repository, owner/name")],
+    key_file: Annotated[
+        Path, typer.Option(help="Where to save the App's private key (owner-only file)")
+    ] = Path(".librarian/github-app.pem"),
+    name: Annotated[str | None, typer.Option(help="App name (default librarian-<owner>)")] = None,
+    port: Annotated[int, typer.Option(help="Local port for the one-time browser callback")] = 8977,
+) -> None:
+    """Create a GitHub App for the registry repo in one step (GitHub's manifest flow)."""
+    import webbrowser
+
+    import httpx
+
+    from librarian.github_app import GitHubAppError, create_app
+
+    async def run() -> None:
+        async with httpx.AsyncClient(timeout=30) as client:
+            try:
+                created, installation = await create_app(
+                    repo,
+                    key_file,
+                    name=name,
+                    port=port,
+                    client=client,
+                    echo=typer.echo,
+                    on_ready=webbrowser.open,
+                )
+            except (GitHubAppError, TimeoutError) as exc:
+                raise typer.BadParameter(str(exc)) from exc
+        typer.echo(
+            "\nlibrarian config:\n"
+            f"  publish:\n    type: github\n    repo: {repo}\n    github_app:\n"
+            f'      app_id: "{created.app_id}"\n      installation_id: {installation}\n'
+            f"      private_key_file: {key_file}\n"
+            "\nHelm (git-sync reads the registry with the same App):\n"
+            "  kubectl create secret generic librarian-github-app "
+            f"--from-file=private-key.pem={key_file}\n"
+            f'  githubApp: {{appId: "{created.app_id}", installationId: {installation}, '
+            "secretName: librarian-github-app}"
+        )
+
+    _run(run())
+
+
+@github_app_cli.command("check")
+def github_app_check(
+    repo: Annotated[str, typer.Option(help="Registry repository, owner/name")],
+    app_id: Annotated[str, typer.Option(help="The App's id")],
+    key_file: Annotated[Path, typer.Option(help="The App's private key file", exists=True)],
+) -> None:
+    """Check the App can mint a token and read the registry repo."""
+    import httpx
+
+    from librarian.github_app import GitHubAppAuth, GitHubAppError
+
+    async def run() -> None:
+        async with httpx.AsyncClient(timeout=30) as client:
+            auth = GitHubAppAuth(app_id, key_file.read_text("utf-8"), repo, client=client)
+            try:
+                token = await auth.token()
+            except GitHubAppError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            response = await client.get(
+                f"https://api.github.com/repos/{repo}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if response.status_code != 200:
+            raise typer.BadParameter(
+                f"token minted, but reading {repo} gave HTTP {response.status_code}"
+            )
+        typer.echo(f"OK: installation {auth.installation_id} can read and write {repo}")
+
+    _run(run())
+
+
 recipes_app = typer.Typer(help="Saved plans replayed without the LLM.", no_args_is_help=True)
 app.add_typer(recipes_app, name="recipes")
 

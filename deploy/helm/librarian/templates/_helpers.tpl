@@ -81,5 +81,22 @@ database defaults apply only when the user did not set them.
 {{- if .Values.otel.enabled -}}
 {{- $_ := set $c "otel_enabled" true -}}
 {{- end -}}
+{{- if .Values.githubApp.enabled -}}
+{{- /* Review pull requests go to the registry repo git-sync reads, as the same App. */ -}}
+{{- $git := .Values.registry.gitSync -}}
+{{- $publish := deepCopy (get $c "publish" | default dict) -}}
+{{- $_ := set $publish "type" "github" -}}
+{{- if not (hasKey $publish "repo") -}}
+{{- $_ := set $publish "repo" (regexFind "[^/:]+/[^/]+$" (trimSuffix ".git" $git.repo)) -}}
+{{- end -}}
+{{- if not (hasKey $publish "directory") -}}
+{{- $_ := set $publish "directory" ($git.path | trimAll "/") -}}
+{{- end -}}
+{{- if not (hasKey $publish "base_branch") -}}
+{{- $_ := set $publish "base_branch" $git.ref -}}
+{{- end -}}
+{{- $_ := set $publish "github_app" (dict "app_id" (toString .Values.githubApp.appId) "installation_id" (int .Values.githubApp.installationId) "private_key_file" (printf "/etc/librarian-github-app/%s" .Values.githubApp.secretKey)) -}}
+{{- $_ := set $c "publish" $publish -}}
+{{- end -}}
 {{- toYaml $c -}}
 {{- end -}}

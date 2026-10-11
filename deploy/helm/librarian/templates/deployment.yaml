@@ -1,5 +1,12 @@
 {{- $git := .Values.registry.gitSync -}}
 {{- $proxy := .Values.oauth2Proxy -}}
+{{- $app := .Values.githubApp -}}
+{{- if and $app.enabled (not (and $app.appId $app.installationId $app.secretName)) -}}
+{{- fail "githubApp.appId, githubApp.installationId and githubApp.secretName are required when githubApp.enabled is true" -}}
+{{- end -}}
+{{- if and $app.enabled (not $git.enabled) -}}
+{{- fail "githubApp needs registry.gitSync.enabled (it is used for the registry repo)" -}}
+{{- end -}}
 {{- if and $git.enabled (not $git.repo) -}}
 {{- fail "registry.gitSync.repo is required when registry.gitSync.enabled is true" -}}
 {{- end -}}
@@ -49,7 +56,7 @@ spec:
         # Populate the registry before librarian starts; the sidecar keeps it current.
         - name: git-sync-init
           image: {{ $git.image }}
-          args: [--repo={{ $git.repo }}, --ref={{ $git.ref }}, --root=/git, --link=current, --one-time]
+          args: [--repo={{ $git.repo }}, --ref={{ $git.ref }}, --root=/git, --link=current, --one-time{{ if $app.enabled }}, --github-app-application-id={{ $app.appId }}, --github-app-installation-id={{ $app.installationId }}, --github-app-private-key-file=/etc/librarian-github-app/{{ $app.secretKey }}{{ end }}]
           {{- with $git.credentialsSecret }}
           envFrom:
             - secretRef:
@@ -60,6 +67,9 @@ spec:
           volumeMounts:
             - {name: git, mountPath: /git}
             - {name: tmp, mountPath: /tmp}
+            {{- if $app.enabled }}
+            - {name: github-app, mountPath: /etc/librarian-github-app, readOnly: true}
+            {{- end }}
       {{- end }}
       containers:
         - name: librarian
@@ -99,10 +109,13 @@ spec:
             {{- if $git.enabled }}
             - {name: git, mountPath: /git, readOnly: true}
             {{- end }}
+            {{- if $app.enabled }}
+            - {name: github-app, mountPath: /etc/librarian-github-app, readOnly: true}
+            {{- end }}
         {{- if $git.enabled }}
         - name: git-sync
           image: {{ $git.image }}
-          args: [--repo={{ $git.repo }}, --ref={{ $git.ref }}, --root=/git, --link=current, --period={{ $git.period }}]
+          args: [--repo={{ $git.repo }}, --ref={{ $git.ref }}, --root=/git, --link=current, --period={{ $git.period }}{{ if $app.enabled }}, --github-app-application-id={{ $app.appId }}, --github-app-installation-id={{ $app.installationId }}, --github-app-private-key-file=/etc/librarian-github-app/{{ $app.secretKey }}{{ end }}]
           {{- with $git.credentialsSecret }}
           envFrom:
             - secretRef:
@@ -115,6 +128,9 @@ spec:
           volumeMounts:
             - {name: git, mountPath: /git}
             - {name: tmp, mountPath: /tmp}
+            {{- if $app.enabled }}
+            - {name: github-app, mountPath: /etc/librarian-github-app, readOnly: true}
+            {{- end }}
         {{- end }}
         {{- if $proxy.enabled }}
         # Approvers' sign-in. Forwards to the pages listener, which only listens on
@@ -165,6 +181,12 @@ spec:
           {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- if $app.enabled }}
+        - name: github-app
+          secret:
+            secretName: {{ $app.secretName }}
+            defaultMode: 0440
+        {{- end }}
         {{- if $git.enabled }}
         - name: git
           emptyDir: {}

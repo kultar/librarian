@@ -29,6 +29,10 @@ class PublishError(Exception):
     pass
 
 
+class TokenSource(Protocol):
+    async def token(self) -> str: ...
+
+
 class Publisher(Protocol):
     async def publish(self, entry: ApiEntry, learned_by: str) -> str:
         """Propose the entry for review; returns a URL (e.g. the pull request)."""
@@ -43,7 +47,7 @@ class GitHubPublisher:
     def __init__(
         self,
         repo: str,
-        token: str,
+        token: str | TokenSource,
         *,
         base_branch: str = "main",
         directory: str = "registry",
@@ -57,7 +61,12 @@ class GitHubPublisher:
         self.directory = directory.strip("/")
         self.api_url = api_url.rstrip("/")
         self.client = client or httpx.AsyncClient(timeout=30)
-        self._headers = {
+        self._token = token
+
+    async def _headers(self) -> dict[str, str]:
+        # A GitHub App mints a fresh short-lived token; a fixed token is used as is.
+        token = self._token if isinstance(self._token, str) else await self._token.token()
+        return {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -65,7 +74,10 @@ class GitHubPublisher:
 
     async def _call(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         response = await self.client.request(
-            method, f"{self.api_url}/repos/{self.repo}{path}", headers=self._headers, **kwargs
+            method,
+            f"{self.api_url}/repos/{self.repo}{path}",
+            headers=await self._headers(),
+            **kwargs,
         )
         if response.status_code >= 400 and response.status_code != 404:
             raise PublishError(f"GitHub {method} {path}: HTTP {response.status_code}")

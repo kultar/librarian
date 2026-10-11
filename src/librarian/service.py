@@ -42,6 +42,7 @@ from librarian.finddocs import (
     searxng_searcher,
     trust_of,
 )
+from librarian.github_app import GitHubAppAuth
 from librarian.notifiers import SlackNotifier, WebhookNotifier
 from librarian.observations import Finding, Observations
 from librarian.openapi import SpecError, discover_spec, entry_from_spec, fetch_spec, spec_hash
@@ -1121,11 +1122,26 @@ def _default_publisher(settings: Settings) -> Publisher | None:
     config = settings.publish
     if config.type != "github":
         return None
-    if not config.repo or config.token is None:
-        raise ValueError("publish.type=github requires publish.repo and publish.token")
+    if not config.repo or (config.token is None) == (config.github_app is None):
+        raise ValueError(
+            "publish.type=github requires publish.repo and one of publish.github_app "
+            "(recommended) or publish.token"
+        )
+    app = config.github_app
+    auth: str | GitHubAppAuth = (
+        GitHubAppAuth(
+            app.app_id,
+            app.key(),
+            config.repo,
+            installation_id=app.installation_id,
+            api_url=config.api_url,
+        )
+        if app is not None
+        else config.token.get_secret_value()  # pyright: ignore[reportOptionalMemberAccess]
+    )
     return GitHubPublisher(
         config.repo,
-        config.token.get_secret_value(),
+        auth,
         base_branch=config.base_branch,
         directory=config.directory,
         api_url=config.api_url,

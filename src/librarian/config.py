@@ -48,6 +48,31 @@ class AwsSecretsSettings(BaseModel):
     cache_seconds: float = 60
 
 
+class GitHubAppSettings(BaseModel):
+    """Sign in as a GitHub App (recommended): owned by the organization, short-lived
+    tokens. Create one with `librarian github-app create --repo owner/name`."""
+
+    app_id: str
+    # The App's private key (PEM): inline (e.g. via LIBRARIAN_PUBLISH__GITHUB_APP__PRIVATE_KEY)
+    # or a file (e.g. a mounted Kubernetes Secret, shared with git-sync).
+    private_key: SecretStr | None = None
+    private_key_file: Path | None = None
+    installation_id: int | None = None  # found automatically when unset
+
+    @model_validator(mode="after")
+    def _one_key(self) -> GitHubAppSettings:
+        if (self.private_key is None) == (self.private_key_file is None):
+            raise ValueError("github_app needs exactly one of private_key or private_key_file")
+        return self
+
+    def key(self) -> str:
+        if self.private_key is not None:
+            return self.private_key.get_secret_value()
+        if self.private_key_file is None:  # excluded by the validator
+            raise ValueError("github_app has no private key")
+        return self.private_key_file.read_text("utf-8")
+
+
 class PublishSettings(BaseModel):
     """Where learned entries are proposed for human review."""
 
@@ -56,6 +81,7 @@ class PublishSettings(BaseModel):
     base_branch: str = "main"
     directory: str = "registry"
     token: SecretStr | None = None  # needs contents:write + pull_requests:write on the repo
+    github_app: GitHubAppSettings | None = None  # instead of token (recommended)
     api_url: str = "https://api.github.com"
 
 
