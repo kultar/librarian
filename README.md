@@ -1,4 +1,4 @@
-# librarian
+<p align="center"><a href="https://kultar.github.io/librarian/"><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/banner.svg" alt="librarian: one agent that learns APIs on demand and keeps the keys" width="760"></a></p>
 
 **An A2A agent that learns APIs on demand and gives other agents safe, audited access to them: reads freely within policy, writes only with human approval.**
 
@@ -17,7 +17,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.10)**. Expect breaking changes.
+> Status: **alpha (v0.10)**. Expect breaking changes. Website: [kultar.github.io/librarian](https://kultar.github.io/librarian/).
 
 ## Why
 

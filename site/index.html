@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>librarian</title>
+<meta name="description" content="librarian is an A2A and MCP agent that learns APIs on demand and gives other agents safe, audited access to them: reads within policy, writes only with a person's approval.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="librarian">
+<meta property="og:description" content="One agent that learns APIs on demand and keeps the keys. Reads within policy, writes with a person's approval.">
+<meta property="og:image" content="https://kultar.github.io/librarian/assets/social.png">
+<meta property="og:url" content="https://kultar.github.io/librarian/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+<link rel="icon" href="assets/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<header class="wrap top">
+  <a class="brand" href="#">
+    <svg viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="112" fill="#2b3a67"/><path d="M96 212Q176 192 240 236V404Q176 372 96 380Z" fill="#f6f4ee"/><path d="M416 212Q336 192 272 236V404Q336 372 416 380Z" fill="#f6f4ee"/><rect x="248" y="130" width="16" height="282" rx="8" fill="#d9a441"/><circle cx="256" cy="104" r="42" fill="#d9a441"/></svg>
+    librarian
+  </a>
+  <nav class="nav" aria-label="Sections">
+    <a href="#how">How it works</a>
+    <a href="#safe">Why it's safe</a>
+    <a href="#start">Get started</a>
+    <a href="#docs">Docs</a>
+    <a href="https://github.com/kultar/librarian">GitHub</a>
+  </nav>
+</header>
+
+<main>
+<div class="wrap hero">
+  <div>
+    <h1>One librarian for every API your agents&nbsp;use.</h1>
+    <p class="lede">Agents ask librarian for data instead of carrying their own API keys. It learns an API the first time one is needed, asks a person for the key once, serves reads within policy, and holds every write until a person approves it.</p>
+    <div class="install"><pre><code>pip install librarian-a2a
+docker pull ghcr.io/kultar/librarian:0.10.2</code></pre></div>
+    <div class="actions">
+      <a class="btn" href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Try it in ten minutes</a>
+      <a class="btn quiet" href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploy it for a team</a>
+    </div>
+    <p class="muted" style="margin-top:18px">Open source, Apache-2.0. Alpha: expect breaking changes before 1.0.</p>
+  </div>
+
+  <svg class="diagram" viewBox="0 0 520 330" role="img" aria-label="Agents talk to librarian over A2A or MCP; librarian calls the APIs. Below it: the registry in git, the secret store, and people who approve.">
+    <!-- agents -->
+    <g class="lbl">
+      <rect class="box" x="10" y="30" width="130" height="40" rx="8"/><text x="22" y="55">release-notes agent</text>
+      <rect class="box" x="10" y="90" width="130" height="40" rx="8"/><text x="22" y="115">support assistant</text>
+      <rect class="box" x="10" y="150" width="130" height="40" rx="8"/><text x="22" y="175">triage bot</text>
+    </g>
+    <path class="wire" d="M140 50H200M140 110H200M140 170H200"/>
+    <text class="sub" x="148" y="22">A2A or MCP</text>
+    <!-- librarian -->
+    <g class="hub">
+      <rect class="lib" x="200" y="40" width="120" height="140" rx="22"/>
+      <g transform="translate(228 60) scale(0.125)">
+        <path d="M96 212Q176 192 240 236V404Q176 372 96 380Z" fill="#f6f4ee"/><path d="M416 212Q336 192 272 236V404Q336 372 416 380Z" fill="#f6f4ee"/><rect x="248" y="130" width="16" height="282" rx="8" fill="#d9a441"/><circle cx="256" cy="104" r="42" fill="#d9a441"/>
+      </g>
+      <text x="260" y="152" text-anchor="middle" fill="#f6f4ee" style="font:600 14px var(--sans)">librarian</text>
+      <text x="260" y="170" text-anchor="middle" fill="#d9a441" style="font:11px var(--sans)">policy engine</text>
+    </g>
+    <!-- apis -->
+    <path class="wire" d="M320 50H380M320 110H380M320 170H380"/>
+    <text class="sub" x="328" y="22">with the key</text>
+    <g class="lbl">
+      <rect class="box" x="380" y="30" width="130" height="40" rx="8"/><text x="392" y="55">Jira</text>
+      <rect class="box" x="380" y="90" width="130" height="40" rx="8"/><text x="392" y="115">GitHub</text>
+      <rect class="box" x="380" y="150" width="130" height="40" rx="8"/><text x="392" y="175">internal APIs</text>
+    </g>
+    <!-- below: registry, secrets, people -->
+    <path class="hot" d="M260 180V212M175 212H452M175 212V230M322 212V230M452 212V230"/>
+    <g class="lbl">
+      <rect class="box" x="100" y="230" width="150" height="70" rx="8"/>
+      <text x="112" y="253">registry (git)</text><text class="sub" x="112" y="271">what each API is,</text><text class="sub" x="112" y="286">which operations are reads</text>
+      <rect class="box" x="262" y="230" width="120" height="70" rx="8"/>
+      <text x="274" y="253">secret store</text><text class="sub" x="274" y="271">keys people add;</text><text class="sub" x="274" y="286">agents see references</text>
+      <rect class="box" x="394" y="230" width="116" height="70" rx="8"/>
+      <text x="406" y="253">people</text><text class="sub" x="406" y="271">review the registry,</text><text class="sub" x="406" y="286">add keys, approve writes</text>
+    </g>
+  </svg>
+</div>
+
+<section id="how">
+  <div class="wrap">
+    <h2>What happens on a request</h2>
+    <p>Nothing is set up per API in advance. The registry fills itself as agents need things, and a person is asked only when a key is missing or data would change.</p>
+    <ol class="ledger">
+      <li><div><h3>An agent asks for data from an API librarian doesn't know yet</h3><p>Over A2A or MCP, through a gateway such as LiteLLM or directly. The agent names the API and what it wants; it never names a host, so it can't point librarian anywhere else.</p></div></li>
+      <li><div><h3>librarian learns the API</h3><p>From its OpenAPI spec, else its documentation (found by itself if needed, with every extracted operation quote-checked against the page), else the model's own knowledge. Reads work at once; a pull request is opened on your registry repo so a person can review the entry.</p></div></li>
+      <li><div><h3>If the API needs a key, a person is asked once</h3><p>The agent's task waits and approvers get a Slack card. Someone follows the one-time link, signs in and pastes the key. It goes straight to your secret store, never through Slack, an agent or a model, and the task carries on by itself.</p></div></li>
+      <li><div><h3>Writes wait for a person's approval, every time</h3><p>The approval page shows exactly what will be sent: method, path, arguments and body. Approve once, or allow similar writes with a narrow, expiring grant. DELETEs can only ever be approved one at a time.</p></div></li>
+    </ol>
+  </div>
+</section>
+
+<section id="safe">
+  <div class="wrap">
+    <h2>Why it's safe to put between agents and your APIs</h2>
+    <p>The design assumes that agents can be talked into anything. So nothing an agent, a document or a model says can change what librarian is allowed to do.</p>
+    <dl class="rules">
+      <div><dt>The model never decides</dt><dd>A deterministic policy engine with no LLM in it authorises every call. The optional planner can only plan reads and propose writes.</dd></div>
+      <div><dt>Credentials never travel through agents</dt><dd>Keys enter on a one-time page and go straight to the secret store. Agents, messages, logs and the model only ever see references like <code>jira/readonly</code>.</dd></div>
+      <div><dt>Writes need a person</dt><dd>A verified registry entry, a separate write credential, and a human approval or a grant pinned to an agent, a person and an operation. Each write is sent once, with no redirects and an idempotency key, and claimed atomically so replicas never run it twice.</dd></div>
+      <div><dt>Untrusted input is fenced</dt><dd>The API host only ever comes from the caller's <code>base_url</code>, never from documentation or search results. Read versus write is decided by HTTP method. Search results are trust-ranked and third-party sites are skipped by default.</dd></div>
+      <div><dt>No way out to your network</dt><dd>An SSRF guard with DNS pinning refuses private addresses unless you allow them, redirects stay on the same origin, and response sizes are capped.</dd></div>
+      <div><dt>Approval pages are locked down</dt><dd>A separate listener behind your SSO proxy, one-time HMAC links that expire, a strict content security policy with no external resources, and every decision recorded with who made it.</dd></div>
+    </dl>
+    <p style="margin-top:24px">The full <a href="https://github.com/kultar/librarian/blob/main/docs/threat-model.md">threat model</a> lists each threat and its mitigation.</p>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <h2>Get started</h2>
+    <p>Three paths, depending on where you are. Each one is documented step by step and has been followed end to end.</p>
+    <div class="paths">
+      <div>
+        <h3>On your laptop</h3>
+        <p>Ten minutes with Docker. You see an API learned on demand, a key asked for out of band, and a write held for approval.</p>
+<pre><code>git clone https://github.com/kultar/librarian
+cd librarian/examples/quickstart
+docker compose up -d
+./ask '{"skill":"capabilities"}'</code></pre>
+        <a href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Getting started</a>
+      </div>
+      <div>
+        <h3>For your team</h3>
+        <p>A Helm chart with oauth2-proxy sign-in, git-sync for the registry, Postgres for shared state and AWS Secrets Manager for keys. Two or more replicas, no volumes, nothing exposed to the internet.</p>
+<pre><code>helm install librarian ./deploy/helm/librarian \
+  -n librarian -f values.yaml
+helm test librarian -n librarian</code></pre>
+        <a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a>
+      </div>
+      <div>
+        <h3>Connect your agents</h3>
+        <p>Behind LiteLLM's agent gateway librarian is both an MCP server and an A2A agent. Any A2A or MCP client can also talk to it directly.</p>
+<pre><code># LiteLLM config.yaml
+mcp_servers:
+  librarian:
+    url: http://librarian.librarian.svc:8080/mcp
+    transport: http
+    auth_type: bearer_token
+    auth_value: os.environ/LIBRARIAN_GATEWAY_KEY</code></pre>
+        <a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md">Integrations</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="skills">
+  <div class="wrap">
+    <h2>What agents can ask for</h2>
+    <p>The same five skills over A2A and as MCP tools. Only <code>fetch</code> uses a model; everything else is plain code.</p>
+    <table>
+      <thead><tr><th>Skill</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>capabilities</code></td><td>Which APIs and read operations this agent may use.</td></tr>
+        <tr><td><code>execute</code></td><td>Run one read operation, with optional field selection and pagination.</td></tr>
+        <tr><td><code>onboard</code></td><td>Teach librarian an API: a spec URL, a docs URL, or just a base URL.</td></tr>
+        <tr><td><code>write</code></td><td>Change data, after a person approves it or a grant covers it.</td></tr>
+        <tr><td><code>fetch</code></td><td>Plain language ("open bugs assigned to the payments team"), planned by a model and executed by the policy engine.</td></tr>
+      </tbody>
+    </table>
+    <p>Every result carries provenance: which API and operation, the URL with secrets redacted, when, for which agent and person, and which credential reference. The audit log is always on.</p>
+  </div>
+</section>
+
+<section id="docs">
+  <div class="wrap">
+    <h2>Documentation</h2>
+    <ul class="docs">
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Getting started</a><span>The laptop walkthrough with Docker Compose.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a><span>Kubernetes, step by step: registry App, Slack, SSO, secrets, database, replicas.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md">Integrations</a><span>LiteLLM, any A2A or MCP client, verified principals.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/registry.md">Registry format</a><span>One YAML file per API, reviewed by pull request.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/threat-model.md">Threat model</a><span>Assets, actors, threats and mitigations.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/troubleshooting.md">Troubleshooting</a><span>What to check when agents, learning, Slack, sign-in or Kubernetes misbehave.</span></li>
+    </ul>
+  </div>
+</section>
+
+<section id="roadmap">
+  <div class="wrap">
+    <h2>Roadmap</h2>
+    <div class="roadmap">
+      <div><h3>Done</h3><ul>
+        <li>Reads within policy, writes with approval or grants</li>
+        <li>Learning from specs, documentation and model knowledge, with change detection</li>
+        <li>Slack cards, Helm chart, GitHub App for the registry repo</li>
+        <li>MCP endpoint and the LiteLLM gateway</li>
+        <li>Verified principals from your identity provider</li>
+        <li>Replicas with shared state and no volumes</li>
+      </ul></div>
+      <div><h3>Next</h3><ul>
+        <li>Internal APIs, scoped: agents learn APIs within domains you list instead of all private networks or none</li>
+      </ul></div>
+      <div><h3>Later</h3><ul>
+        <li>Rate limits shared across replicas</li>
+        <li>Per-user OAuth for APIs that need the person's own access</li>
+        <li>Vault, GCP Secret Manager and Azure Key Vault</li>
+        <li>A community registry of reviewed, signed entries</li>
+      </ul></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a href="https://github.com/kultar/librarian">GitHub</a>
+    <a href="https://pypi.org/project/librarian-a2a/">PyPI</a>
+    <a href="https://github.com/kultar/librarian/pkgs/container/librarian">Container image</a>
+    <a href="https://github.com/kultar/librarian/blob/main/SECURITY.md">Security policy</a>
+    <span>Apache-2.0</span>
+  </div>
+</footer>
+</body>
+</html>
