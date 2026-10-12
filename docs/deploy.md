@@ -273,7 +273,7 @@ Secret called `librarian-env`.
 
 ```yaml
 image:
-  tag: "0.10.2"
+  tag: "0.11.0"
 
 replicaCount: 2                          # needs steps 4 and 5; see "Replicas" below
 persistence:
