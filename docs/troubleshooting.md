@@ -106,7 +106,7 @@ commit as a person or exclude the App from the rule for a moment.
 
 **git-sync init container in `Init:CrashLoopBackOff`, printing its usage or
 `strconv.ParseInt: parsing "9.87654321e+08"`.**
-Chart versions before 0.11.2 rendered a numeric `githubApp.installationId` (or `appId`) from a
+Chart versions before 0.12.0 rendered a numeric `githubApp.installationId` (or `appId`) from a
 values file in scientific notation. Upgrade the chart, or quote the ids: `installationId: "987654321"`.
 
 **The pod crashes with `port ... unable to parse string as an integer ... 'tcp://...'`.**
@@ -116,7 +116,7 @@ and librarian ignores such a value). Without the chart, set `enableServiceLinks:
 
 **Crash at start: `connect() got an unexpected keyword argument 'sslmode'`.**
 The database driver is asyncpg, which takes `ssl=require` rather than `psql`'s `sslmode=require`.
-librarian translates `sslmode` since 0.11.2; on earlier versions change the URL to `?ssl=require`.
+librarian translates `sslmode` since 0.12.0; on earlier versions change the URL to `?ssl=require`.
 
 **Requests fail with `connection is closed` after a database failover or restart.**
 Fixed in 0.10.0 (connections are checked before use). Also make sure the URL is the writer
