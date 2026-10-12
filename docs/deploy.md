@@ -364,7 +364,7 @@ Secret called `librarian-env`.
 
 ```yaml
 image:
-  tag: "0.12.0"
+  tag: "0.12.1"
 
 replicaCount: 2                          # needs steps 4 and 5; see "Replicas" below
 persistence:
@@ -433,7 +433,7 @@ The chart is published with every release as an OCI artifact, with the same vers
 image (`image.tag` above):
 
 ```bash
-helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.12.0 \
+helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.12.1 \
   -n librarian -f values.yaml
 ```
 
