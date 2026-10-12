@@ -226,13 +226,21 @@ def github_app_create(
     ] = Path(".librarian/github-app.pem"),
     name: Annotated[str | None, typer.Option(help="App name (default librarian-<owner>)")] = None,
     port: Annotated[int, typer.Option(help="Local port for the one-time browser callback")] = 8977,
+    init_repo: Annotated[
+        bool,
+        typer.Option(
+            "--init-repo",
+            help="If the repo has no commits yet, make the first one (a README) as the App",
+        ),
+    ] = False,
 ) -> None:
     """Create a GitHub App for the registry repo in one step (GitHub's manifest flow)."""
     import webbrowser
 
     import httpx
 
-    from librarian.github_app import GitHubAppError, create_app
+    from librarian.github_app import GitHubAppAuth, GitHubAppError, create_app
+    from librarian.github_app import init_repo as first_commit
 
     async def run() -> None:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -248,6 +256,23 @@ def github_app_create(
                 )
             except (GitHubAppError, TimeoutError) as exc:
                 raise typer.BadParameter(str(exc)) from exc
+            if init_repo:
+                auth = GitHubAppAuth(
+                    str(created.app_id),
+                    key_file.read_text("utf-8"),
+                    repo,
+                    installation_id=installation,
+                    client=client,
+                )
+                try:
+                    made = await first_commit(auth)
+                except GitHubAppError as exc:
+                    raise typer.BadParameter(str(exc)) from exc
+                typer.echo(
+                    f"First commit (README.md) made in {repo} as the App."
+                    if made
+                    else f"{repo} already has commits; nothing to initialise."
+                )
         typer.echo(
             "\nlibrarian config:\n"
             f"  publish:\n    type: github\n    repo: {repo}\n    github_app:\n"
@@ -256,8 +281,38 @@ def github_app_create(
             "\nHelm (git-sync reads the registry with the same App):\n"
             "  kubectl create secret generic librarian-github-app "
             f"--from-file=private-key.pem={key_file}\n"
-            f'  githubApp: {{appId: "{created.app_id}", installationId: {installation}, '
+            f'  githubApp: {{appId: "{created.app_id}", installationId: "{installation}", '
             "secretName: librarian-github-app}"
+        )
+
+    _run(run())
+
+
+@github_app_cli.command("init-repo")
+def github_app_init_repo(
+    repo: Annotated[str, typer.Option(help="Registry repository, owner/name")],
+    app_id: Annotated[str, typer.Option(help="The App's id")],
+    key_file: Annotated[Path, typer.Option(help="The App's private key file", exists=True)],
+) -> None:
+    """Make the first commit (a README) in an empty registry repo, as the App.
+
+    git-sync and review pull requests need a branch to exist. Creates `main`, so it works
+    unless a ruleset restricts creating the default branch."""
+    import httpx
+
+    from librarian.github_app import GitHubAppAuth, GitHubAppError, init_repo
+
+    async def run() -> None:
+        async with httpx.AsyncClient(timeout=30) as client:
+            auth = GitHubAppAuth(app_id, key_file.read_text("utf-8"), repo, client=client)
+            try:
+                made = await init_repo(auth)
+            except GitHubAppError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+        typer.echo(
+            f"First commit (README.md) made in {repo} as the App."
+            if made
+            else f"{repo} already has commits; nothing to do."
         )
 
     _run(run())

@@ -41,6 +41,12 @@ jobs:
           --set registry.gitSync.enabled=true,registry.gitSync.repo=https://example.com/r.git
           --set ingress.a2a.enabled=true,ingress.pages.enabled=true,otel.enabled=true
           > /dev/null
+      - name: Numeric GitHub App ids from a values file render whole
+        run: |
+          out="$(helm template t deploy/helm/librarian -f deploy/helm/librarian/ci/github-app-values.yaml)"
+          echo "$out" | grep -q -- "--github-app-installation-id=170648789," || { echo "$out" | grep installation-id; exit 1; }
+          echo "$out" | grep -q -- "--github-app-application-id=5277502," || { echo "$out" | grep application-id; exit 1; }
+          echo "$out" | grep -q 'app_id: "5277502"' || { echo "$out" | grep app_id; exit 1; }
 
   docker:
     runs-on: ubuntu-latest

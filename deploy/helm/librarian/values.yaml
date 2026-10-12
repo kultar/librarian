@@ -76,8 +76,8 @@ registry:
 # librarian opens review pull requests with it. Needs registry.gitSync.
 githubApp:
   enabled: false
-  appId: ""
-  installationId: ""
+  appId: ""                 # e.g. "123456" (quote them: YAML numbers this large render badly)
+  installationId: ""        # e.g. "170648789"
   secretName: ""            # Secret holding the App's private key
   secretKey: private-key.pem
 

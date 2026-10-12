@@ -13,7 +13,8 @@ token. Enable oauth2Proxy (sign-in through your identity provider) for shared de
 {{- if gt (int .Values.replicaCount) 1 }}
 {{- if not (hasPrefix "postgresql" (toString (.Values.config.database_url | default ""))) }}
 
-WARNING: replicaCount > 1 needs Postgres (config.database_url: postgresql+asyncpg://...).
+replicaCount > 1 needs Postgres: config.database_url is not set to one here, so make sure
+LIBRARIAN_DATABASE_URL is in the environment Secret (librarian refuses to start otherwise).
 {{- end }}
 {{- end }}
 

@@ -8,6 +8,9 @@
 {{- if and $app.enabled (not (and $app.appId $app.installationId $app.secretName)) -}}
 {{- fail "githubApp.appId, githubApp.installationId and githubApp.secretName are required when githubApp.enabled is true" -}}
 {{- end -}}
+{{- if and $app.enabled (or (not (int64 $app.appId)) (not (int64 $app.installationId))) -}}
+{{- fail (printf "githubApp.appId (%v) and githubApp.installationId (%v) must be whole numbers, e.g. installationId: \"170648789\"" $app.appId $app.installationId) -}}
+{{- end -}}
 {{- if and $app.enabled (not $git.enabled) -}}
 {{- fail "githubApp needs registry.gitSync.enabled (it is used for the registry repo)" -}}
 {{- end -}}
@@ -63,7 +66,7 @@ spec:
         # Populate the registry before librarian starts; the sidecar keeps it current.
         - name: git-sync-init
           image: {{ $git.image }}
-          args: [--repo={{ $git.repo }}, --ref={{ $git.ref }}, --root=/git, --link=current, --one-time{{ if $app.enabled }}, --github-app-application-id={{ $app.appId }}, --github-app-installation-id={{ $app.installationId }}, --github-app-private-key-file=/etc/librarian-github-app/{{ $app.secretKey }}{{ end }}]
+          args: [--repo={{ $git.repo }}, --ref={{ $git.ref }}, --root=/git, --link=current, --one-time{{ if $app.enabled }}, --github-app-application-id={{ int64 $app.appId }}, --github-app-installation-id={{ int64 $app.installationId }}, --github-app-private-key-file=/etc/librarian-github-app/{{ $app.secretKey }}{{ end }}]
           {{- with $git.credentialsSecret }}
           envFrom:
             - secretRef:
@@ -122,7 +125,7 @@ spec:
         {{- if $git.enabled }}
         - name: git-sync
           image: {{ $git.image }}
-          args: [--repo={{ $git.repo }}, --ref={{ $git.ref }}, --root=/git, --link=current, --period={{ $git.period }}{{ if $app.enabled }}, --github-app-application-id={{ $app.appId }}, --github-app-installation-id={{ $app.installationId }}, --github-app-private-key-file=/etc/librarian-github-app/{{ $app.secretKey }}{{ end }}]
+          args: [--repo={{ $git.repo }}, --ref={{ $git.ref }}, --root=/git, --link=current, --period={{ $git.period }}{{ if $app.enabled }}, --github-app-application-id={{ int64 $app.appId }}, --github-app-installation-id={{ int64 $app.installationId }}, --github-app-private-key-file=/etc/librarian-github-app/{{ $app.secretKey }}{{ end }}]
           {{- with $git.credentialsSecret }}
           envFrom:
             - secretRef:

@@ -12,6 +12,7 @@ written straight to a file only the current user can read; it is never printed.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import secrets
@@ -113,6 +114,44 @@ class GitHubAppAuth:
             self._token = str(data["token"])
             self._expires = datetime.fromisoformat(str(data["expires_at"]).replace("Z", "+00:00"))
             return self._token
+
+
+FIRST_README = """# API registry
+
+One YAML file per API, reviewed by pull request. librarian opens a pull request here for every
+API it learns; merging it marks the entry `verified`.
+"""
+
+
+async def init_repo(auth: GitHubAppAuth, *, readme: str = FIRST_README) -> bool:
+    """Give an empty registry repo its first commit (a README) as the App, so git-sync and
+    review pull requests have a branch to work with. Returns False if it already had one.
+
+    Creates the default branch, so it works unless a ruleset restricts creating it; once the
+    branch exists, branch rules apply as usual (librarian only opens pull requests)."""
+    headers = {
+        "Authorization": f"Bearer {await auth.token()}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    branches = await auth.client.get(f"{auth.api_url}/repos/{auth.repo}/branches", headers=headers)
+    if branches.status_code != 200:
+        raise GitHubAppError(f"listing branches of {auth.repo}: HTTP {branches.status_code}")
+    if branches.json():
+        return False
+    response = await auth.client.put(
+        f"{auth.api_url}/repos/{auth.repo}/contents/README.md",
+        headers=headers,
+        json={
+            "message": "Start the API registry",
+            "content": base64.b64encode(readme.encode("utf-8")).decode("ascii"),
+        },
+    )
+    if response.status_code != 201:
+        raise GitHubAppError(
+            f"creating the first commit in {auth.repo}: HTTP {response.status_code}"
+        )
+    return True
 
 
 # -- one-step creation (manifest flow) --------------------------------------------------

@@ -195,3 +195,14 @@ async def test_another_replica_can_update_the_posted_message(
     assert posting.closed_refs[-1] == {"channel": "C1", "ts": f"write-{approval.id}"}
     await first.aclose()
     await second.aclose()
+
+
+def test_psql_style_sslmode_is_translated_for_asyncpg() -> None:
+    from librarian.state import normalize_database_url
+
+    pg = "postgresql+asyncpg://u:p@db.example.test:5432/librarian"
+    assert normalize_database_url(f"{pg}?sslmode=require") == f"{pg}?ssl=require"
+    assert normalize_database_url(f"{pg}?a=1&sslmode=verify-full") == f"{pg}?a=1&ssl=verify-full"
+    assert normalize_database_url(f"{pg}?ssl=require") == f"{pg}?ssl=require"
+    other = "postgresql+psycopg://u:p@h/db?sslmode=require"  # not asyncpg: left alone
+    assert normalize_database_url(other) == other

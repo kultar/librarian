@@ -96,7 +96,7 @@ database defaults apply only when the user did not set them.
 {{- if not (hasKey $publish "base_branch") -}}
 {{- $_ := set $publish "base_branch" $git.ref -}}
 {{- end -}}
-{{- $_ := set $publish "github_app" (dict "app_id" (toString .Values.githubApp.appId) "installation_id" (int .Values.githubApp.installationId) "private_key_file" (printf "/etc/librarian-github-app/%s" .Values.githubApp.secretKey)) -}}
+{{- $_ := set $publish "github_app" (dict "app_id" (toString (int64 .Values.githubApp.appId)) "installation_id" (int64 .Values.githubApp.installationId) "private_key_file" (printf "/etc/librarian-github-app/%s" .Values.githubApp.secretKey)) -}}
 {{- $_ := set $c "publish" $publish -}}
 {{- end -}}
 {{- toYaml $c -}}

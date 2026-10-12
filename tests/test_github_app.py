@@ -44,6 +44,7 @@ class FakeGitHub:
         self.minted = 0
         self.installed_after = installed_after  # installation lookups that 404 first
         self.expires = datetime.now(UTC) + timedelta(hours=1)
+        self.branches: list[dict[str, str]] = [{"name": "main"}]
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else None
@@ -69,6 +70,13 @@ class FakeGitHub:
                 201,
                 json={"id": 777, "slug": "librarian-acme", "client_id": "Iv1.x", "pem": PEM},
             )
+        if path == f"/repos/{REPO}/branches":
+            return httpx.Response(200, json=self.branches)
+        if path == f"/repos/{REPO}/contents/README.md" and request.method == "PUT":
+            assert request.headers["authorization"].startswith("Bearer ghs_")  # as the App
+            assert self.branches == [], "must not overwrite an existing repo"
+            self.branches = [{"name": "main"}]
+            return httpx.Response(201, json={"commit": {"sha": "c0ffee"}})
         if path.startswith("/repos/acme/api-registry/"):  # the publisher's calls
             if path.endswith("/git/ref/heads/main"):
                 return httpx.Response(200, json={"object": {"sha": "s"}})
@@ -214,3 +222,20 @@ async def test_one_step_creation_end_to_end(tmp_path: Path) -> None:
     assert (created.app_id, installation) == (777, 4242)
     assert key_file.read_text() == PEM
     assert not any(PEM.splitlines()[1] in line for line in lines)  # the key is never printed
+
+
+async def test_init_repo_makes_the_first_commit_only_when_the_repo_is_empty() -> None:
+    import base64
+
+    from librarian.github_app import FIRST_README, GitHubAppAuth, init_repo
+
+    fake = FakeGitHub()
+    fake.branches = []  # a freshly created repo: no branch at all
+    auth = GitHubAppAuth("777", PEM, REPO, client=client(fake))
+    assert await init_repo(auth) is True
+    put = next(c for c in fake.calls if c[0] == "PUT" and c[1].endswith("/contents/README.md"))
+    assert base64.b64decode(put[3]["content"]).decode() == FIRST_README
+    assert put[3]["message"]
+    assert fake.branches == [{"name": "main"}]
+    assert await init_repo(auth) is False  # second run: nothing to do, nothing written
+    assert sum(1 for c in fake.calls if c[0] == "PUT") == 1

@@ -53,8 +53,16 @@ documents = Table(
 )
 
 
+def normalize_database_url(url: str) -> str:
+    """asyncpg takes `ssl=require`, not psql's `sslmode=require`; accept both."""
+    if "+asyncpg" in url.split("://", 1)[0] and "sslmode=" in url:
+        return url.replace("?sslmode=", "?ssl=").replace("&sslmode=", "&ssl=")
+    return url
+
+
 def make_engine(url: str) -> AsyncEngine:
     """Create an async engine; for SQLite, make sure the directory exists."""
+    url = normalize_database_url(url)
     if url.startswith("sqlite"):
         from pathlib import Path
 

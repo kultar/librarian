@@ -68,7 +68,11 @@ Fixed in 0.8.1: upgrade.
 
 **Nobody is @mentioned.**
 `notifier.slack.approver_group` (or an entry's `owners.approver_group`) must be the user group's
-**ID** (`S...`), not its handle.
+**ID** (`S...`), not its handle. It is optional: without it cards still post.
+
+**Saving the bot token with `read -rs` prints an error.**
+Non-interactive shells (an editor's or assistant's `!` command runner) have no terminal to read
+from. Save tokens from a real terminal, or write the file with your password manager's CLI.
 
 ## Sign-in and approvals
 
@@ -90,15 +94,29 @@ Check `--repo owner/name`; pick another name with `--name`.
 Install it (github.com/apps/<app>/installations/new) on that repo. `librarian github-app check
 --repo ... --app-id ... --key-file ...` confirms access.
 
-**git-sync can't clone.** `kubectl logs deploy/librarian -c git-sync`. The repo must exist with at
-least one commit, and the App must be installed on it.
+**git-sync can't clone, or prints its usage; review pull requests fail with "not found".**
+`kubectl logs deploy/librarian -c git-sync`. The repo must exist **with at least one commit**
+(an empty repo has no branch) and the App must be installed on it. Give it its first commit as
+the App: `librarian github-app init-repo --repo acme/api-registry --app-id ... --key-file ...`
+(or `github-app create --init-repo` from the start). That creates `main`, so it works unless a
+ruleset restricts creating the default branch; if it reports a rule violation, make the first
+commit as a person or exclude the App from the rule for a moment.
 
 ## Kubernetes
+
+**git-sync init container in `Init:CrashLoopBackOff`, printing its usage or
+`strconv.ParseInt: parsing "1.70648789e+08"`.**
+Chart versions before 0.11.2 rendered a numeric `githubApp.installationId` (or `appId`) from a
+values file in scientific notation. Upgrade the chart, or quote the ids: `installationId: "170648789"`.
 
 **The pod crashes with `port ... unable to parse string as an integer ... 'tcp://...'`.**
 Kubernetes put `LIBRARIAN_PORT=tcp://...` into the pod for a Service named `librarian`, which
 collides with librarian's settings. Fixed in 0.10.0 (the chart sets `enableServiceLinks: false`,
 and librarian ignores such a value). Without the chart, set `enableServiceLinks: false`.
+
+**Crash at start: `connect() got an unexpected keyword argument 'sslmode'`.**
+The database driver is asyncpg, which takes `ssl=require` rather than `psql`'s `sslmode=require`.
+librarian translates `sslmode` since 0.11.2; on earlier versions change the URL to `?ssl=require`.
 
 **Requests fail with `connection is closed` after a database failover or restart.**
 Fixed in 0.10.0 (connections are checked before use). Also make sure the URL is the writer

@@ -101,27 +101,41 @@ or egress proxy if you need to.
 The registry is a git repo with one YAML file per API. librarian proposes new entries there as
 pull requests; people review and merge; git-sync pulls the merged result into the pod.
 
-1. Create a **private** repo, e.g. `acme/api-registry`, with at least one commit (a README is
-   enough). Keep it private: it is a map of your APIs.
-2. Create its GitHub App in one step (on any machine with librarian installed, e.g.
-   `pip install librarian-a2a` or the quick start's clone with `uv run`):
+1. Create a **private** repo, e.g. `acme/api-registry`. Keep it private: it is a map of your
+   APIs. It can start empty; step 2 gives it its first commit.
+2. Create its GitHub App in one step. No Python environment is needed: with
+   [`uv`](https://docs.astral.sh/uv/) installed, `uvx` runs the CLI straight from PyPI (or
+   `pip install librarian-a2a` and run `librarian`):
 
    ```bash
-   librarian github-app create --repo acme/api-registry
+   uvx --from librarian-a2a librarian github-app create --repo acme/api-registry \
+     --key-file ~/.config/librarian/github-app.pem --init-repo
    ```
 
    Your browser opens GitHub: click **Create GitHub App**, then install it on **only**
-   `acme/api-registry`. The command saves the App's private key to
-   `.librarian/github-app.pem` (readable only by you) and prints the App id and installation id.
+   `acme/api-registry`. The command saves the App's private key where `--key-file` says
+   (readable only by you; choose a path outside any git repo, the default `.librarian/` lands in
+   whatever repo you run it from) and prints the App id and installation id.
+
+   `--init-repo` creates `main` with a README **as the App** if the repo has no commits yet
+   (an empty repo has no branch, so git-sync and review pull requests would fail). It works as
+   long as no ruleset restricts creating the default branch; afterwards branch rules apply as
+   usual and librarian works through pull requests. If it fails with a rule violation, make the
+   first commit as a person, or exclude the App from the rule for a moment. For an App created
+   earlier: `librarian github-app init-repo --repo ... --app-id ... --key-file ...`.
 3. Store the key in the cluster:
 
    ```bash
    kubectl -n librarian create secret generic librarian-github-app \
-     --from-file=private-key.pem=.librarian/github-app.pem
+     --from-file=private-key.pem=$HOME/.config/librarian/github-app.pem
    ```
 
    Then delete the local copy, or keep it in your password manager. (Using ExternalSecrets? Put
    the key in your secret store and sync it into a Secret with this name and key.)
+
+**Branch protection** on `main` ("pull requests only, one approving review, code owners") is
+fine: librarian only ever pushes `librarian/*` branches and opens pull requests, so leave those
+branches unprotected. A code-owner rule does nothing until the repo has a `CODEOWNERS` file.
 
 ## 2. Slack
 
@@ -131,8 +145,11 @@ pull requests; people review and merge; git-sync pulls the merged result into th
 2. Copy the **Bot User OAuth Token** (`xoxb-...`) for the `librarian-env` Secret (step 8).
 3. Pick a channel, e.g. `#api-access`. A public channel works without inviting the bot; for a
    private one, `/invite @librarian` there.
-4. Create a Slack **user group** for approvers (e.g. `@api-approvers`) and note its **ID** (it
-   starts with `S`; in Slack, open the group's details to copy it). Cards @mention this group.
+4. Optionally, create a Slack **user group** for approvers (e.g. `@api-approvers`) and note its
+   **ID** (it starts with `S`). Cards @mention this group; without one they still post, just
+   @mentioning nobody. Who may *decide* is settled by sign-in (step 3), not by Slack. If you
+   can't see group IDs (no Slack admin): mention the group in a message in Slack's web version,
+   right-click it and choose Inspect; the id is in a `data-...-id` attribute.
 
 ## 3. Sign-in for the approval pages
 
@@ -153,6 +170,50 @@ person, and only members of your approver group can add keys.
 
 3. Decide the approver group *as your identity provider names it* (e.g. `api-approvers`). It is
    separate from the Slack group: Slack is who gets pinged, this is who may decide.
+
+### Entra ID (Azure AD) recipe
+
+The same three steps with the `az` CLI. Entra puts group **object ids** (not names) in the
+`groups` claim, so the approver group is its object id.
+
+```bash
+az login --scope https://graph.microsoft.com//.default   # the Graph calls below may need this scope
+APP=$(az ad app create --display-name librarian-approvals --sign-in-audience AzureADMyOrg \
+  --web-redirect-uris https://librarian.example.com/oauth2/callback --query id -o tsv)
+APP_ID=$(az ad app show --id "$APP" --query appId -o tsv)
+# group membership and the email claims in the ID token
+az rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$APP" --body \
+  '{"groupMembershipClaims":"SecurityGroup","optionalClaims":{"idToken":[{"name":"email"},{"name":"preferred_username"}]}}'
+SP=$(az ad sp create --id "$APP_ID" --query id -o tsv)
+# only members of the approver group may sign in at all
+az ad sp update --id "$SP" --set appRoleAssignmentRequired=true
+az rest --method POST --url "https://graph.microsoft.com/v1.0/servicePrincipals/$SP/appRoleAssignedTo" \
+  --body "{\"principalId\":\"<approver group object id>\",\"resourceId\":\"$SP\",\"appRoleId\":\"00000000-0000-0000-0000-000000000000\"}"
+# the client secret goes straight into the Kubernetes Secret, never through the terminal
+az ad app credential reset --id "$APP_ID" --append --display-name oauth2-proxy --years 1 \
+    --query password -o tsv \
+  | kubectl -n librarian create secret generic librarian-oauth2 \
+      --from-literal=OAUTH2_PROXY_CLIENT_ID="$APP_ID" \
+      --from-file=OAUTH2_PROXY_CLIENT_SECRET=/dev/stdin \
+      --from-literal=OAUTH2_PROXY_COOKIE_SECRET="$(openssl rand -base64 32 | tr -- '+/' '-_')"
+```
+
+`--append` matters: without it `credential reset` replaces the app's existing secrets
+(`az ad app credential add` does not exist). Then, in the values file (step 9):
+
+```yaml
+oauth2Proxy:
+  enabled: true
+  existingSecret: librarian-oauth2
+  oidcIssuerUrl: https://login.microsoftonline.com/<tenant id>/v2.0
+  approverGroup: <approver group object id>
+  extraArgs:                                 # Entra's ID tokens carry the address in
+    - --oidc-email-claim=preferred_username  # preferred_username, unverified
+    - --insecure-oidc-allow-unverified-email=true
+```
+
+Verified so far: the redirect to Entra and the group restriction. The two `extraArgs` are what
+Entra's tokens need for oauth2-proxy to pass the person's address on; confirm with one sign-in.
 
 ## 4. Where keys are stored
 
@@ -212,8 +273,12 @@ Without AWS: keys are files on the pod's volume. Fine for one replica; back up t
 ## 5. The database
 
 Create a PostgreSQL database and user for librarian. The URL goes in the `librarian-env` Secret:
-`LIBRARIAN_DATABASE_URL=postgresql+asyncpg://librarian:<password>@<host>:5432/librarian`.
+`LIBRARIAN_DATABASE_URL=postgresql+asyncpg://librarian:<password>@<host>:5432/librarian?ssl=require`.
 librarian creates its tables on start. (Without it, SQLite on the volume: one replica only.)
+
+`?ssl=require` makes the connection use TLS even when the server doesn't insist on it (Aurora
+has `force_ssl` off by default). The driver is asyncpg, so the parameter is `ssl`, not
+`sslmode` as in `psql` URLs; librarian accepts `sslmode=` and translates it.
 
 Point it at the **writer** (on Aurora, the cluster endpoint), never a read replica or reader
 endpoint: replicas read each other's writes straight away (approvals, newly learned APIs), and
@@ -235,6 +300,19 @@ config:
 ```
 
 and `LIBRARIAN_MODEL_API_KEY=<a LiteLLM virtual key for librarian>` in `librarian-env`.
+
+Make that key in LiteLLM with its value **pre-generated**, so it only ever lives in your secret
+store and the `librarian-env` Secret (LiteLLM accepts a `key` of your choosing):
+
+```bash
+curl -s "$LITELLM_URL/key/generate" -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"key": "<sk-... from your secret store>", "key_alias": "librarian",
+       "models": ["claude-sonnet-5-5"]}'
+```
+
+`models` is an allowlist: any other model answers 403. Change it later with `/key/update`
+(same body, with `key`).
 
 ## 7. Which agents may call librarian
 
@@ -295,7 +373,7 @@ registry:
 githubApp:
   enabled: true
   appId: "<printed by github-app create>"
-  installationId: <printed by github-app create>
+  installationId: "<printed by github-app create>"
   secretName: librarian-github-app
 
 oauth2Proxy:

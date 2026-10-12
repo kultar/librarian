@@ -53,18 +53,21 @@ lets librarian open review pull requests on it. Its tokens are minted per use, l
 hour, and cover only that repo. Create it in one step:
 
 ```bash
-librarian github-app create --repo acme/api-registry
-# opens GitHub: click "Create", then install it on acme/api-registry only.
-# Saves the private key to .librarian/github-app.pem and prints the values below.
+# no Python environment needed: uvx runs the CLI from PyPI (or pip install librarian-a2a)
+uvx --from librarian-a2a librarian github-app create --repo acme/api-registry \
+  --key-file ~/.config/librarian/github-app.pem --init-repo
+# opens GitHub: click "Create", then install it on acme/api-registry only. Saves the private
+# key to --key-file (keep it outside any repo) and prints the values below. --init-repo gives an
+# empty repo its first commit as the App (git-sync and pull requests need a branch).
 
 kubectl -n librarian create secret generic librarian-github-app \
-  --from-file=private-key.pem=.librarian/github-app.pem
+  --from-file=private-key.pem=$HOME/.config/librarian/github-app.pem
 ```
 
 ```yaml
 registry:
   gitSync: {enabled: true, repo: https://github.com/acme/api-registry.git}
-githubApp: {enabled: true, appId: "123456", installationId: 7890123, secretName: librarian-github-app}
+githubApp: {enabled: true, appId: "123456", installationId: "7890123", secretName: librarian-github-app}
 ```
 
 The chart mounts the key into git-sync and librarian, and points librarian's review pull

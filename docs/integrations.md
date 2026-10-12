@@ -20,7 +20,8 @@ Things a client must handle:
 ## LiteLLM (agent gateway)
 
 librarian works behind LiteLLM both as an **MCP server** and as an **A2A agent**, tested end to
-end against LiteLLM v1.104.2 (`tests/integration/litellm`).
+end against LiteLLM v1.104.2 (`tests/integration/litellm`) and in a real deployment on v1.101.0
+and v1.105.0.
 
 ```yaml
 # LiteLLM config.yaml
@@ -36,7 +37,7 @@ mcp_servers:
 
 agents:
   - agent_name: librarian
-    static_headers: {Authorization: "Bearer <librarian caller key for the gateway>"}
+    static_headers: {Authorization: os.environ/LIBRARIAN_AGENT_AUTH}   # "Bearer <caller key>"; LiteLLM resolves os.environ/ here too
     extra_headers: ["x-principal-token"]
     agent_card_params:
       name: librarian

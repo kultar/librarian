@@ -3,8 +3,8 @@
 # Then set LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN to the Bot User OAuth Token (xoxb-...).
 display_information:
   name: librarian
-  description: Asks approvers for read-only API access on behalf of agents.
-  background_color: "#2b3a55"
+  description: Asks approvers to add API keys and approve writes for agents, and flags API changes.
+  background_color: "#2b3a67"
 features:
   bot_user:
     display_name: librarian
