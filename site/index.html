@@ -24,6 +24,7 @@
   </a>
   <nav class="nav" aria-label="Sections">
     <a href="#how">How it works</a>
+    <a href="#save">What agents save</a>
     <a href="#safe">Why it's safe</a>
     <a href="#start">Get started</a>
     <a href="#docs">Docs</a>
@@ -94,6 +95,21 @@ docker pull ghcr.io/kultar/librarian:0.13.1</code></pre></div>
       <li><div><h3>If the API needs a key, a person is asked once</h3><p>The agent's task waits and approvers get a Slack card. Someone follows the one-time link, signs in and pastes the key. It goes straight to your secret store, never through Slack, an agent or a model, and the task carries on by itself.</p></div></li>
       <li><div><h3>Writes wait for a person's approval, every time</h3><p>The approval page shows exactly what will be sent: method, path, arguments and body. Approve once, or allow similar writes with a narrow, expiring grant. DELETEs can only ever be approved one at a time.</p></div></li>
     </ol>
+  </div>
+</section>
+
+<section id="save">
+  <div class="wrap">
+    <h2>What your agents save</h2>
+    <p>librarian removes the overhead around an API call: tool bloat, rediscovery, oversized payloads, and the keys every agent would otherwise carry. It does not shrink an agent's own reasoning, and says so.</p>
+    <dl class="rules">
+      <div><dt>Six tools instead of hundreds</dt><dd>An agent with direct access carries an API's tool definitions in its context on every request; GitHub's spec alone has 644 operations. Through librarian an agent sees six tools and asks for the handful it needs.</dd></div>
+      <div><dt>Learning is paid once</dt><dd>Reading documentation, searching for it and extracting operations is the expensive model work. It runs once per API, with a model you choose for it, then serves every agent.</dd></div>
+      <div><dt>Most calls use no model at all</dt><dd>Running a known operation is plain code: policy check, HTTP call, provenance. A plain-language request costs one planner call, and a successful plan becomes a recipe replayed without the model.</dd></div>
+      <div><dt>Smaller answers</dt><dd>Field selection and a response-size cap return what the agent asked for, not a whole payload into its context. Pagination is handled on librarian's side.</dd></div>
+      <div><dt>Operations exist once</dt><dd>Credentials, rotation, retries, change detection and the audit trail live in one place instead of in every agent.</dd></div>
+      <div><dt>You can measure it</dt><dd>The audit log records every call with its byte count and whether a model was involved, so a week of real traffic shows the split between plain calls, recipes and planner calls.</dd></div>
+    </dl>
   </div>
 </section>
 

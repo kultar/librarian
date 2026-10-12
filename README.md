@@ -33,6 +33,26 @@ credential out.
 - **The LLM proposes, code decides.** The optional planner can suggest any call, but only the rule
   engine (no LLM) can approve it. No prompt can talk its way into a write.
 
+### What your agents save
+
+- **Six tools instead of hundreds.** An agent with direct access to an API carries that API's
+  tool definitions in its context on every request (GitHub's spec has 644 operations). Through
+  librarian an agent sees six tools and asks `capabilities` for the handful it needs.
+- **Learning is paid once.** Reading an API's documentation, searching for it and extracting its
+  operations is the expensive model work. It runs once per API, with a model of your choice
+  (`learning.model`), then serves every agent.
+- **Most calls use no model at all.** `execute` with a known operation is plain code: policy
+  check, HTTP call, provenance. Plain-language `fetch` costs one planner call, and a successful
+  plan is saved as a recipe and replayed without the model next time.
+- **Smaller answers.** Field selection and a response-size cap return the fields an agent asked
+  for, not a whole payload into its context; pagination is handled on librarian's side.
+- **Operations exist once.** Credentials, rotation, retries, change detection and the audit
+  trail live in one place instead of in every agent.
+
+What it does not shrink is an agent's own reasoning: librarian removes the overhead around the
+call, not the thinking before and after it. The audit log records every call with its byte count
+and whether a model was involved, so a week of real traffic shows the split.
+
 ## Get started
 
 | I want to... | Go to |
