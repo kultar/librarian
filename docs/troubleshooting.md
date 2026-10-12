@@ -105,9 +105,9 @@ commit as a person or exclude the App from the rule for a moment.
 ## Kubernetes
 
 **git-sync init container in `Init:CrashLoopBackOff`, printing its usage or
-`strconv.ParseInt: parsing "1.70648789e+08"`.**
+`strconv.ParseInt: parsing "9.87654321e+08"`.**
 Chart versions before 0.11.2 rendered a numeric `githubApp.installationId` (or `appId`) from a
-values file in scientific notation. Upgrade the chart, or quote the ids: `installationId: "170648789"`.
+values file in scientific notation. Upgrade the chart, or quote the ids: `installationId: "987654321"`.
 
 **The pod crashes with `port ... unable to parse string as an integer ... 'tcp://...'`.**
 Kubernetes put `LIBRARIAN_PORT=tcp://...` into the pod for a Service named `librarian`, which

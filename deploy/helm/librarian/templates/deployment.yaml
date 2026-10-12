@@ -9,7 +9,7 @@
 {{- fail "githubApp.appId, githubApp.installationId and githubApp.secretName are required when githubApp.enabled is true" -}}
 {{- end -}}
 {{- if and $app.enabled (or (not (int64 $app.appId)) (not (int64 $app.installationId))) -}}
-{{- fail (printf "githubApp.appId (%v) and githubApp.installationId (%v) must be whole numbers, e.g. installationId: \"170648789\"" $app.appId $app.installationId) -}}
+{{- fail (printf "githubApp.appId (%v) and githubApp.installationId (%v) must be whole numbers, e.g. installationId: \"987654321\"" $app.appId $app.installationId) -}}
 {{- end -}}
 {{- if and $app.enabled (not $git.enabled) -}}
 {{- fail "githubApp needs registry.gitSync.enabled (it is used for the registry repo)" -}}

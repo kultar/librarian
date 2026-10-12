@@ -77,7 +77,7 @@ registry:
 githubApp:
   enabled: false
   appId: ""                 # e.g. "123456" (quote them: YAML numbers this large render badly)
-  installationId: ""        # e.g. "170648789"
+  installationId: ""        # e.g. "987654321"
   secretName: ""            # Secret holding the App's private key
   secretKey: private-key.pem
 

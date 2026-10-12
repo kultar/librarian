@@ -1,13 +1,13 @@
 # Regression check (ci.yml): numeric GitHub App ids from a values FILE arrive as float64 and must
-# render whole, not as 1.70648789e+08 (which crash-looped git-sync).
+# render whole, not as 9.87654321e+08 (which crash-looped git-sync).
 registry:
   gitSync:
     enabled: true
     repo: https://github.com/acme/api-registry.git
 githubApp:
   enabled: true
-  appId: 5277502
-  installationId: 170648789
+  appId: 1234567
+  installationId: 987654321
   secretName: librarian-github-app
 replicaCount: 2
 persistence:
