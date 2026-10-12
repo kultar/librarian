@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 200" width="1040" height="200" role="img" aria-label="librarian: an API librarian for agents">
+  <g transform="translate(20 20) scale(0.3125)">
+    <rect width="512" height="512" rx="112" fill="#2b3a67"/>
+    <path d="M96 212Q176 192 240 236V404Q176 372 96 380Z" fill="#f6f4ee"/>
+    <path d="M416 212Q336 192 272 236V404Q336 372 416 380Z" fill="#f6f4ee"/>
+    <rect x="248" y="130" width="16" height="282" rx="8" fill="#d9a441"/>
+    <circle cx="256" cy="104" r="42" fill="#d9a441"/>
+  </g>
+  <text x="210" y="108" font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif" font-size="84" fill="#e9e7e0">librarian</text>
+  <text x="214" y="156" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" fill="#a3a8b8">One agent that learns APIs on demand and keeps the keys.</text>
+</svg>

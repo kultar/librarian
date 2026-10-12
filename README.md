@@ -1,4 +1,7 @@
-<p align="center"><a href="https://kultar.github.io/librarian/"><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/banner.svg" alt="librarian: one agent that learns APIs on demand and keeps the keys" width="760"></a></p>
+<p align="center"><a href="https://kultar.github.io/librarian/"><picture>
+<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/banner-dark.svg">
+<img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/banner.svg" alt="librarian: one agent that learns APIs on demand and keeps the keys" width="760">
+</picture></a></p>
 
 **An A2A agent that learns APIs on demand and gives other agents safe, audited access to them: reads freely within policy, writes only with human approval.**
 
