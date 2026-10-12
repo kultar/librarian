@@ -44,7 +44,7 @@ credential out.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.11.1
+docker pull ghcr.io/kultar/librarian:0.11.2
 ```
 
 ### What happens on a request
