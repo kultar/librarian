@@ -19,7 +19,7 @@ from urllib.parse import quote
 import httpx
 import yaml
 
-from librarian.registry.models import Access, ApiEntry
+from librarian.registry.models import Access, ApiEntry, EntryStatus
 from librarian.registry.store import dump_entry
 
 log = logging.getLogger(__name__)
@@ -49,6 +49,18 @@ class Publisher(Protocol):
 
     async def comment(self, api_id: str, text: str) -> list[str]:
         """Leave `text` on the API's open review proposals; returns their URLs."""
+        ...
+
+    async def refresh(self, entry: ApiEntry, note: str) -> str | None:
+        """Push the entry as a new commit onto its open proposal (with `note` as a
+        comment), so one pull request keeps carrying every decision; None when there
+        is no open proposal for it."""
+        ...
+
+    async def merge(self, api_id: str, by: str) -> str | None:
+        """Merge the API's open proposal as the App (an approver decided so); returns
+        its URL, or None when nothing is open. Raises PublishError when the repository's
+        rules refuse (then a person merges on GitHub)."""
         ...
 
 
@@ -142,6 +154,49 @@ class GitHubPublisher:
             closed.append(str(pr["html_url"]))
         return closed
 
+    async def refresh(self, entry: ApiEntry, note: str) -> str | None:
+        proposals = await self._open_proposals(entry.id)
+        if not proposals:
+            return None
+        pr = proposals[0]
+        branch = str(pr["head"]["ref"])
+        file_path = self._file_path(entry)
+        current = await self._call("GET", f"/contents/{quote(file_path)}", params={"ref": branch})
+        payload: dict[str, Any] = {
+            "message": note,
+            "content": base64.b64encode(dump_entry(as_approved(entry)).encode()).decode(),
+            "branch": branch,
+        }
+        if current.status_code == 200:
+            payload["sha"] = current.json()["sha"]
+        await self._call("PUT", f"/contents/{quote(file_path)}", json=payload)
+        await self._call("POST", f"/issues/{pr['number']}/comments", json={"body": note})
+        return str(pr["html_url"])
+
+    async def merge(self, api_id: str, by: str) -> str | None:
+        proposals = await self._open_proposals(api_id)
+        if not proposals:
+            return None
+        pr = proposals[0]
+        number = pr["number"]
+        await self._call(
+            "POST", f"/issues/{number}/comments", json={"body": f"Approved by {by} (librarian)."}
+        )
+        response = await self.client.request(
+            "PUT",
+            f"{self.api_url}/repos/{self.repo}/pulls/{number}/merge",
+            headers=await self._headers(),
+            json={"merge_method": "squash", "commit_title": str(pr.get("title") or "")[:200]},
+        )
+        if response.status_code not in (200, 201):
+            raise PublishError(
+                f"GitHub refused to merge {pr['html_url']} (HTTP {response.status_code}): "
+                "a repository rule may require something the App cannot give (a review, "
+                "a check); merge it on GitHub"
+            )
+        await self._call("DELETE", f"/git/refs/heads/{quote(str(pr['head']['ref']))}")
+        return str(pr["html_url"])
+
     async def comment(self, api_id: str, text: str) -> list[str]:
         urls: list[str] = []
         for pr in await self._open_proposals(api_id):
@@ -172,7 +227,7 @@ class GitHubPublisher:
 
         payload: dict[str, Any] = {
             "message": message,
-            "content": base64.b64encode(dump_entry(entry).encode()).decode(),
+            "content": base64.b64encode(dump_entry(as_approved(entry)).encode()).decode(),
             "branch": branch,
         }
         if existing.status_code == 200:
@@ -185,6 +240,15 @@ class GitHubPublisher:
             json={"title": title, "head": branch, "base": self.base_branch, "body": body},
         )
         return str(pr.json()["html_url"])
+
+
+def as_approved(entry: ApiEntry) -> ApiEntry:
+    """What a proposal contains: the entry as it will be once approved. Merging the pull
+    request IS the approval, so a provisional entry is proposed as verified; operations
+    whose access is unknown stay unknown (still refused) until a person decides them."""
+    if entry.status is EntryStatus.PROVISIONAL:
+        return entry.model_copy(update={"status": EntryStatus.VERIFIED})
+    return entry
 
 
 def _is_verified(content: dict[str, Any]) -> bool:

@@ -93,7 +93,8 @@ border-radius:8px;padding:10px 14px;margin:0 0 16px}
 .status{display:flex;align-items:center;gap:14px;margin:28px 0 8px}
 .status svg{width:44px;height:44px;flex:none}.status h1{margin:0}
 a{color:var(--link)}
-main.console,.top.console{max-width:1040px}main.console h2{margin-top:28px}
+main.console,.top.console,main.review,.top.review{max-width:1040px}
+main.console h2,main.review h2{margin-top:28px}
 th{text-align:left;font-weight:600;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);
 color:var(--muted);font-size:.9em}
 .tag{display:inline-block;font-size:12px;padding:3px 8px;border-radius:6px;background:var(--line)}
@@ -112,6 +113,7 @@ details table{margin:0 0 10px}.strip{color:var(--muted);margin:6px 0 14px}
 form.search{display:flex;gap:8px;align-items:center;margin:4px 0 16px}
 form.search input{margin:0;flex:1}
 form.search button{margin:0;width:auto;min-width:0}
+form.inline select{width:auto;display:inline-block;margin:0;padding:4px 8px;font-size:.9em}
 @media (max-width:480px){dl{grid-template-columns:1fr;gap:2px 0}dt{margin-top:8px}}
 """
 )
@@ -457,4 +459,5 @@ def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> li
 # Public names for the console (console.py), which shares this chrome and these rules.
 page = _page
 notice = _notice
+expired = _expired
 approver_identity = _approver

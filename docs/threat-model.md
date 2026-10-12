@@ -112,6 +112,11 @@ cannot submit it for them, and each action is written to the audit log with who 
 Re-learning goes through the normal onboarding path (provisional entry, review pull request);
 verified entries only change through the registry repo.
 
+The review of a learned API works the same way: a one-time link to a page where a signed-in
+approver approves (librarian merges the proposal as the App) or denies. The proposal is written
+as `status: verified`, so merging is the approval; operations whose access is unknown stay
+unknown, hence refused, until a person decides them on that page or in the console.
+
 ### T5. Approval-link abuse
 - Links are HMAC tokens bound to one request, valid only while it is pending and until expiry,
   and dead after use. Pages are `no-store`, `no-referrer`, framed-denied, CSP-restricted.

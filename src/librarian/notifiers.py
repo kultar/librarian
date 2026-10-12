@@ -104,6 +104,14 @@ class WebhookNotifier(Notifier):
             },
         )
 
+    async def review_opened(self, review: Any, link: str) -> None:
+        await self._post_write(
+            "review.opened", {"review": review.model_dump(mode="json"), "link": link}
+        )
+
+    async def review_closed(self, review: Any) -> None:
+        await self._post_write("review.closed", {"review": review.model_dump(mode="json")})
+
     async def grant_used(self, grant: Grant, approval_like: WriteApproval) -> None:
         await self._post_write(
             "grant.used",
@@ -304,6 +312,100 @@ class SlackNotifier(Notifier):
                 "text": api_learned_text(api, name, learned_by, summary, link, warnings, error),
             },
         )
+
+    async def review_opened(self, review: Any, link: str) -> None:
+        self._links[review.id] = link
+        data = await self._call(
+            "chat.postMessage",
+            {
+                "channel": review.channel or self.default_channel,
+                "text": f"New API to review: {review.api_name}",
+                "blocks": review_blocks(review, link),
+            },
+        )
+        if data.get("ok"):
+            review.notifier_ref = {"channel": str(data["channel"]), "ts": str(data["ts"])}
+
+    async def review_closed(self, review: Any) -> None:
+        ref = review.notifier_ref
+        if not ref:
+            return
+        await self._call(
+            "chat.update",
+            {
+                "channel": ref["channel"],
+                "ts": ref["ts"],
+                "text": review_outcome_text(review),
+                "blocks": review_blocks(review, None),
+            },
+        )
+        await self._call(
+            "chat.postMessage",
+            {
+                "channel": ref["channel"],
+                "thread_ts": ref["ts"],
+                "text": review_outcome_text(review),
+            },
+        )
+
+
+def review_outcome_text(review: Any) -> str:
+    icon = {"approved": ":white_check_mark:", "denied": ":no_entry:"}.get(
+        str(review.state), ":pencil2:"
+    )
+    who = f" by {review.decided_by}" if review.decided_by else ""
+    note = f" · {review.note}" if review.note else ""
+    return f"{icon} {review.api_name} review {review.state}{who}{note}"
+
+
+def review_blocks(review: Any, link: str | None) -> list[dict[str, Any]]:
+    """Block Kit card for a learned API awaiting approval."""
+    pending = str(review.state) == "pending"
+    title = (
+        f":books: New API to review: {review.api_name}" if pending else review_outcome_text(review)
+    )
+    fields = [
+        f"*Site:*\n{review.host}",
+        f"*Learned by:*\n{review.learned_by}",
+        f"*What:*\n{review.summary}",
+        f"*Authentication:*\n{review.auth}",
+    ]
+    if review.needs_review:
+        fields.append(f"*Need a decision:*\n{len(review.needs_review)} operation(s)")
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
+        {"type": "section", "fields": [{"type": "mrkdwn", "text": f} for f in fields[:10]]},
+    ]
+    for warning in list(review.warnings)[:3]:
+        blocks.append(
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": f":warning: {warning}"}]}
+        )
+    if pending and link:
+        group = mention(review.approver_group)
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (f"{group} " if group else "")
+                    + "Approve merges the proposal as the App and the API becomes verified; "
+                    "deny closes it and drops the API.",
+                },
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Review"},
+                    "url": link,
+                    "style": "primary",
+                },
+            }
+        )
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"<{review.review_url}|The pull request>"}],
+        }
+    )
+    return blocks
 
 
 def api_learned_text(

@@ -76,8 +76,10 @@ from librarian.registry.models import (
     EntryStatus,
     NoAuth,
     Operation,
+    ReadBasis,
 )
 from librarian.registry.store import Registry
+from librarian.reviews import ReviewBroker, ReviewRequest, ReviewState
 from librarian.secrets import (
     AwsSecretsManagerStore,
     ChainSecretStore,
@@ -308,6 +310,16 @@ class Librarian:
         self.search_model: Model | str | None = learning_model
         self.executor.on_unexpected_auth = self._settle_auth_after_401
         self._auth_notified: set[str] = set()
+        slack = settings.notifier.slack if settings.notifier.type == "slack" else None
+        self.reviews = ReviewBroker(
+            self.notifier,
+            self.audit,
+            public_url=settings.public_url,
+            signing_key=pysecrets.token_bytes(32),
+            default_channel=slack.channel if slack else None,
+            default_approver_group=slack.approver_group if slack else None,
+            store=self.state,
+        )
         self._last_hashes: dict[str, str] = {}  # without a database
         # Fetches specs and docs pages (a fresh client each time: they are rare).
         self.source_client_factory: Callable[[], httpx.AsyncClient] = lambda: httpx.AsyncClient(
@@ -342,6 +354,8 @@ class Librarian:
         key = await self._signing_key()
         self.broker.set_signing_key(key)
         self.approvals.set_signing_key(key)
+        self.reviews.set_signing_key(key)
+        await self.reviews.restore()
 
     async def _signing_key(self) -> bytes:
         ref = self.settings.signing_key_ref
@@ -731,22 +745,88 @@ class Librarian:
         )
         summary = (
             f"{len(entry.operations)} operations ({reads} reads, {review} need review) from "
-            f"{_learned_from(entry)}; auth: {_auth_words(entry)}"
+            f"{_learned_from(entry)}"
         )
+        all_warnings = warnings + ([internal] if internal else [])
         try:
-            await self.notifier.api_learned(
-                entry.id,
-                entry.name,
-                caller.principal or caller.agent,
-                summary,
-                review_url,
-                entry.owners.channel,
-                warnings + ([internal] if internal else []),
-                review_error,
-            )
+            if review_url:
+                # The approve-or-deny step: a card with a link to the review page.
+                await self.reviews.open(
+                    api=entry.id,
+                    api_name=entry.name,
+                    host=entry.host,
+                    review_url=review_url,
+                    learned_by=caller.principal or caller.agent,
+                    summary=summary,
+                    auth=_auth_words(entry),
+                    warnings=all_warnings,
+                    needs_review=[op.id for op in entry.operations if op.access is Access.UNKNOWN],
+                    channel=entry.owners.channel,
+                    approver_group=entry.owners.approver_group,
+                )
+            else:
+                await self.notifier.api_learned(
+                    entry.id,
+                    entry.name,
+                    caller.principal or caller.agent,
+                    f"{summary}; auth: {_auth_words(entry)}",
+                    None,
+                    entry.owners.channel,
+                    all_warnings,
+                    review_error,
+                )
         except Exception as exc:  # a broken notifier must not undo a successful onboarding
             log.warning("could not announce the learned API %s: %s", api_id, exc)
         return OnboardResult(entry, path, reads, review, review_url, review_error)
+
+    async def approve_review(
+        self, review_id: str, by: str, decisions: dict[str, str]
+    ) -> tuple[ReviewRequest, str | None]:
+        """Apply the person's decisions on operations, then merge the proposal as the
+        App. Returns the review and, when GitHub refused the merge, why (the review stays
+        open so the person can merge on GitHub)."""
+        review = await self.reviews.load(review_id)
+        if review is None or review.state is not ReviewState.PENDING:
+            raise LookupError(f"review {review_id!r} is not pending")
+        for op_id, choice in decisions.items():
+            if op_id in review.needs_review:
+                await self.set_operation_access(review.api, op_id, choice, by)
+        if self.publisher is None:
+            raise LibrarianError("no registry publisher is configured")
+        try:
+            merged = await self.publisher.merge(review.api, by)
+        except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+            await self.audit.record(
+                AuditEvent(
+                    event="review_merge_failed",
+                    caller="console",
+                    principal=by,
+                    api=review.api,
+                    detail=str(exc)[:500],
+                )
+            )
+            return review, str(exc)
+        note = "merged; verified once the registry syncs" if merged else "nothing left to merge"
+        return await self.reviews.decide(review_id, ReviewState.APPROVED, by, note), None
+
+    async def deny_review(self, review_id: str, by: str) -> ReviewRequest:
+        """Close the proposal and drop the API (a person said no)."""
+        review = await self.reviews.load(review_id)
+        if review is None or review.state is not ReviewState.PENDING:
+            raise LookupError(f"review {review_id!r} is not pending")
+        entry = self.registry.get(review.api)
+        note = "closed"
+        if entry is not None and entry.status is EntryStatus.PROVISIONAL:
+            report = await self.forget(review.api, by, close_review=False)  # closes the PR too
+            note = "closed and the API forgotten"
+            if report.review_error:
+                note += f" (could not close the proposal: {report.review_error})"
+        elif self.publisher is not None:
+            try:
+                await self.publisher.withdraw(review.api, f"Denied by {by} (librarian).")
+            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+                note = f"could not close the proposal: {exc}"
+        return await self.reviews.decide(review_id, ReviewState.DENIED, by, note)
 
     async def _settle_auth(self, entry: ApiEntry) -> tuple[ApiEntry, list[str]]:
         """A spec that declares no authentication is common even for APIs that need a key
@@ -771,11 +851,21 @@ class Librarian:
                 "No authentication in the spec, and the model could not tell what this API "
                 "uses. If calls answer 401, choose the authentication in the console."
             ]
-        return self._with_auth(entry, auth, "inferred from the model's knowledge"), []
+        return self._with_auth(entry, auth, "inferred from the model's knowledge", extracted), []
 
-    def _with_auth(self, entry: ApiEntry, auth: Any, how: str) -> ApiEntry:
+    def _with_auth(
+        self, entry: ApiEntry, auth: Any, how: str, extracted: ExtractedApi | None = None
+    ) -> ApiEntry:
         validation = guess_validation_operation(entry.operations)
-        guidance = entry.credential.model_copy(update={"validation_operation": validation})
+        update: dict[str, Any] = {"validation_operation": validation}
+        if extracted is not None:
+            if extracted.credential_url and extracted.credential_url.startswith("https://"):
+                update["create_url"] = extracted.credential_url[:500]
+            if extracted.scopes:
+                update["scopes"] = [s[:100] for s in extracted.scopes[:20]]
+            if extracted.credential_instructions:
+                update["instructions"] = extracted.credential_instructions[:400]
+        guidance = entry.credential.model_copy(update=update)
         note = (
             f"\nAuthentication {how} (the spec declares none): {auth.type}. "
             "Approve if that is right; librarian asks for the key when it is first needed."
@@ -807,16 +897,11 @@ class Librarian:
                 raise LibrarianError("that authentication needs a valid header or query name")
             updated = self._with_auth(entry, auth, f"chosen by {by}")
         await self.registry.save(updated)
-        link = None
-        if self.publisher is not None:
-            try:
-                link = await self.publisher.propose_update(
-                    updated,
-                    f"{updated.name}: authentication {scheme}",
-                    f"{by} set the authentication to {scheme} in the console.",
-                )
-            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-                log.warning("could not open a review for %s: %s", api_id, exc)
+        link = await self._propose(
+            updated,
+            f"{updated.name}: authentication {scheme}",
+            f"{by} set the authentication to {scheme} in the console.",
+        )
         await self.audit.record(
             AuditEvent(
                 event="auth_set",
@@ -825,6 +910,69 @@ class Librarian:
                 api=api_id,
                 detail=scheme,
                 extra={"review_url": link},
+            )
+        )
+        return updated, link
+
+    async def _propose(self, entry: ApiEntry, title: str, body: str) -> str | None:
+        """Carry a decision into the entry's review: a new commit on its open proposal
+        when there is one (one pull request per entry, approve or deny), else a new
+        proposal. None when no review could be opened (logged)."""
+        if self.publisher is None:
+            return None
+        try:
+            link = await self.publisher.refresh(entry, f"{title}\n\n{body}")
+            if link is None:
+                link = await self.publisher.propose_update(entry, title, body)
+            return link
+        except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+            log.warning("could not carry %s into a review: %s", entry.id, exc)
+            return None
+
+    async def set_operation_access(
+        self, api_id: str, op_id: str, choice: str, by: str
+    ) -> tuple[ApiEntry, str | None]:
+        """A person decided what an operation with unknown access is: `read` (safe to
+        call), `write` (needs approval each time) or `exclude` (agents may not call it).
+        Provisional entries change at once and the decision is carried into the open
+        review; verified entries only get a proposal."""
+        entry = self.registry.get(api_id)
+        if entry is None:
+            raise LibrarianError(f"unknown API {api_id!r}")
+        op = entry.operation(op_id)
+        if op is None:
+            raise LibrarianError(f"{api_id!r} has no operation {op_id!r}")
+        if choice == "read":
+            changed = op.model_copy(
+                update={"access": Access.READ, "read_basis": ReadBasis.REVIEWED}
+            )
+        elif choice == "write":
+            changed = op.model_copy(update={"access": Access.WRITE, "writable": True})
+        elif choice == "exclude":
+            changed = op.model_copy(update={"access": Access.WRITE, "writable": False})
+        else:
+            raise LibrarianError("the choice is read, write or exclude")
+        operations = [changed if o.id == op_id else o for o in entry.operations]
+        note = f"\n{by} marked `{op_id}` as {choice} in the console."
+        updated = entry.model_copy(
+            update={"operations": operations, "notes": (entry.notes + note)[:8000]}
+        )
+        if entry.status is EntryStatus.PROVISIONAL:
+            await self.registry.save(updated)
+        link = await self._propose(
+            updated,
+            f"{entry.name}: {op_id} is {choice}",
+            f"{by} decided in the console that `{op_id}` is {choice}.",
+        )
+        await self.audit.record(
+            AuditEvent(
+                event="operation_access_set",
+                caller="console",
+                principal=by,
+                api=api_id,
+                operation=op_id,
+                detail=choice,
+                extra={"review_url": link, "applied": entry.status is EntryStatus.PROVISIONAL},
             )
         )
         return updated, link
@@ -841,7 +989,7 @@ class Librarian:
                 )
                 auth = auth_from_extracted(extracted, f"{entry.id}/readonly")
                 if not isinstance(auth, NoAuth):
-                    inferred = self._with_auth(entry, auth, "inferred after a 401")
+                    inferred = self._with_auth(entry, auth, "inferred after a 401", extracted)
             except (ContentFilterError, ModelAPIError, UnexpectedModelBehavior) as exc:
                 log.warning("could not infer %s's authentication: %s", entry.id, exc)
         if inferred is not None and entry.status is EntryStatus.PROVISIONAL:
@@ -1108,11 +1256,14 @@ class Librarian:
         )
         return entry
 
-    async def forget(self, api_id: str, by: str) -> ForgetReport:
+    async def forget(self, api_id: str, by: str, *, close_review: bool = True) -> ForgetReport:
         """Drop a learned API altogether: the entry, what was observed about it, anything
         waiting on a person for it, and its open review proposals (closed as the App).
         The next agent that needs it teaches it again."""
         report = ForgetReport()
+        review = self.reviews.pending_for(api_id)
+        if review is not None and close_review:
+            await self.reviews.decide(review.id, ReviewState.DENIED, by, "the API was forgotten")
         pending = self.broker.pending_for(api_id)
         if pending is not None:
             await self.broker.deny(pending.id, by)

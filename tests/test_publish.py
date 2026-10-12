@@ -21,6 +21,7 @@ class FakeGitHub:
         self.calls: list[tuple[str, str, Any]] = []
         self.file_exists = file_exists
         self.existing_status = existing_status
+        self.merge_blocked = False
         self.open_pulls: list[dict[str, Any]] = [
             {
                 "number": 7,
@@ -56,6 +57,12 @@ class FakeGitHub:
             return httpx.Response(200, json=self.open_pulls)
         if request.method == "POST" and path.startswith("/issues/"):
             return httpx.Response(201, json={})
+        if request.method == "PUT" and path.endswith("/merge"):
+            if self.merge_blocked:
+                return httpx.Response(405, json={"message": "Base branch requires a review"})
+            number = int(path.split("/")[2])
+            self.open_pulls = [p for p in self.open_pulls if p["number"] != number]
+            return httpx.Response(200, json={"merged": True})
         if request.method == "PATCH" and path.startswith("/pulls/"):
             self.open_pulls = [p for p in self.open_pulls if f"/pulls/{p['number']}" != path]
             return httpx.Response(200, json={})
@@ -90,7 +97,9 @@ async def test_publish_opens_pull_request() -> None:
     assert put["branch"] == branch_ref.removeprefix("refs/heads/")
     assert "sha" not in put  # new file
     content = yaml.safe_load(base64.b64decode(put["content"]))
-    assert content["id"] == "jira" and content["status"] == "provisional"
+    # the merge is the approval: the proposal already says verified (librarian keeps
+    # using its provisional copy until then; unknown-access operations stay unknown)
+    assert content["id"] == "jira" and content["status"] == "verified"
     pr = fake.calls[-1][2]
     assert pr["base"] == "main" and "release-notes-agent" in pr["body"]
 
@@ -145,6 +154,12 @@ async def test_onboard_publishes_and_survives_publish_failure(
             raise PublishError("GitHub is down")
 
         async def comment(self, api_id: str, text: str) -> list[str]:
+            raise PublishError("GitHub is down")
+
+        async def refresh(self, entry: Any, note: str) -> str | None:
+            raise PublishError("GitHub is down")
+
+        async def merge(self, api_id: str, by: str) -> str | None:
             raise PublishError("GitHub is down")
 
     librarian.publisher = Failing()
@@ -211,3 +226,16 @@ async def test_withdraw_closes_only_the_apis_open_proposals() -> None:
     assert await publisher(fake).comment("other", "note") == [
         "https://github.com/acme/registry/pull/8"
     ]
+
+
+async def test_refresh_commits_onto_the_open_proposal() -> None:
+    fake = FakeGitHub(file_exists=True)
+    entry = entry_from_spec(SPEC, api_id="jira")
+    url = await publisher(fake).refresh(entry, "sam decided searchIssues is read")
+    assert url == "https://github.com/acme/registry/pull/7"
+    put = next(c for c in fake.calls if c[0] == "PUT")
+    assert put[2]["branch"] == "librarian/onboard-jira-20261012" and put[2]["sha"] == "old-sha"
+    assert ("POST", "/issues/7/comments") in [(m, p) for m, p, _ in fake.calls]
+    assert not any(p == "/pulls" and m == "POST" for m, p, _ in fake.calls)  # no new PR
+    other = entry_from_spec(SPEC, api_id="nothing-open")
+    assert await publisher(fake).refresh(other, "note") is None

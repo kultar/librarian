@@ -178,7 +178,7 @@ def entry_from_spec(
     if review:
         notes.append(
             "Needs review: these POST operations look like reads but are blocked until a "
-            "human marks them `access: read` + `read_basis: reviewed`: " + ", ".join(review[:50])
+            "person decides them (read, write or exclude) in the console: " + ", ".join(review[:50])
         )
     if auth_note:
         notes.append(auth_note)

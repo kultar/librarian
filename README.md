@@ -269,10 +269,13 @@ agent gets a token for librarian on a user's behalf is covered in
 2. Set `notifier.type: slack`, the bot token (`LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN`), a channel,
    and optionally an approver user-group ID (rendered as a real @mention).
 
-Every API learned on demand is announced too: a summary, the authentication it will use, the
-review link, and anything to check (or why no review could be opened). Approvers get one card
-per API that needs a key (deduplicated, with a live "waiting" count) and a **Review request**
-button that opens the secure page: *add a key*, *use an existing secret*, or *deny*. The card
+Every API learned on demand gets a **review card**: what was learned, the authentication it
+will use, anything to check, and a **Review** button that opens a signed-in page where an
+approver sees the proposal, decides any operations that need it (read, write or exclude), and
+**approves** (the pull request is merged as the App and the API becomes verified) or **denies**
+(it is closed and the API forgotten). The card is updated with the outcome and who decided.
+Approvers also get one card per API that needs a key (deduplicated, with a live "waiting"
+count) and a **Review request** button that opens the secure page: *add a key*, *use an existing secret*, or *deny*. The card
 updates in place and the outcome is posted in the thread. The key itself never goes through Slack.
 
 No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
@@ -281,11 +284,12 @@ No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 
 The pages listener's root (`/`) is a console for the people who run librarian: every API it
 knows (status, host, operations and where they were learned from), what is waiting on a person
-(keys to add, writes to approve, with the links), and the standing grants. It shows credential
+(keys to add, writes to approve, proposals to review, with the links), and the standing grants. It shows credential
 *references* only, never values. From there a signed-in approver can **revoke a grant**,
 **block** or **unblock** an API, **forget** a learned one (its open review is closed as the App, and whatever waited on a
 person for it is cancelled), **invalidate a credential** (the next call asks for a fresh key), **re-learn** a provisional API from a documentation or spec URL you
-give it, **choose its authentication** when the spec and the model couldn't tell, **re-check**
+give it, **choose its authentication** when the spec and the model couldn't tell, **decide operations
+that need review** (read, write or exclude; carried into the open review), **re-check**
 its source, and **clear a suspension**. Large APIs are shown by group (the spec's tags), with the
 operations that need attention first and a search box. Every action is recorded in the
 audit log with who did it. The console follows the approval pages' sign-in
@@ -343,7 +347,9 @@ as **provisional**:
 
 - GET/HEAD operations are reads and usable immediately.
 - POST operations that look like searches are marked `unknown` and blocked until a human sets
-  `access: read` + `read_basis: reviewed` **and** the entry is `verified`.
+  `access: read` + `read_basis: reviewed` **and** the entry is `verified`. Nobody edits that by
+  hand: the console lists these operations under *Needs attention* with a read / write /
+  exclude choice, and the decision is carried into the entry's open review pull request.
 - Everything else is a write: refused unless a reviewer enables it (see [Writes](#writes)).
 
 **Review loop.** With `publish.type: github`, every learned API is also opened as a pull request

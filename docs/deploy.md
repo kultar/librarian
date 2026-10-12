@@ -154,7 +154,8 @@ branches unprotected. A code-owner rule does nothing until the repo has a `CODEO
 ## 3. Sign-in for the approval pages
 
 Approval links open librarian's pages through oauth2-proxy, so every decision records a real
-person, and only members of your approver group can add keys.
+person, and only members of your approver group can add keys, approve writes, or approve a
+learned API's review (which merges its pull request as the App).
 
 1. In your identity provider, create an OIDC web application:
    - redirect URI: `https://librarian.example.com/oauth2/callback` (your pages hostname)

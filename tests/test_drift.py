@@ -84,6 +84,12 @@ class Proposals:
     async def comment(self, api_id: str, text: str) -> list[str]:
         return []
 
+    async def refresh(self, entry: ApiEntry, note: str) -> str | None:
+        return None
+
+    async def merge(self, api_id: str, by: str) -> str | None:
+        return None
+
 
 @pytest.fixture
 def spec(router: Router, librarian: Librarian) -> Spec:

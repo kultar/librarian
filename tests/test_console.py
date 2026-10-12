@@ -284,3 +284,104 @@ async def test_large_apis_are_grouped_searchable_and_flag_attention(librarian: L
     small = c.get("/apis/tracker").text
     assert "<details" not in small and "name=q" not in small  # few operations: one table
     assert "Big API" in c.get("/?q=big").text and "Issue Tracker" not in c.get("/?q=big").text
+
+
+class DecisionPublisher:
+    """Records what the console carried into reviews."""
+
+    def __init__(self, open_for: set[str]) -> None:
+        self.open_for = open_for
+        self.refreshed: list[tuple[str, str]] = []
+        self.proposed: list[tuple[str, str]] = []
+
+    async def publish(self, entry: Any, learned_by: str) -> str:
+        return "https://github.test/pr/new"
+
+    async def propose_update(self, entry: Any, title: str, body: str) -> str:
+        self.proposed.append((entry.id, title))
+        return "https://github.test/pr/update"
+
+    async def withdraw(self, api_id: str, reason: str) -> list[str]:
+        return []
+
+    async def comment(self, api_id: str, text: str) -> list[str]:
+        return []
+
+    async def refresh(self, entry: Any, note: str) -> str | None:
+        if entry.id in self.open_for:
+            self.refreshed.append((entry.id, note))
+            return "https://github.test/pr/open"
+        return None
+
+    async def merge(self, api_id: str, by: str) -> str | None:
+        return "https://github.test/pr/open" if api_id in self.open_for else None
+
+
+async def test_needs_review_operations_are_decided_in_the_console(
+    librarian: Librarian, audit: MemoryAuditSink
+) -> None:
+    from librarian.registry.models import Access, ApiEntry, ReadBasis
+
+    librarian.settings.approvers.console = "open"
+    pub = DecisionPublisher(open_for={"learned"})
+    librarian.publisher = pub
+    ops = [
+        {"id": "search", "method": "POST", "path": "/search", "access": "unknown"},
+        {"id": "bulk", "method": "POST", "path": "/bulk", "access": "unknown"},
+        {"id": "purge", "method": "POST", "path": "/purge", "access": "unknown"},
+    ]
+    learned = ApiEntry.model_validate(
+        {
+            "id": "learned",
+            "name": "Learned",
+            "base_url": "https://l.example.test",
+            "operations": ops,
+        }
+    )
+    await librarian.registry.save(learned)
+    c = console(librarian)
+    t = token(librarian)
+    page = c.get("/apis/learned").text
+    assert page.count("/ops/") == 3 and "exclude: agents may not call it" in page
+    done = c.post("/apis/learned/ops/search/access", data={"t": t, "choice": "read"})
+    assert done.status_code == 200 and "Applied now" in done.text and "pr/open" in done.text
+    assert (
+        c.post("/apis/learned/ops/bulk/access", data={"t": t, "choice": "write"}).status_code == 200
+    )
+    assert (
+        c.post("/apis/learned/ops/purge/access", data={"t": t, "choice": "exclude"}).status_code
+        == 200
+    )
+    entry = librarian.registry.get("learned")
+    assert entry is not None
+    search, bulk, purge = (entry.operation(i) for i in ("search", "bulk", "purge"))
+    assert search and search.access is Access.READ and search.read_basis is ReadBasis.REVIEWED
+    assert bulk and bulk.access is Access.WRITE and bulk.writable
+    assert purge and purge.access is Access.WRITE and not purge.writable
+    assert "marked `search` as read" in entry.notes
+    assert [r[0] for r in pub.refreshed] == ["learned"] * 3 and pub.proposed == []  # one PR
+    assert audit.events[-1].event == "operation_access_set" and audit.events[-1].detail == "exclude"
+    assert "/ops/" not in c.get("/apis/learned").text  # nothing left to decide
+    assert (
+        c.post("/apis/learned/ops/search/access", data={"t": t, "choice": "maybe"}).status_code
+        == 400
+    )
+    assert (
+        c.post("/apis/learned/ops/nope/access", data={"t": t, "choice": "read"}).status_code == 400
+    )
+    # a verified entry is only proposed: the live entry does not change
+    tracker = librarian.registry.get("tracker")
+    assert tracker is not None
+    unknown = tracker.operations[0].model_copy(
+        update={"id": "mystery", "access": Access.UNKNOWN, "method": "POST"}
+    )
+    await librarian.registry.save(
+        tracker.model_copy(update={"operations": [*tracker.operations, unknown]})
+    )
+    done = c.post("/apis/tracker/ops/mystery/access", data={"t": t, "choice": "read"})
+    assert done.status_code == 200 and "Proposed for review" in done.text
+    tracker = librarian.registry.get("tracker")
+    assert tracker is not None
+    mystery = tracker.operation("mystery")
+    assert mystery is not None and mystery.access is Access.UNKNOWN  # unchanged until merged
+    assert pub.proposed == [("tracker", "Issue Tracker: mystery is read")]

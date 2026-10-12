@@ -152,6 +152,23 @@ class Notifier:
             f"\n  NO REVIEW OPENED: {error}" if error else "",
         )
 
+    async def review_opened(self, review: Any, link: str) -> None:
+        """A learned API awaits approval: merge its review as the App, or deny."""
+        log.warning(
+            "review needed for %s (%s): %s; auth %s; decide at %s (pull request %s)",
+            review.api,
+            review.api_name,
+            review.summary,
+            review.auth,
+            link,
+            review.review_url,
+        )
+
+    async def review_closed(self, review: Any) -> None:
+        log.info(
+            "review of %s %s by %s: %s", review.api, review.state, review.decided_by, review.note
+        )
+
 
 class RequestStore(Protocol):
     """Durable storage for requests (see `librarian.state.StateStore`)."""

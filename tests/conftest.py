@@ -118,6 +118,7 @@ OPEN: dict[str, Any] = {
 class RecordingNotifier(Notifier):
     def __init__(self) -> None:
         self.learned: list[dict[str, Any]] = []
+        self.reviews: list[tuple[str, Any, str | None]] = []
         self.opened_links: list[str] = []
         self.events: list[tuple[str, CredentialRequest]] = []
         self.write_links: list[str] = []
@@ -143,6 +144,12 @@ class RecordingNotifier(Notifier):
 
     async def grant_used(self, grant: Any, approval_like: Any) -> None:
         self.write_events.append(("grant_used", grant))
+
+    async def review_opened(self, review: Any, link: str) -> None:
+        self.reviews.append(("opened", review, link))
+
+    async def review_closed(self, review: Any) -> None:
+        self.reviews.append(("closed", review, None))
 
     async def api_learned(
         self,

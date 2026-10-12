@@ -141,7 +141,9 @@ issue. This keeps large responses under the size cap and saves LLM context.
    configured, a pull request with a review checklist is opened automatically.
 2. **Review**: a human checks base URL, auth, and any operations to promote, then sets
    `status: verified` in the pull request. Once merged and synced, the running librarian
-   hot-reloads the file. Branch protection on `main` (pull requests only, approving reviews,
+   hot-reloads the file. The review is approve or deny: the authentication and the operations
+   that need a decision are settled in the console, and each decision lands as a commit on
+   the open pull request. Branch protection on `main` (pull requests only, approving reviews,
    code owners) is compatible: librarian pushes only `librarian/*` branches, which must stay
    unprotected so the App can create them.
 3. **Block**: denying a credential request sets `status: blocked` so agents stop asking.

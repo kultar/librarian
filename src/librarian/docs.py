@@ -82,6 +82,9 @@ KNOWLEDGE_INSTRUCTIONS = """\
 You describe well-known HTTP APIs from your own knowledge, as structured data.
 List the read operations (GET) you are confident exist for the API named below,
 relative to the given base URL, with their parameters, plus the authentication scheme.
+Also say where a person creates a credential for it (credential_url), the minimal
+read-only scopes or permissions those operations need (scopes), and one sentence of
+instructions (credential_instructions), preferring fine-grained or read-only tokens.
 Prefer a few operations you are sure of over many guesses. Leave evidence empty.
 """
 
@@ -111,6 +114,15 @@ class ExtractedApi(BaseModel):
     )
     auth_key_name: str | None = Field(
         default=None, description="header or query parameter name for api_key auth"
+    )
+    credential_url: str | None = Field(
+        default=None, description="where a person creates a credential, if known"
+    )
+    scopes: list[str] = Field(
+        default_factory=list[str], description="minimal read-only scopes or permissions"
+    )
+    credential_instructions: str = Field(
+        default="", max_length=400, description="one sentence for the person adding the key"
     )
     operations: list[ExtractedOperation] = Field(default_factory=list[ExtractedOperation])
 

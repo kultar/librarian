@@ -27,8 +27,9 @@ from librarian.credentials import CredentialRequest, RequestState
 from librarian.opsearch import rank, tokens
 from librarian.registry.models import Access, ApiEntry, EntryStatus, Operation
 from librarian.registry.store import RegistryError
+from librarian.reviews import ReviewRequest
 from librarian.service import Librarian, LibrarianError
-from librarian.web import approver_identity, notice, page
+from librarian.web import approver_identity, expired, notice, page
 
 e = html.escape
 
@@ -145,6 +146,7 @@ def _overview(
     query: str = "",
 ) -> str:
     entries = librarian.registry.all()
+    reviews = librarian.reviews.pending()
     total = len(entries)
     if query:
         needle = query.lower()
@@ -152,20 +154,30 @@ def _overview(
             x for x in entries if needle in f"{x.id} {x.name} {x.host} {x.description}".lower()
         ]
     grants = [g for g in librarian.approvals.grants() if g.usable(datetime.now(UTC))]
-    if credentials or approvals:
-        rows = "".join(
-            f"<tr><td>Key for <b>{e(r.api_name)}</b> <span class=muted>({e(r.host)})</span></td>"
-            f"<td>{e(', '.join(r.requested_by) or 'an agent')}</td>"
-            f"<td>{r.waiting} waiting, {_when(r.created_at)}</td>"
-            f"<td><a href='{e(librarian.broker.link(r))}'>Review</a></td></tr>"
-            for r in credentials
-        ) + "".join(
-            f"<tr><td>Write to <b>{e(a.api_name)}</b>: {_method_text(a)}"
-            f"<code>{e(a.operation)}</code></td>"
-            f"<td>{e(a.agent)}{' for ' + e(a.principal) if a.principal else ''}</td>"
-            f"<td>{_when(a.created_at)}</td>"
-            f"<td><a href='{e(librarian.approvals.link(a))}'>Review</a></td></tr>"
-            for a in approvals
+    if credentials or approvals or reviews:
+        rows = (
+            "".join(
+                f"<tr><td>Review <b>{e(r.api_name)}</b>: {e(r.summary)}</td>"
+                f"<td>{e(r.learned_by)}</td><td>{_when(r.created_at)}</td>"
+                f"<td><a href='{e(librarian.reviews.link(r))}'>Review</a></td></tr>"
+                for r in reviews
+            )
+            + "".join(
+                f"<tr><td>Key for <b>{e(r.api_name)}</b> "
+                f"<span class=muted>({e(r.host)})</span></td>"
+                f"<td>{e(', '.join(r.requested_by) or 'an agent')}</td>"
+                f"<td>{r.waiting} waiting, {_when(r.created_at)}</td>"
+                f"<td><a href='{e(librarian.broker.link(r))}'>Review</a></td></tr>"
+                for r in credentials
+            )
+            + "".join(
+                f"<tr><td>Write to <b>{e(a.api_name)}</b>: {_method_text(a)}"
+                f"<code>{e(a.operation)}</code></td>"
+                f"<td>{e(a.agent)}{' for ' + e(a.principal) if a.principal else ''}</td>"
+                f"<td>{_when(a.created_at)}</td>"
+                f"<td><a href='{e(librarian.approvals.link(a))}'>Review</a></td></tr>"
+                for a in approvals
+            )
         )
         waiting = (
             f"<table><tr><th>What</th><th>Who asked</th><th>Since</th><th></th></tr>{rows}</table>"
@@ -211,7 +223,8 @@ def _overview(
         else "<p class=muted>No standing grants: every write is approved one by one.</p>"
     )
     return f"""<h1>What librarian knows</h1>
-<p class=lede>{_n(total, "API")}, {len(credentials) + len(approvals)} waiting on a person,
+<p class=lede>{_n(total, "API")}, {len(credentials) + len(approvals) + len(reviews)} waiting on a
+person,
 {_n(len(grants), "standing grant")}.</p>
 <h2>Waiting on a person</h2>{waiting}
 <h2>APIs</h2>{errors}{apis}
@@ -264,6 +277,16 @@ def _detail(librarian: Librarian, entry: ApiEntry, token: str, query: str = "") 
                 "Waiting",
                 f"a key, asked {_when(pending.created_at)}: "
                 f"<a href='{e(librarian.broker.link(pending))}'>Review</a>",
+            )
+        )
+    review = librarian.reviews.pending_for(entry.id)
+    if review is not None:
+        rows.append(
+            (
+                "Review",
+                f"open since {_when(review.created_at)}: "
+                f"<a href='{e(librarian.reviews.link(review))}'>Approve or deny</a> "
+                f"(<a href='{e(review.review_url)}'>the pull request</a>)",
             )
         )
     details = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows)
@@ -464,6 +487,21 @@ def _access(op: Operation) -> str:
 def _op_flags(librarian: Librarian, entry: ApiEntry, op: Operation, token: str) -> str:
     o = librarian.observations
     flags: list[str] = []
+    if op.access is Access.UNKNOWN and token:  # no token: a page with its own decision form
+        options = "".join(
+            f"<option value={v}>{label}</option>"
+            for v, label in (
+                ("read", "read: safe to call"),
+                ("write", "write: needs approval each time"),
+                ("exclude", "exclude: agents may not call it"),
+            )
+        )
+        flags.append(
+            f"<form method=post action='/apis/{e(entry.id)}/ops/{e(op.id)}/access' class=inline>"
+            f"<input type=hidden name=t value='{e(token)}'>"
+            f"<select name=choice aria-label='Decide {e(op.id)}'>{options}</select>"
+            "<button class='quiet small'>Decide</button></form>"
+        )
     why = o.suspended(entry, op)
     if why:
         clear = _form(f"/apis/{entry.id}/ops/{op.id}/clear", token, "Clear", "quiet small")
@@ -616,6 +654,23 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 f"({result.read_operations} reads, {result.needs_review} need review) "
                 f"from {e(result.entry.source.kind)}.{review}{back(api_id)}",
             )
+        if action == "access":
+            form = await request.form()
+            op_id = request.path_params["op_id"]
+            updated, link = await librarian.set_operation_access(
+                api_id, op_id, str(form.get("choice", "")), identity
+            )
+            review = f" Carried into the review: <a href='{e(link)}'>{e(link)}</a>." if link else ""
+            applied = (
+                "Applied now."
+                if updated.status is EntryStatus.PROVISIONAL
+                else "Proposed for review (verified entries change through the registry repo)."
+            )
+            return notice(
+                "ok",
+                f"{op_id} decided",
+                f"{applied}{review}{back(api_id)}",
+            )
         if action == "clear":
             entry = librarian.registry.get(api_id)
             op = entry.operation(request.path_params["op_id"]) if entry else None
@@ -648,4 +703,145 @@ def console_routes(librarian: Librarian) -> list[Route]:
         Route("/grants/{grant_id}/{action}", act, methods=["POST"]),
         Route("/apis/{api_id}/ops/{op_id}/{action}", act, methods=["POST"]),
         Route("/apis/{api_id}/{action}", act, methods=["POST"]),
+    ]
+
+
+# -- the review page: approve or deny a learned API ----------------------------------------
+
+
+def _review_body(librarian: Librarian, review: ReviewRequest, token: str, error: str | None) -> str:
+    entry = librarian.registry.get(review.api)
+    rows = [
+        ("Site", e(review.host)),
+        ("Learned by", e(review.learned_by)),
+        ("What", e(review.summary)),
+        ("Authentication", e(review.auth)),
+        ("Pull request", f"<a href='{e(review.review_url)}'>{e(review.review_url)}</a>"),
+    ]
+    if entry is not None and entry.credential.create_url:
+        rows.append(
+            (
+                "Key from",
+                f"<a href='{e(entry.credential.create_url)}'>{e(entry.credential.create_url)}</a>",
+            )
+        )
+    if entry is not None and entry.credential.scopes:
+        rows.append(("Scopes", e(", ".join(entry.credential.scopes))))
+    details = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows)
+    warnings = "".join(f"<p class=err>{e(w)}</p>" for w in review.warnings)
+    err = f"<p class=err>{e(error)}</p>" if error else ""
+    hidden = f"<input type=hidden name=t value='{e(token)}'>"
+    decisions = ""
+    if entry is not None and review.needs_review:
+        options = "".join(
+            f"<option value={v}>{label}</option>"
+            for v, label in (
+                ("", "decide later (stays refused)"),
+                ("read", "read: safe to call"),
+                ("write", "write: needs approval each time"),
+                ("exclude", "exclude: agents may not call it"),
+            )
+        )
+        items = "".join(
+            f"<tr><td>{_method(op)}</td><td><code>{e(op.id)}</code>"
+            + (f"<br><span class=muted>{e(op.summary[:120])}</span>" if op.summary else "")
+            + f"</td><td><code>{e(op.path)}</code></td>"
+            f"<td><select name='decide_{e(op.id)}' aria-label='Decide {e(op.id)}'>{options}"
+            "</select></td></tr>"
+            for op_id in review.needs_review
+            if (op := entry.operation(op_id)) is not None and op.access is Access.UNKNOWN
+        )
+        if items:
+            decisions = (
+                "<h2>These operations need a decision</h2><p class=muted>POST operations that "
+                "look like reads. Undecided ones stay refused; you can decide them later in "
+                "the console.</p><table><tr><th></th><th>Operation</th><th>Path</th>"
+                f"<th>Decision</th></tr>{items}</table>"
+            )
+    operations = ""
+    if entry is not None:
+        operations = (
+            f"<h2>Operations</h2>{_operations(librarian, entry, '', '')}"
+            f"<p class=muted><a href='/apis/{e(entry.id)}'>More in the console</a></p>"
+        )
+    else:
+        operations = "<p class=err>This API is no longer in the registry.</p>"
+    return f"""<h1>Review {e(review.api_name)}</h1>
+<p class=lede>{e(review.learned_by)} taught librarian this API. Approving merges the proposal as
+the App and the API becomes verified once the registry syncs; denying closes it and forgets the
+API.</p>{err}
+<div class=card><dl>{details}</dl>{warnings}</div>
+<form method=post>{hidden}<input type=hidden name=action value=approve>
+{decisions}
+<div class=card><h2>Approve</h2><p class=muted>Merges the pull request now, with the decisions
+above.</p><button>Approve and merge</button></div></form>
+{operations}
+<div class=zone><h2>Deny</h2><p class=muted>Closes the pull request and forgets the API. The next
+agent that needs it would teach it again.</p>
+<form method=post>{hidden}<input type=hidden name=action value=deny>
+<button class=deny>Deny and forget</button></form></div>"""
+
+
+def review_routes(librarian: Librarian) -> list[Route]:
+    async def authorized(
+        request: Request, token: str
+    ) -> tuple[ReviewRequest | None, str | None, Response | None]:
+        review = await librarian.reviews.load(request.path_params["review_id"])
+        if review is None or not librarian.reviews.check_token(review, token):
+            return None, None, expired()
+        identity, problem = approver_identity(request, librarian.settings.approvers)
+        if problem or identity is None:
+            return None, None, notice("bad", "Not allowed", e(problem or ""), 403)
+        return review, identity, None
+
+    async def show(request: Request) -> Response:
+        token = request.query_params.get("t", "")
+        review, _, denied = await authorized(request, token)
+        if denied is not None or review is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        body = _review_body(librarian, review, token, None)
+        return page(f"Review: {review.api_name}", body, kind="review")
+
+    async def submit(request: Request) -> Response:
+        form: Any = await request.form()
+        token = str(form.get("t", ""))
+        review, identity, denied = await authorized(request, token)
+        if denied is not None or review is None or identity is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        action = str(form.get("action", ""))
+        try:
+            if action == "deny":
+                done = await librarian.deny_review(review.id, identity)
+                return notice("bad", "Denied", f"{e(done.note or 'closed')}.")
+            if action == "approve":
+                decisions = {
+                    key.removeprefix("decide_"): str(value)
+                    for key, value in form.items()
+                    if key.startswith("decide_") and str(value) in ("read", "write", "exclude")
+                }
+                done, problem = await librarian.approve_review(review.id, identity, decisions)
+                if problem:
+                    body = _review_body(
+                        librarian,
+                        done,
+                        token,
+                        f"{problem}. The review stays open: merge it on GitHub, then it is done.",
+                    )
+                    return page(f"Review: {review.api_name}", body, 502, kind="review")
+                return notice(
+                    "ok",
+                    "Approved",
+                    f"{e(done.note or 'merged')}. "
+                    f"<a href='{e(done.review_url)}'>The pull request</a>.",
+                )
+        except LookupError:
+            return notice("note", "Already decided", "Someone else got there first.", 409)
+        except (LibrarianError, RegistryError) as exc:
+            body = _review_body(librarian, review, token, str(exc))
+            return page(f"Review: {review.api_name}", body, 400, kind="review")
+        return notice("bad", "Unknown action", "No such action.", 400)
+
+    return [
+        Route("/reviews/{review_id}", show, methods=["GET"]),
+        Route("/reviews/{review_id}", submit, methods=["POST"]),
     ]
