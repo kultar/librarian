@@ -28,8 +28,18 @@ _SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",  # the URL carries the one-time token
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+    # Nothing external: inline styles, and images (the tab icon) from this origin only.
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'"
+    ),
 }
+
+# The tab icon (the logo), served by this app so the browser never falls back to the
+# identity provider's icon it saw during sign-in.
+_ICON_LINKS = (
+    "<link rel=icon href=/favicon.svg type=image/svg+xml>"
+    '<link rel="alternate icon" href=/favicon.ico sizes=32x32>'
+)
 
 # One theme for the website, the README logo and these pages. Keep this block identical
 # to the first two rules of site/theme.css (tests/test_web.py checks).
@@ -146,7 +156,7 @@ def _page(title: str, body: str, status: int = 200, kind: str = "approval") -> H
     doc = (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
-        f"<title>{html.escape(title)}</title><style>{_STYLE}</style></head>"
+        f"<title>{html.escape(title)}</title>{_ICON_LINKS}<style>{_STYLE}</style></head>"
         f"<body><header class='top {html.escape(kind)}'>{_MARK}librarian"
         f"<span class=muted>{html.escape(kind)}</span>"
         f"</header><main class={html.escape(kind)}>{body}</main></body></html>"
@@ -177,6 +187,25 @@ def _expired() -> HTMLResponse:
 
 def _not_allowed(problem: str) -> HTMLResponse:
     return _notice("bad", "Not allowed", html.escape(problem), 403)
+
+
+def asset_routes() -> list[Route]:
+    """The tab icon, from the package's own files (no external resources on the pages)."""
+    from importlib.resources import files
+
+    def serve(name: str, media_type: str) -> Any:
+        data = (files("librarian.assets") / name).read_bytes()
+        headers = {"Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff"}
+
+        async def icon(_: Request) -> Response:
+            return Response(data, media_type=media_type, headers=headers)
+
+        return icon
+
+    return [
+        Route("/favicon.svg", serve("logo.svg", "image/svg+xml"), methods=["GET"]),
+        Route("/favicon.ico", serve("favicon-32.png", "image/png"), methods=["GET"]),
+    ]
 
 
 def _approver(request: Request, settings: ApproverSettings) -> tuple[str | None, str | None]:

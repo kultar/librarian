@@ -87,6 +87,10 @@ from. Save tokens from a real terminal, or write the file with your password man
 
 ## Sign-in and approvals
 
+**The browser tab shows the identity provider's icon instead of librarian's.**
+Fixed in 0.13.1: the pages now serve their own icon. Before that, the sign-in redirect made the
+browser cache the provider's icon for librarian's address; reload the page after upgrading.
+
 **"Only ... can approve this write." / "Only members of ... can approve credential requests."**
 Approvals follow `writes.approvers`; adding keys needs the approver group. The group comes from
 your identity provider's `groups` claim (oauth2-proxy `--oidc-groups-claim` if it is named

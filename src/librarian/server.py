@@ -69,7 +69,7 @@ from librarian.principals import Issuer, PrincipalError, PrincipalVerifier
 from librarian.server_state import CALLER_STATE_KEY, TRACE_STATE_KEY
 from librarian.service import CredentialUnavailable, Librarian, LibrarianError, WriteRefused
 from librarian.state import retry_already_exists
-from librarian.web import approval_routes, credential_routes
+from librarian.web import approval_routes, asset_routes, credential_routes
 
 log = logging.getLogger(__name__)
 
@@ -519,6 +519,7 @@ def create_pages_app(librarian: Librarian) -> Starlette:
             *approval_routes(librarian.approvals, librarian.settings.approvers),
             *console_routes(librarian),
             *review_routes(librarian),
+            *asset_routes(),
             Route("/healthz", healthz, methods=["GET"]),
         ]
     )
@@ -595,6 +596,7 @@ def create_app(
             *approval_routes(librarian.approvals, librarian.settings.approvers),
             *console_routes(librarian),
             *review_routes(librarian),
+            *asset_routes(),
         ]
 
     @contextlib.asynccontextmanager

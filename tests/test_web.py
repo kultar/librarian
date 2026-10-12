@@ -99,7 +99,7 @@ async def test_trusted_header_mode_requires_group(librarian: Librarian) -> None:
 
 # -- theme and chrome ----------------------------------------------------------------------
 
-CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"
+CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'"
 MARK = '<svg viewBox="0 0 512 512"'  # the inline logo (no image source is allowed by the CSP)
 
 
@@ -116,7 +116,10 @@ def themed(response: Any) -> None:  # starlette's TestClient and httpx responses
     assert response.headers["content-security-policy"] == CSP
     assert response.headers["x-frame-options"] == "DENY"
     assert MARK in response.text and "librarian" in response.text
-    assert "<link" not in response.text and "<script" not in response.text  # nothing external
+    assert "<script" not in response.text and "stylesheet" not in response.text  # nothing external
+    assert (
+        "href=/favicon.svg" in response.text and "href=http" not in response.text.split("<main")[0]
+    )
 
 
 async def test_every_credential_page_is_themed(
@@ -168,3 +171,15 @@ def test_approval_pages_are_themed_and_mark_deletes() -> None:
     text = bytes(delete.body).decode()
     assert "method delete" in text and "Approve and allow similar" not in text
     assert "only ever be approved one request" in text and "Boom" in text
+
+
+def test_the_tab_icon_is_served_from_the_package() -> None:
+    from librarian.web import asset_routes
+
+    c = TestClient(Starlette(routes=asset_routes()))
+    svg = c.get("/favicon.svg")
+    assert svg.status_code == 200 and svg.headers["content-type"].startswith("image/svg+xml")
+    assert b"<svg" in svg.content and svg.headers["cache-control"].startswith("public")
+    png = c.get("/favicon.ico")
+    assert png.status_code == 200 and png.headers["content-type"] == "image/png"
+    assert png.content[:8] == b"\x89PNG\r\n\x1a\n"
