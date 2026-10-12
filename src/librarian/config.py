@@ -279,6 +279,9 @@ class Settings(BaseSettings):
     # The API format used with model_base_url (a gateway such as LiteLLM): "openai" (Chat
     # Completions) or "anthropic" (Messages). Web search through a gateway needs "anthropic".
     model_api: Literal["openai", "anthropic"] = "openai"
+    # Tried once when `model` (or learning.model) fails or declines a request (a content
+    # filter false positive, an outage). Same gateway settings; just the model name.
+    fallback_model: str | None = None
     max_calls_per_fetch: int = 8
     # Save successful plain-language plans as templates and replay them without the LLM.
     recipes_enabled: bool = True

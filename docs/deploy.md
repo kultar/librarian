@@ -309,6 +309,8 @@ config:
 `model` answers every plain-language request, so its cost scales with agent traffic;
 `learning.model` runs once per API (reading its documentation, searching for it), so a stronger
 model there is cheap. Both go through the same gateway settings. Unset, learning uses `model`.
+`fallback_model` is tried once when either fails or declines a request (content-filter false
+positives happen on wording like "private repositories").
 
 and `LIBRARIAN_MODEL_API_KEY=<a LiteLLM virtual key for librarian>` in `librarian-env`.
 

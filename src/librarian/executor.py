@@ -13,7 +13,7 @@ import base64
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
@@ -83,6 +83,10 @@ class Executor:
             timeout=timeout_seconds, follow_redirects=False, headers={"User-Agent": USER_AGENT}
         )
         self.max_response_bytes = max_response_bytes
+        # Called when an API whose entry declares no authentication answers 401. May
+        # return the entry with the authentication librarian worked out, in which case
+        # the normal credential flow takes over.
+        self.on_unexpected_auth: Callable[[ApiEntry, int], Awaitable[ApiEntry | None]] | None = None
         # Provisional entries come from agent-supplied specs, so by default they
         # may only reach public addresses (plus listed internal hosts). Verified
         # entries were human-reviewed.
@@ -251,6 +255,21 @@ class Executor:
             # The credential itself is missing, expired or revoked: ask for a new one.
             raise CredentialMissing(entry, reason="rejected with HTTP 401")
         error = None
+        if status_code == 401:
+            # The entry says "no authentication" (the spec declared none), yet the API
+            # wants some. Let the service work the scheme out; then ask for a key.
+            settled = (
+                await self.on_unexpected_auth(entry, status_code)
+                if self.on_unexpected_auth is not None
+                else None
+            )
+            if settled is not None:
+                raise CredentialMissing(settled, reason="rejected with HTTP 401; auth inferred")
+            error = (
+                f"{entry.name} answered 401 (not authenticated), but its entry declares no "
+                "authentication. It needs a credential: choose its authentication in the "
+                "console (APIs → this API → Authentication), then a key can be added."
+            )
         if status_code == 403:
             # The credential works but may not see this resource. A new key would not
             # help, so tell the caller instead of paging an approver.

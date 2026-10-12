@@ -126,6 +126,32 @@ class Notifier:
             f"\n  review: {link}" if link else "",
         )
 
+    async def api_learned(
+        self,
+        api: str,
+        name: str,
+        learned_by: str,
+        summary: str,
+        link: str | None,
+        channel: str | None,
+        warnings: list[str],
+        error: str | None = None,
+    ) -> None:
+        """A new API was learned and (normally) a review pull request opened: tell the
+        people who review, so the entry does not go unnoticed. `warnings` are things to
+        check in the review (e.g. the spec declares no authentication); `error` says
+        why no review could be opened."""
+        log.warning(
+            "API learned: %s (%s) by %s: %s%s%s%s",
+            api,
+            name,
+            learned_by,
+            summary,
+            "".join(f"\n  - {w}" for w in warnings),
+            f"\n  review: {link}" if link else "",
+            f"\n  NO REVIEW OPENED: {error}" if error else "",
+        )
+
 
 class RequestStore(Protocol):
     """Durable storage for requests (see `librarian.state.StateStore`)."""

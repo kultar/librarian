@@ -36,6 +36,17 @@ Fixed in 0.7.0. If you restrict hosts with `mcp_allowed_hosts`, include the name
 
 ## Learning APIs
 
+**Calls return 401, or empty lists for private data, and no credential request appears.**
+The API's spec declared no authentication (GitHub's does), so the entry says `none`. Since
+0.12.1 librarian asks the model what the API uses when it learns it, and again on the first
+401; if it can't tell, the console (APIs → the API → Authentication) lets you choose, and the
+learned-API Slack notice says so. The next call then asks for a key.
+
+**`fetch` fails with "the model declined this request (content filter)".**
+A refusal by the model, usually a false positive on wording like "authenticated" or
+"private". Rephrase, call the operation directly with `execute`, or set `fallback_model` so
+librarian tries another model once. The audit log has a `model_refused` event.
+
 **"no OpenAPI document found at well-known paths".**
 Give the spec (`spec_url`) or a docs page (`docs_url` + `base_url`). With a `model` set, librarian
 also looks for docs itself, and searches the web if `learning.search.provider` is set.

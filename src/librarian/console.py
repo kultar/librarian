@@ -288,7 +288,31 @@ def _actions(librarian: Librarian, entry: ApiEntry, token: str) -> str:
             f"<label>Base URL<input name=base_url value='{e(entry.base_url)}' required></label>"
             "<button>Re-learn</button></form></div>"
         )
-    elif entry.status is EntryStatus.BLOCKED:
+    if entry.status is EntryStatus.PROVISIONAL:
+        current = e(entry.auth.type)
+        options = "".join(
+            f"<option value={v}{' selected' if v == entry.auth.type else ''}>{label}</option>"
+            for v, label in (
+                ("none", "none (public API)"),
+                ("bearer", "bearer token (Authorization: Bearer ...)"),
+                ("basic", "basic (username:password)"),
+                ("api_key_header", "API key in a header"),
+                ("api_key_query", "API key in a query parameter"),
+            )
+        )
+        cards.append(
+            f"<div class=card><h2>Authentication</h2><p class=muted>Now: <b>{current}</b>. "
+            "Specs often declare none even when the API needs a key; choose what it really "
+            "uses and librarian asks for the key when it is first needed. Verified entries "
+            "change through review.</p>"
+            f"<form method=post action='{e(base)}/auth'>"
+            f"<input type=hidden name=t value='{e(token)}'>"
+            f"<label>Scheme<select name=scheme>{options}</select></label>"
+            "<label>Header or query parameter name (API keys only)"
+            "<input name=key_name placeholder='X-Api-Key'></label>"
+            "<button class=quiet>Set authentication</button></form></div>"
+        )
+    if entry.status is EntryStatus.BLOCKED:
         cards.append("<p class=muted>Unblock this API to re-learn it.</p>")
     else:
         cards.append("<p class=muted>Verified entries change through the registry repo.</p>")
@@ -429,6 +453,20 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 "Credential invalidated",
                 f"{e(', '.join(refs))} overwritten; the next call asks for a fresh key. "
                 f"Revoke the old key at the provider too.{back(api_id)}",
+            )
+        if action == "auth":
+            form = await request.form()
+            scheme = str(form.get("scheme", "")).strip()
+            key_name = str(form.get("key_name", "")).strip() or None
+            if scheme not in ("none", "bearer", "basic", "api_key_header", "api_key_query"):
+                return notice("bad", "Unknown scheme", f"No such scheme.{back(api_id)}", 400)
+            updated, link = await librarian.set_auth(api_id, scheme, key_name, identity)
+            review = f" Review: <a href='{e(link)}'>{e(link)}</a>." if link else ""
+            return notice(
+                "ok",
+                "Authentication set",
+                f"{e(api_id)} now uses {e(updated.auth.type)}; a key is asked for when it is "
+                f"first needed.{review}{back(api_id)}",
             )
         if action == "recheck":
             report = await librarian.recheck(api_id)

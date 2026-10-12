@@ -80,6 +80,30 @@ class WebhookNotifier(Notifier):
             "api.changed", {"api": api, "title": title, "details": details, "link": link}
         )
 
+    async def api_learned(
+        self,
+        api: str,
+        name: str,
+        learned_by: str,
+        summary: str,
+        link: str | None,
+        channel: str | None,
+        warnings: list[str],
+        error: str | None = None,
+    ) -> None:
+        await self._post_write(
+            "api.learned",
+            {
+                "api": api,
+                "name": name,
+                "learned_by": learned_by,
+                "summary": summary,
+                "link": link,
+                "warnings": warnings,
+                "error": error,
+            },
+        )
+
     async def grant_used(self, grant: Grant, approval_like: WriteApproval) -> None:
         await self._post_write(
             "grant.used",
@@ -261,6 +285,43 @@ class SlackNotifier(Notifier):
         await self._call(
             "chat.postMessage", {"channel": channel or self.default_channel, "text": text}
         )
+
+    async def api_learned(
+        self,
+        api: str,
+        name: str,
+        learned_by: str,
+        summary: str,
+        link: str | None,
+        channel: str | None,
+        warnings: list[str],
+        error: str | None = None,
+    ) -> None:
+        await self._call(
+            "chat.postMessage",
+            {
+                "channel": channel or self.default_channel,
+                "text": api_learned_text(api, name, learned_by, summary, link, warnings, error),
+            },
+        )
+
+
+def api_learned_text(
+    api: str,
+    name: str,
+    learned_by: str,
+    summary: str,
+    link: str | None,
+    warnings: list[str],
+    error: str | None,
+) -> str:
+    lines = [f":books: *{name}* (`{api}`) learned by {learned_by}: {summary}"]
+    lines += [f":warning: {w}" for w in warnings]
+    if link:
+        lines.append(f"<{link}|Review the entry> (merging it makes the API verified)")
+    if error:
+        lines.append(f":x: No review was opened: {error}. The entry is usable as provisional.")
+    return "\n".join(lines)
 
 
 def _api_changed_text(api: str, title: str, details: list[str], link: str | None) -> str:

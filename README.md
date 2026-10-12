@@ -173,8 +173,9 @@ The JSONL audit log is separate and always on.
 ## APIs without a spec, and APIs that change
 
 **Learning without a spec** (needs `model`; set `learning.model` to use a stronger model for
-learning only, since that happens once per API while `fetch` runs on every request). librarian
-learns from, in order of preference:
+learning only, since that happens once per API while `fetch` runs on every request;
+`fallback_model` is tried once when a model fails or declines a request). librarian learns
+from, in order of preference:
 
 1. **An OpenAPI spec**: given, found at a well-known path, or linked from the docs.
 2. **Documentation pages**: the model reads the page and related pages on the same site and
@@ -200,6 +201,13 @@ learning:
 `provider: model` uses the model's own web search. Through a gateway such as LiteLLM that
 needs the Anthropic API format (`model_api: anthropic`); with the OpenAI formats the search is
 refused or silently dropped by the gateway, and librarian reports that instead of guessing.
+
+**Specs that declare no authentication** are common even for APIs that need a key (GitHub's
+does). librarian then asks the model what the API really uses and writes it into the proposed
+entry, for approval. Approvers never edit YAML: the review pull request is approve or deny, and
+anything that needs a person's choice (the authentication, when the model can't tell) is a
+choice in the console. If such an API answers 401 later, librarian infers the authentication
+then and asks for a key; a verified entry gets an update proposal instead.
 
 Documentation is untrusted, so the model never decides anything that matters: it has no tools;
 the API host is always the `base_url` you gave (never one from the docs); read vs write is decided
@@ -261,7 +269,9 @@ agent gets a token for librarian on a user's behalf is covered in
 2. Set `notifier.type: slack`, the bot token (`LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN`), a channel,
    and optionally an approver user-group ID (rendered as a real @mention).
 
-Approvers get one card per API (deduplicated, with a live "waiting" count) and a **Review request**
+Every API learned on demand is announced too: a summary, the authentication it will use, the
+review link, and anything to check (or why no review could be opened). Approvers get one card
+per API that needs a key (deduplicated, with a live "waiting" count) and a **Review request**
 button that opens the secure page: *add a key*, *use an existing secret*, or *deny*. The card
 updates in place and the outcome is posted in the thread. The key itself never goes through Slack.
 
@@ -275,7 +285,8 @@ knows (status, host, operations and where they were learned from), what is waiti
 *references* only, never values. From there a signed-in approver can **revoke a grant**,
 **block** or **unblock** an API, **forget** a learned one, **invalidate a credential** (the next
 call asks for a fresh key), **re-learn** a provisional API from a documentation or spec URL you
-give it, **re-check** its source, and **clear a suspension**. Every action is recorded in the
+give it, **choose its authentication** when the spec and the model couldn't tell, **re-check**
+its source, and **clear a suspension**. Every action is recorded in the
 audit log with who did it. The console follows the approval pages' sign-in
 (`approvers.mode: trusted_header` behind your auth proxy); `approvers.console: open` serves it
 without sign-in on a laptop, `off` disables it.

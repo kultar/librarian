@@ -15,8 +15,15 @@ from urllib.parse import urlsplit
 
 import httpx
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import AgentRunError, UsageLimitExceeded
+from pydantic_ai.exceptions import (
+    AgentRunError,
+    ContentFilterError,
+    ModelAPIError,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
+)
 from pydantic_ai.models import Model
+from pydantic_ai.models.fallback import FallbackModel
 
 from librarian import telemetry
 from librarian.approvals import ApprovalBroker, ApprovalState, Grant, WriteApproval
@@ -25,6 +32,8 @@ from librarian.calls import Caller, CallRequest, CallResult, WriteRequest
 from librarian.config import Settings
 from librarian.credentials import CredentialBroker, CredentialRequest, Notifier, RequestState
 from librarian.docs import (
+    ExtractedApi,
+    auth_from_extracted,
     build_extractor,
     crawl_docs,
     entry_from_docs,
@@ -46,14 +55,28 @@ from librarian.finddocs import (
 from librarian.github_app import GitHubAppAuth
 from librarian.notifiers import SlackNotifier, WebhookNotifier
 from librarian.observations import Finding, Observations
-from librarian.openapi import SpecError, discover_spec, entry_from_spec, fetch_spec, spec_hash
+from librarian.openapi import (
+    SpecError,
+    discover_spec,
+    entry_from_spec,
+    fetch_spec,
+    guess_validation_operation,
+    spec_hash,
+)
 from librarian.opsearch import rank
 from librarian.planner import FetchAnswer, FetchOutcome, Planner
 from librarian.policy import PolicyEngine
 from librarian.publish import GitHubPublisher, Publisher, PublishError
 from librarian.recipes import Recipe, recipe_summary
 from librarian.recipes import learn as learn_recipe
-from librarian.registry.models import Access, ApiEntry, EntryStatus, Operation
+from librarian.registry.models import (
+    Access,
+    ApiEntry,
+    CredentialGuidance,
+    EntryStatus,
+    NoAuth,
+    Operation,
+)
 from librarian.registry.store import Registry
 from librarian.secrets import (
     AwsSecretsManagerStore,
@@ -265,10 +288,16 @@ class Librarian:
         learning_model = model
         if planner_model is None and settings.learning.model and model is not None:
             learning_model = _model_from_settings(settings, settings.learning.model)
+        if planner_model is None and settings.fallback_model and model is not None:
+            model = _with_fallback(model, settings)
+            if learning_model is not None:
+                learning_model = _with_fallback(learning_model, settings)
         self.extractor: Agent[None, Any] | None = (
             build_extractor(learning_model, mode) if learning_model is not None else None
         )
         self.search_model: Model | str | None = learning_model
+        self.executor.on_unexpected_auth = self._settle_auth_after_401
+        self._auth_notified: set[str] = set()
         self._last_hashes: dict[str, str] = {}  # without a database
         # Fetches specs and docs pages (a fresh client each time: they are rare).
         self.source_client_factory: Callable[[], httpx.AsyncClient] = lambda: httpx.AsyncClient(
@@ -371,6 +400,8 @@ class Librarian:
                     "the planner used up its step budget without an answer; try a narrower "
                     "request, or raise max_calls_per_fetch"
                 ) from exc
+            except (ContentFilterError, ModelAPIError, UnexpectedModelBehavior) as exc:
+                raise await self._model_failed(exc, caller, "planning") from exc
             await self._learn_recipe(intent, outcome)
             return outcome
         raise LibrarianError("credential still not usable after it was provided")
@@ -653,9 +684,13 @@ class Librarian:
             )
         if spec_url is None and base_url is None and docs_url is None:
             raise LibrarianError("onboarding needs spec_url, docs_url or base_url")
-        entry = await self._learn(
-            api_id, spec_url=spec_url, base_url=base_url, docs_url=docs_url, name=name
-        )
+        try:
+            entry = await self._learn(
+                api_id, spec_url=spec_url, base_url=base_url, docs_url=docs_url, name=name
+            )
+            entry, warnings = await self._settle_auth(entry)
+        except (ContentFilterError, ModelAPIError, UnexpectedModelBehavior) as exc:
+            raise await self._model_failed(exc, caller, "learning") from exc
         if existing is not None:
             entry = _keep_human_fields(existing, entry)
         internal = self._internal_note(entry)
@@ -684,7 +719,183 @@ class Librarian:
                 | ({"internal": internal} if internal else {}),
             )
         )
+        summary = (
+            f"{len(entry.operations)} operations ({reads} reads, {review} need review) from "
+            f"{_learned_from(entry)}; auth: {_auth_words(entry)}"
+        )
+        try:
+            await self.notifier.api_learned(
+                entry.id,
+                entry.name,
+                caller.principal or caller.agent,
+                summary,
+                review_url,
+                entry.owners.channel,
+                warnings + ([internal] if internal else []),
+                review_error,
+            )
+        except Exception as exc:  # a broken notifier must not undo a successful onboarding
+            log.warning("could not announce the learned API %s: %s", api_id, exc)
         return OnboardResult(entry, path, reads, review, review_url, review_error)
+
+    async def _settle_auth(self, entry: ApiEntry) -> tuple[ApiEntry, list[str]]:
+        """A spec that declares no authentication is common even for APIs that need a key
+        (GitHub's does). Rather than leave that to a person editing YAML, ask the model what
+        the API uses and write it into the proposed entry, for approval."""
+        if not isinstance(entry.auth, NoAuth) or entry.source.kind != "openapi":
+            return entry, []
+        if self.extractor is None:
+            return entry, [
+                "No authentication: the spec declares none and no model is configured to "
+                "check. If calls answer 401, choose the authentication in the console."
+            ]
+        extracted = await extract_from_knowledge(
+            self.extractor, base_url=entry.base_url, api_name=entry.name
+        )
+        if extracted.auth == "none":
+            note = "\nThe spec declares no authentication and the model agrees."
+            return entry.model_copy(update={"notes": (entry.notes + note)[:8000]}), []
+        auth = auth_from_extracted(extracted, f"{entry.id}/readonly")
+        if isinstance(auth, NoAuth):
+            return entry, [
+                "No authentication in the spec, and the model could not tell what this API "
+                "uses. If calls answer 401, choose the authentication in the console."
+            ]
+        return self._with_auth(entry, auth, "inferred from the model's knowledge"), []
+
+    def _with_auth(self, entry: ApiEntry, auth: Any, how: str) -> ApiEntry:
+        validation = guess_validation_operation(entry.operations)
+        guidance = entry.credential.model_copy(update={"validation_operation": validation})
+        note = (
+            f"\nAuthentication {how} (the spec declares none): {auth.type}. "
+            "Approve if that is right; librarian asks for the key when it is first needed."
+        )
+        if validation:
+            note += f" New credentials are tested with `{validation}`."
+        return entry.model_copy(
+            update={"auth": auth, "credential": guidance, "notes": (entry.notes + note)[:8000]}
+        )
+
+    async def set_auth(
+        self, api_id: str, scheme: str, key_name: str | None, by: str
+    ) -> tuple[ApiEntry, str | None]:
+        """A person chose the authentication for a provisional API (the console). Returns
+        the entry and the review link, if a review could be opened."""
+        entry = self.registry.get(api_id)
+        if entry is None:
+            raise LibrarianError(f"unknown API {api_id!r}")
+        if entry.status is not EntryStatus.PROVISIONAL:
+            raise LibrarianError("only provisional entries change here; verified ones via review")
+        extracted = ExtractedApi.model_validate({"auth": scheme, "auth_key_name": key_name})
+        if scheme == "none":
+            updated = entry.model_copy(
+                update={"auth": NoAuth(), "credential": CredentialGuidance()}
+            )
+        else:
+            auth = auth_from_extracted(extracted, f"{api_id}/readonly")
+            if isinstance(auth, NoAuth):
+                raise LibrarianError("that authentication needs a valid header or query name")
+            updated = self._with_auth(entry, auth, f"chosen by {by}")
+        await self.registry.save(updated)
+        link = None
+        if self.publisher is not None:
+            try:
+                link = await self.publisher.propose_update(
+                    updated,
+                    f"{updated.name}: authentication {scheme}",
+                    f"{by} set the authentication to {scheme} in the console.",
+                )
+            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+                log.warning("could not open a review for %s: %s", api_id, exc)
+        await self.audit.record(
+            AuditEvent(
+                event="auth_set",
+                caller="console",
+                principal=by,
+                api=api_id,
+                detail=scheme,
+                extra={"review_url": link},
+            )
+        )
+        return updated, link
+
+    async def _settle_auth_after_401(self, entry: ApiEntry, status: int) -> ApiEntry | None:
+        """An API whose entry says "no authentication" answered 401. Work the scheme out
+        and, for a provisional entry, apply it so the credential flow can ask for a key.
+        A verified entry gets an update proposal instead; either way people are told once."""
+        inferred: ApiEntry | None = None
+        if self.extractor is not None:
+            try:
+                extracted = await extract_from_knowledge(
+                    self.extractor, base_url=entry.base_url, api_name=entry.name
+                )
+                auth = auth_from_extracted(extracted, f"{entry.id}/readonly")
+                if not isinstance(auth, NoAuth):
+                    inferred = self._with_auth(entry, auth, "inferred after a 401")
+            except (ContentFilterError, ModelAPIError, UnexpectedModelBehavior) as exc:
+                log.warning("could not infer %s's authentication: %s", entry.id, exc)
+        if inferred is not None and entry.status is EntryStatus.PROVISIONAL:
+            await self.registry.save(inferred)
+            await self.audit.record(
+                AuditEvent(
+                    event="auth_inferred",
+                    caller="librarian",
+                    api=entry.id,
+                    detail=inferred.auth.type,
+                )
+            )
+            return inferred
+        if entry.id in self._auth_notified:
+            return None
+        self._auth_notified.add(entry.id)
+        link = None
+        details = [
+            f"{entry.name} answered HTTP {status} (not authenticated), but its entry "
+            "declares no authentication."
+        ]
+        if inferred is not None and self.publisher is not None:
+            try:
+                link = await self.publisher.propose_update(
+                    inferred,
+                    f"{entry.name}: needs authentication ({inferred.auth.type})",
+                    f"The API answered {status}; librarian inferred {inferred.auth.type}.",
+                )
+                details.append(f"Proposed: {inferred.auth.type}. Approve the update.")
+            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+                details.append(f"Could not open an update proposal: {exc}")
+        else:
+            details.append("Choose its authentication in the console (APIs → this API).")
+        await self.notifier.api_changed(
+            entry.id,
+            "Needs a credential",
+            details,
+            link,
+            entry.owners.channel,
+            mention_group=entry.owners.approver_group,
+        )
+        return None
+
+    async def _model_failed(self, exc: Exception, caller: Caller, what: str) -> LibrarianError:
+        """Turn a model failure into something a caller can act on, and record it."""
+        if isinstance(exc, ContentFilterError):
+            message = (
+                f"the model declined this request (content filter) while {what}: {exc}. "
+                "Rephrase it, or call the operation directly with execute. A fallback_model "
+                "setting makes librarian try another model once."
+            )
+            event = "model_refused"
+        elif isinstance(exc, ModelAPIError):
+            message = f"the model API failed while {what}: {exc}"
+            event = "model_failed"
+        else:
+            message = f"the model gave an unusable answer while {what}: {exc}"
+            event = "model_failed"
+        await self.audit.record(
+            AuditEvent(
+                event=event, caller=caller.agent, principal=caller.principal, detail=str(exc)[:500]
+            )
+        )
+        return LibrarianError(message)
 
     def _internal_note(self, entry: ApiEntry) -> str:
         """Says so when the API is reachable only because of an `internal_hosts` pattern,
@@ -756,6 +967,8 @@ class Librarian:
             return entry_from_spec(
                 spec, api_id=api_id, spec_url=found_url, base_url=base_url, name=name
             )
+        except (ContentFilterError, ModelAPIError, UnexpectedModelBehavior):
+            raise  # explained by the caller (onboard), with an audit event
         except (SpecError, httpx.HTTPError, ValueError, AgentRunError, SearchDidNotRun) as exc:
             raise LibrarianError(f"could not learn {api_id!r}: {exc}") from exc
         finally:
@@ -1255,6 +1468,29 @@ def _default_notifier(settings: Settings) -> Notifier:
 
 
 NO_GATEWAY_KEY = "no-key-configured"  # sent to a gateway that needs no key
+
+
+def _with_fallback(model: Model | str, settings: Settings) -> Model | str:
+    """Try `fallback_model` once when the main model fails or declines."""
+    fallback = _model_from_settings(settings, settings.fallback_model)
+    if fallback is None:
+        return model
+    return FallbackModel(model, fallback, fallback_on=(ModelAPIError, ContentFilterError))
+
+
+def _learned_from(entry: ApiEntry) -> str:
+    return {
+        "openapi": "an OpenAPI spec",
+        "docs": "documentation",
+        "inferred": "the model's knowledge",
+        "manual": "a person",
+    }.get(entry.source.kind, entry.source.kind)
+
+
+def _auth_words(entry: ApiEntry) -> str:
+    if isinstance(entry.auth, NoAuth):
+        return "none"
+    return f"{entry.auth.type} ({entry.secret_ref})"
 
 
 def _model_from_settings(settings: Settings, name: str | None = None) -> Model | str | None:

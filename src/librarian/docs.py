@@ -426,6 +426,11 @@ def _entry(
     )
 
 
+def auth_from_extracted(extracted: ExtractedApi, secret_ref: str) -> AuthSpec:
+    """The entry's auth for what the model said (unknown or unusable → NoAuth)."""
+    return _auth(extracted, secret_ref)
+
+
 def _auth(extracted: ExtractedApi, secret_ref: str) -> AuthSpec:
     key_name = (extracted.auth_key_name or "").strip()
     if extracted.auth == "bearer":
