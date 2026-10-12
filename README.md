@@ -17,7 +17,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.10)**. Expect breaking changes. Website: [kultar.github.io/librarian](https://kultar.github.io/librarian/).
+> Status: **alpha (v0.11)**. Expect breaking changes. Website: [kultar.github.io/librarian](https://kultar.github.io/librarian/).
 
 ## Why
 
@@ -385,7 +385,7 @@ uv run pytest
   spread across nodes, survives a database failover); GitHub App for the registry repo, created
   with one command; step-by-step docs; on PyPI as `librarian-a2a`
 
-- **v0.11** (unreleased): internal APIs, scoped: agents learn internal APIs on demand within
+- **v0.11**: internal APIs, scoped: agents learn internal APIs on demand within
   the domains you list (`internal_hosts`), instead of all-or-nothing `allow_private_networks`
 
 ### Next
