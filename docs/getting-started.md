@@ -31,6 +31,11 @@ needs a key). The setup is in [`examples/quickstart`](../examples/quickstart):
 ./ask '{"skill":"capabilities"}'          # what can this agent use? (the demo API)
 ```
 
+Open <http://localhost:8080/> in a browser: the console shows what librarian knows and what is
+waiting on you, and lets you block or forget an API, invalidate a key, or re-learn an API from
+a documentation URL. (The quick start serves it without sign-in; a shared deployment puts it behind
+your identity provider.)
+
 ## 2. An agent needs an API librarian has never seen
 
 The agent asks librarian to learn [APIs.guru](https://apis.guru) (a public directory of APIs)

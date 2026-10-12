@@ -42,6 +42,9 @@ class ApproverSettings(BaseModel):
     user_header: str = "X-Auth-Request-Email"
     groups_header: str = "X-Auth-Request-Groups"
     group: str | None = None
+    # The read-only console at the pages listener's root: "signed_in" (needs
+    # trusted_header, and `group` when set), "open" (no sign-in: a laptop), or "off".
+    console: Literal["signed_in", "open", "off"] = "signed_in"
 
 
 class AwsSecretsSettings(BaseModel):

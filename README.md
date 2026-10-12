@@ -267,6 +267,19 @@ updates in place and the outcome is posted in the thread. The key itself never g
 
 No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 
+## The console
+
+The pages listener's root (`/`) is a console for the people who run librarian: every API it
+knows (status, host, operations and where they were learned from), what is waiting on a person
+(keys to add, writes to approve, with the links), and the standing grants. It shows credential
+*references* only, never values. From there a signed-in approver can **revoke a grant**,
+**block** or **unblock** an API, **forget** a learned one, **invalidate a credential** (the next
+call asks for a fresh key), **re-learn** a provisional API from a documentation or spec URL you
+give it, **re-check** its source, and **clear a suspension**. Every action is recorded in the
+audit log with who did it. The console follows the approval pages' sign-in
+(`approvers.mode: trusted_header` behind your auth proxy); `approvers.console: open` serves it
+without sign-in on a laptop, `off` disables it.
+
 ## Writes
 
 Reads are the default; writes are opt-in at every level:

@@ -539,6 +539,12 @@ class ApprovalBroker:
     def link(self, approval: WriteApproval) -> str:
         return f"{self.public_url}/approvals/{approval.id}?t={self.token_for(approval)}"
 
+    def page_token(self, purpose: str, subject: str) -> str:
+        """A token for a form on a page (e.g. the console), bound to the signed-in person,
+        so a request from another site cannot act for them."""
+        message = f"{purpose}:{subject}".encode()
+        return hmac.new(self._signing_key, message, hashlib.sha256).hexdigest()[:40]
+
     def token_for(self, approval: WriteApproval) -> str:
         message = f"write:{approval.id}:{approval.fingerprint}".encode()
         return hmac.new(self._signing_key, message, hashlib.sha256).hexdigest()[:40]

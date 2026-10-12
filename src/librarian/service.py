@@ -845,6 +845,65 @@ class Librarian:
 
     # -- change detection --------------------------------------------------------
 
+    # -- console actions (a signed-in person; every one is audited) --------------------
+
+    async def block(self, api_id: str, by: str) -> ApiEntry:
+        """Stop agents using an API until someone unblocks it."""
+        entry = await self.registry.set_status(api_id, EntryStatus.BLOCKED)
+        await self.audit.record(
+            AuditEvent(event="api_blocked", caller="console", principal=by, api=api_id)
+        )
+        return entry
+
+    async def unblock(self, api_id: str, by: str) -> ApiEntry:
+        """Back to its reviewed status, or provisional for a learned API."""
+        reviewed = self.registry.reviewed(api_id)
+        status = EntryStatus.PROVISIONAL
+        if reviewed is not None and reviewed.status is not EntryStatus.BLOCKED:
+            status = reviewed.status
+        entry = await self.registry.set_status(api_id, status)
+        await self.audit.record(
+            AuditEvent(
+                event="api_unblocked",
+                caller="console",
+                principal=by,
+                api=api_id,
+                detail=f"now {status.value}",
+            )
+        )
+        return entry
+
+    async def forget(self, api_id: str, by: str) -> None:
+        """Drop a learned API altogether (the next agent that needs it teaches it again)."""
+        await self.registry.forget(api_id)
+        await self.audit.record(
+            AuditEvent(event="api_forgotten", caller="console", principal=by, api=api_id)
+        )
+
+    async def invalidate_credential(self, api_id: str, by: str) -> list[str]:
+        """Overwrite the API's credential(s) with a useless value. The next call fails with
+        401, which opens a fresh credential request, so the key gets replaced out of band."""
+        entry = self.registry.get(api_id)
+        if entry is None:
+            raise LibrarianError(f"unknown API {api_id!r}")
+        refs = [r for r in (entry.secret_ref, entry.write_secret_ref) if r]
+        if not refs:
+            raise LibrarianError(f"{api_id!r} has no credential")
+        if not self.secrets.writable:
+            raise LibrarianError("the secret store is read-only here")
+        for ref in refs:
+            await self.secrets.put(ref, f"invalidated-{pysecrets.token_hex(8)}")
+        await self.audit.record(
+            AuditEvent(
+                event="credential_invalidated",
+                caller="console",
+                principal=by,
+                api=api_id,
+                extra={"refs": refs},
+            )
+        )
+        return refs
+
     async def recheck(self, api_id: str) -> RecheckReport:
         """Re-read an entry's spec or docs; handle any change by risk (see drift.py)."""
         entry = self.registry.get(api_id)

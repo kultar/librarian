@@ -103,6 +103,15 @@ high-value target. This document lists what we defend against, how, and what is 
   and list only the domains you mean in `internal_hosts`. The review PR and the audit log say
   when an entry was learned under such a pattern.
 
+The console (the pages listener's root) lists every API, pending request and grant, with
+credential *references* only, and offers a few actions (revoke, block, forget, invalidate,
+re-learn, re-check, clear). It needs a signed-in approver (or `approvers.console: open`, meant
+for a laptop) and never appears on the A2A listener alone. Each action form carries a token
+bound to the signed-in person (an HMAC with the link-signing key), so a page on another site
+cannot submit it for them, and each action is written to the audit log with who did it.
+Re-learning goes through the normal onboarding path (provisional entry, review pull request);
+verified entries only change through the registry repo.
+
 ### T5. Approval-link abuse
 - Links are HMAC tokens bound to one request, valid only while it is pending and until expiry,
   and dead after use. Pages are `no-store`, `no-referrer`, framed-denied, CSP-restricted.

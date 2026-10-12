@@ -95,6 +95,7 @@ approvers:
   # user_header: X-Auth-Request-Email
   # groups_header: X-Auth-Request-Groups
   # group: api-approvers
+  # console: signed_in                 # the read-only console at /: signed_in | open (laptop) | off
 
 # APIs with no OpenAPI spec (needs `model`): learn from documentation pages, or from the
 # model's own knowledge (reads only). Both are unconfirmed until a real call succeeds.

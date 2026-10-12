@@ -232,6 +232,40 @@ class Registry:
         await self.save(updated)
         return updated
 
+    def reviewed(self, api_id: str) -> ApiEntry | None:
+        """The entry as the reviewed registry directory has it (None for a learned API)."""
+        path = self.directory / f"{api_id}.yaml"
+        if not path.exists():
+            return None
+        return self._from_files.get(api_id)
+
+    async def forget(self, api_id: str) -> None:
+        """Drop a learned entry: retire its stored copy, or delete its overlay file.
+
+        Entries in the reviewed registry directory are removed there, by pull request."""
+        if api_id not in self._entries:
+            raise RegistryError(f"unknown API {api_id!r}")
+        if self.reviewed(api_id) is not None:
+            raise RegistryError(
+                f"{api_id!r} is in the reviewed registry; remove its file through the registry repo"
+            )
+        if self.store is not None and api_id in self._stored:
+            entry, base = self._stored.pop(api_id)
+            doc = StoredEntry(entry=entry, base=base)
+            await self.store.save_doc(
+                STORED_KIND, api_id, "retired", doc.model_dump_json(by_alias=True)
+            )
+            self._entries.pop(api_id, None)
+            return
+        if self.overlay is None:
+            raise RegistryError(f"{api_id!r} is a file in the registry directory; delete it there")
+        async with self._lock:
+            path = self.overlay / f"{api_id}.yaml"
+            await asyncio.to_thread(path.unlink, True)
+            self._from_files.pop(api_id, None)
+            self._entries.pop(api_id, None)
+            self._fingerprint = self._current_fingerprint()
+
 
 def _score(terms: set[str], entry: ApiEntry) -> float:
     def words(text: str) -> set[str]:

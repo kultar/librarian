@@ -16,3 +16,4 @@ callers:
 
 approvers:
   mode: token                            # local only: whoever has the link may approve
+  console: open                          # http://localhost:8080/ shows what librarian knows (local only)

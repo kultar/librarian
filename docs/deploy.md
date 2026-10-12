@@ -171,6 +171,12 @@ person, and only members of your approver group can add keys.
 3. Decide the approver group *as your identity provider names it* (e.g. `api-approvers`). It is
    separate from the Slack group: Slack is who gets pinged, this is who may decide.
 
+Once signed in, the pages host's root (`https://librarian.example.com/`) is the **console**:
+every API librarian knows, what is waiting on a person, the standing grants, and the levers
+(revoke a grant, block or forget an API, invalidate a credential, re-learn from a documentation
+URL, re-check, clear a suspension). Only for members of the approver group; every action is
+audited with who did it.
+
 ### Entra ID (Azure AD) recipe
 
 The same three steps with the `az` CLI. Entra puts group **object ids** (not names) in the
@@ -212,8 +218,8 @@ oauth2Proxy:
     - --insecure-oidc-allow-unverified-email=true
 ```
 
-Verified so far: the redirect to Entra and the group restriction. The two `extraArgs` are what
-Entra's tokens need for oauth2-proxy to pass the person's address on; confirm with one sign-in.
+Verified end to end with oauth2-proxy v7.7.1: the sign-in arrives as `preferred_username`
+(the person's UPN), which becomes the approver identity librarian records.
 
 ## 4. Where keys are stored
 

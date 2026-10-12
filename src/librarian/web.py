@@ -93,6 +93,16 @@ border-radius:8px;padding:10px 14px;margin:0 0 16px}
 .status{display:flex;align-items:center;gap:14px;margin:28px 0 8px}
 .status svg{width:44px;height:44px;flex:none}.status h1{margin:0}
 a{color:var(--link)}
+main.console,.top.console{max-width:1040px}main.console h2{margin-top:28px}
+th{text-align:left;font-weight:600;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);
+color:var(--muted);font-size:.9em}
+.tag{display:inline-block;font-size:12px;padding:3px 8px;border-radius:6px;background:var(--line)}
+.tag.verified{background:var(--ok);color:#fff}.tag.blocked{background:var(--danger);color:#fff}
+.tag.provisional{background:var(--brass);color:#1c1f2b}
+form.inline{display:inline}
+button.small{width:auto;margin:0 0 0 6px;padding:4px 10px;font-size:.85em}
+main.console .zone button,main.console .card button{width:auto;min-width:200px}
+main.console label{margin-top:10px}
 @media (max-width:480px){dl{grid-template-columns:1fr;gap:2px 0}dt{margin-top:8px}}
 """
 )
@@ -126,8 +136,9 @@ def _page(title: str, body: str, status: int = 200, kind: str = "approval") -> H
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         f"<title>{html.escape(title)}</title><style>{_STYLE}</style></head>"
-        f"<body><header class=top>{_MARK}librarian<span class=muted>{html.escape(kind)}</span>"
-        f"</header><main>{body}</main></body></html>"
+        f"<body><header class='top {html.escape(kind)}'>{_MARK}librarian"
+        f"<span class=muted>{html.escape(kind)}</span>"
+        f"</header><main class={html.escape(kind)}>{body}</main></body></html>"
     )
     return HTMLResponse(doc, status_code=status, headers=_SECURITY_HEADERS)
 
@@ -432,3 +443,9 @@ def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> li
         Route("/approvals/{approval_id}", show, methods=["GET"]),
         Route("/approvals/{approval_id}", submit, methods=["POST"]),
     ]
+
+
+# Public names for the console (console.py), which shares this chrome and these rules.
+page = _page
+notice = _notice
+approver_identity = _approver

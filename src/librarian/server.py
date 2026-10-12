@@ -61,6 +61,7 @@ from librarian import __version__, telemetry
 from librarian.approvals import WriteApproval
 from librarian.calls import Caller, CallRequest, WriteRequest
 from librarian.config import PrincipalSettings
+from librarian.console import console_routes
 from librarian.credentials import CredentialRequest
 from librarian.executor import PolicyDenied
 from librarian.mcp_server import build_mcp
@@ -516,6 +517,7 @@ def create_pages_app(librarian: Librarian) -> Starlette:
         routes=[
             *credential_routes(librarian.broker, librarian.settings.approvers),
             *approval_routes(librarian.approvals, librarian.settings.approvers),
+            *console_routes(librarian),
             Route("/healthz", healthz, methods=["GET"]),
         ]
     )
@@ -590,6 +592,7 @@ def create_app(
         routes += [
             *credential_routes(librarian.broker, librarian.settings.approvers),
             *approval_routes(librarian.approvals, librarian.settings.approvers),
+            *console_routes(librarian),
         ]
 
     @contextlib.asynccontextmanager
