@@ -5,6 +5,10 @@ everything this chart needs (registry repo, Slack, sign-in, secrets, database), 
 page is the chart reference.
 
 ```bash
+# from the published chart (same version as the image; every release pushes it)
+helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.11.0 \
+  -n librarian --create-namespace --set publicUrl=https://librarian.example.com
+# or from a checkout
 helm install librarian ./deploy/helm/librarian -n librarian --create-namespace \
   --set publicUrl=https://librarian.example.com
 ```

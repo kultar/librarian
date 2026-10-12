@@ -338,8 +338,17 @@ Agents inside the cluster reach librarian at `http://librarian.librarian.svc:808
 
 ## 10. Install and check
 
+The chart is published with every release as an OCI artifact, with the same version as the
+image (`image.tag` above):
+
 ```bash
-helm install librarian ./deploy/helm/librarian -n librarian -f values.yaml
+helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.11.0 \
+  -n librarian -f values.yaml
+```
+
+(or from a checkout of this repo: `helm install librarian ./deploy/helm/librarian ...`). Then:
+
+```bash
 kubectl -n librarian rollout status deploy/librarian
 helm test librarian -n librarian
 ```
@@ -389,7 +398,8 @@ Per-replica on purpose: rate limits (`rate_limit_per_minute` applies per replica
 
 ## Running it
 
-- **Upgrades**: `helm upgrade librarian ./deploy/helm/librarian -n librarian -f values.yaml`.
+- **Upgrades**: bump `image.tag`, then `helm upgrade librarian oci://ghcr.io/kultar/charts/librarian
+  --version <same> -n librarian -f values.yaml`.
   State is in Postgres and Secrets Manager; the registry is in git.
 - **Turning things on later**: writes per agent (`write_apis`), standing grants
   (`config.writes.grants`), verified sign-in for agents' users (`config.principals`), internal

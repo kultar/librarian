@@ -11,6 +11,10 @@ The release workflow then:
 - checks the tag matches the package version and runs the tests;
 - builds the wheel and sdist and creates a GitHub release with them;
 - builds and pushes `ghcr.io/kultar/librarian:{version, major.minor, latest}` for amd64 and arm64;
+- packages the Helm chart and pushes it to `oci://ghcr.io/kultar/charts/librarian` with the same
+  version (Chart.yaml `version` and `appVersion` must equal the release version, or the job fails).
+  The first push creates the package private: make `charts/librarian` public once under
+  GitHub → Packages, as the image is;
 - publishes `librarian-a2a` to PyPI **if** enabled (below).
 
 ## One-time setup
