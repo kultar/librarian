@@ -99,6 +99,7 @@ approvers:
 # APIs with no OpenAPI spec (needs `model`): learn from documentation pages, or from the
 # model's own knowledge (reads only). Both are unconfirmed until a real call succeeds.
 learning:
+  # model: claude-opus-5-5             # for learning only (once per API); default: `model`
   docs_max_pages: 8
   find_docs: true                      # look in the usual places when only base_url is given
   search:

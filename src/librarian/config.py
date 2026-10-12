@@ -159,6 +159,11 @@ class SearchSettings(BaseModel):
 class LearningSettings(BaseModel):
     """Learning APIs that have no machine-readable spec (needs `model`)."""
 
+    # The model used for learning (reading documentation, web search), when it should differ
+    # from `model` (which `fetch` uses on every plain-language request). Learning happens once
+    # per API, so a stronger model is cheap here; unset = the same as `model`. Same gateway
+    # settings (model_base_url, model_api, model_api_key); just the model name.
+    model: str | None = None
     docs_max_pages: int = Field(default=8, ge=1, le=20)
     # With only a base URL: look for documentation in the usual places (/docs,
     # docs.<domain>, /llms.txt, links on the homepage) before anything else.

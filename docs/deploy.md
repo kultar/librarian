@@ -296,8 +296,13 @@ config:
   model_base_url: http://litellm.litellm.svc:4000/v1
   model_api: anthropic                   # needed for web search through LiteLLM
   learning:
+    model: claude-opus-5-5               # optional: a stronger model for learning only
     search: {provider: model}            # let librarian search the web for API docs
 ```
+
+`model` answers every plain-language request, so its cost scales with agent traffic;
+`learning.model` runs once per API (reading its documentation, searching for it), so a stronger
+model there is cheap. Both go through the same gateway settings. Unset, learning uses `model`.
 
 and `LIBRARIAN_MODEL_API_KEY=<a LiteLLM virtual key for librarian>` in `librarian-env`.
 

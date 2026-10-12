@@ -267,3 +267,31 @@ def test_gateway_never_receives_a_provider_key_from_the_environment(
     settings.model_api_key = SecretStr("sk-gateway")
     model = _model_from_settings(settings)
     assert model.client.api_key == "sk-gateway"
+
+
+def test_learning_can_use_its_own_model_through_the_same_gateway() -> None:
+    from pathlib import Path
+
+    from librarian.config import LearningSettings, Settings
+    from librarian.service import Librarian, _model_from_settings  # pyright: ignore[reportPrivateUsage]
+
+    plain = Settings(
+        model="anthropic:claude-sonnet-5-5",
+        learning=LearningSettings(model="anthropic:claude-opus-5-5"),
+    )
+    assert _model_from_settings(plain) == "anthropic:claude-sonnet-5-5"
+    assert _model_from_settings(plain, plain.learning.model) == "anthropic:claude-opus-5-5"
+    gateway = Settings(
+        model="small",
+        model_base_url="http://litellm:4000/v1",
+        learning=LearningSettings(model="big"),
+    )
+    fetch_model: Any = _model_from_settings(gateway)
+    learn_model: Any = _model_from_settings(gateway, gateway.learning.model)
+    assert (fetch_model.model_name, learn_model.model_name) == ("small", "big")
+    assert learn_model.client.base_url == fetch_model.client.base_url  # same gateway
+    lib = Librarian(gateway.model_copy(update={"registry_dir": Path("/nonexistent")}))
+    assert lib.planner is not None and lib.extractor is not None
+    assert lib.planner.agent.model.model_name == "small"  # type: ignore[union-attr]
+    assert lib.extractor.model.model_name == "big"  # type: ignore[union-attr]
+    assert lib.search_model is lib.extractor.model

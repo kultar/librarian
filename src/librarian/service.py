@@ -261,10 +261,14 @@ class Librarian:
         self.planner = (
             Planner(model, settings.max_calls_per_fetch, mode) if model is not None else None
         )
+        # Learning (docs extraction, web search) may use its own model; by default the same.
+        learning_model = model
+        if planner_model is None and settings.learning.model and model is not None:
+            learning_model = _model_from_settings(settings, settings.learning.model)
         self.extractor: Agent[None, Any] | None = (
-            build_extractor(model, mode) if model is not None else None
+            build_extractor(learning_model, mode) if learning_model is not None else None
         )
-        self.search_model: Model | str | None = model
+        self.search_model: Model | str | None = learning_model
         self._last_hashes: dict[str, str] = {}  # without a database
         # Fetches specs and docs pages (a fresh client each time: they are rare).
         self.source_client_factory: Callable[[], httpx.AsyncClient] = lambda: httpx.AsyncClient(
@@ -1194,18 +1198,20 @@ def _default_notifier(settings: Settings) -> Notifier:
 NO_GATEWAY_KEY = "no-key-configured"  # sent to a gateway that needs no key
 
 
-def _model_from_settings(settings: Settings) -> Model | str | None:
-    if settings.model is None:
+def _model_from_settings(settings: Settings, name: str | None = None) -> Model | str | None:
+    """The configured model (`name` overrides the model name, with the same gateway)."""
+    name = name or settings.model
+    if name is None:
         return None
     if settings.model_base_url is None:
-        return settings.model  # e.g. "anthropic:claude-sonnet-5-5"; provider reads its own env
+        return name  # e.g. "anthropic:claude-sonnet-5-5"; provider reads its own env
     # Only ever the key configured for the gateway. Left unset, the provider libraries
     # would pick up OPENAI_API_KEY / ANTHROPIC_API_KEY from the environment and send that
     # real provider key to the gateway URL.
     api_key = (
         settings.model_api_key.get_secret_value() if settings.model_api_key else NO_GATEWAY_KEY
     )
-    name = settings.model.split(":", 1)[1] if ":" in settings.model else settings.model
+    name = name.split(":", 1)[1] if ":" in name else name
     if settings.model_api == "anthropic":
         from pydantic_ai.models.anthropic import AnthropicModel
         from pydantic_ai.providers.anthropic import AnthropicProvider

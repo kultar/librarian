@@ -172,7 +172,9 @@ The JSONL audit log is separate and always on.
 
 ## APIs without a spec, and APIs that change
 
-**Learning without a spec** (needs `model`). librarian learns from, in order of preference:
+**Learning without a spec** (needs `model`; set `learning.model` to use a stronger model for
+learning only, since that happens once per API while `fetch` runs on every request). librarian
+learns from, in order of preference:
 
 1. **An OpenAPI spec**: given, found at a well-known path, or linked from the docs.
 2. **Documentation pages**: the model reads the page and related pages on the same site and
