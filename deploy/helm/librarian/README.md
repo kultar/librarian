@@ -38,6 +38,7 @@ people ──HTTPS──► │ oauth2-proxy :4180 ──► 127.0.0.1:8081     
 |---|---|
 | Approver sign-in | `oauth2Proxy.enabled=true`, `oauth2Proxy.existingSecret`, `oauth2Proxy.oidcIssuerUrl`, `oauth2Proxy.approverGroup`, `ingress.pages` |
 | Reviewed registry | `registry.gitSync.enabled=true`, `registry.gitSync.repo`, `.path` |
+| The console at the pages host's root | on by default for signed-in approvers (`config.approvers.console`: `signed_in`, `open`, `off`) |
 | Registry repo access (GitHub App) | `githubApp.enabled=true`, `githubApp.appId`, `githubApp.installationId`, `githubApp.secretName` (see below) |
 | Caller keys | `config.callers` + caller keys as `LIBRARIAN_SECRET_LIBRARIAN_CALLERS_<AGENT>` via `envFrom` |
 | Secrets in AWS | `config.secrets_backend: aws`, `serviceAccount.annotations` (IRSA role) |

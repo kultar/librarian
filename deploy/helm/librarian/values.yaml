@@ -82,7 +82,8 @@ githubApp:
   secretKey: private-key.pem
 
 # Sign-in for approvers. Runs oauth2-proxy as a sidecar in front of the approval pages
-# and switches librarian to approvers.mode=trusted_header. Agents keep using the A2A
+# (and the console at the pages host's root, for the approver group) and switches
+# librarian to approvers.mode=trusted_header. Agents keep using the A2A
 # port directly and never pass through the proxy.
 oauth2Proxy:
   enabled: false

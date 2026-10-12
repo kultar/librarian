@@ -107,7 +107,7 @@ docker pull ghcr.io/kultar/librarian:0.12.0</code></pre></div>
       <div><dt>Writes need a person</dt><dd>A verified registry entry, a separate write credential, and a human approval or a grant pinned to an agent, a person and an operation. Each write is sent once, with no redirects and an idempotency key, and claimed atomically so replicas never run it twice.</dd></div>
       <div><dt>Untrusted input is fenced</dt><dd>The API host only ever comes from the caller's <code>base_url</code>, never from documentation or search results. Read versus write is decided by HTTP method. Search results are trust-ranked and third-party sites are skipped by default.</dd></div>
       <div><dt>No way out to your network</dt><dd>An SSRF guard with DNS pinning refuses private addresses unless you allow them, redirects stay on the same origin, and response sizes are capped.</dd></div>
-      <div><dt>Approval pages are locked down</dt><dd>A separate listener behind your SSO proxy, one-time HMAC links that expire, a strict content security policy with no external resources, and every decision recorded with who made it.</dd></div>
+      <div><dt>Approval pages are locked down</dt><dd>A separate listener behind your SSO proxy, one-time HMAC links that expire, a strict content security policy with no external resources, and every decision recorded with who made it. The console on the same listener shows credential references only, and every action there is audited too.</dd></div>
     </dl>
     <p style="margin-top:24px">The full <a href="https://github.com/kultar/librarian/blob/main/docs/threat-model.md">threat model</a> lists each threat and its mitigation.</p>
   </div>
@@ -130,8 +130,8 @@ docker compose up -d
       <div>
         <h3>For your team</h3>
         <p>A Helm chart with oauth2-proxy sign-in, git-sync for the registry, Postgres for shared state and AWS Secrets Manager for keys. Two or more replicas, no volumes, nothing exposed to the internet.</p>
-<pre><code>helm install librarian ./deploy/helm/librarian \
-  -n librarian -f values.yaml
+<pre><code>helm install librarian oci://ghcr.io/kultar/charts/librarian \
+  --version 0.12.0 -n librarian -f values.yaml
 helm test librarian -n librarian</code></pre>
         <a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a>
       </div>
@@ -195,6 +195,7 @@ mcp_servers:
         <li>Verified principals from your identity provider</li>
         <li>Replicas with shared state and no volumes</li>
         <li>Internal APIs learned on demand within the domains you list</li>
+        <li>A console for the people who run it: everything it knows, what waits on them, and the levers to revoke, block, re-learn and invalidate</li>
       </ul></div>
       <div><h3>Next</h3><ul>
         <li>Rate limits shared across replicas</li>

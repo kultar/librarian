@@ -20,7 +20,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.11)**. Expect breaking changes. Website: [kultar.github.io/librarian](https://kultar.github.io/librarian/).
+> Status: **alpha (v0.12)**. Expect breaking changes. Website: [kultar.github.io/librarian](https://kultar.github.io/librarian/).
 
 ## Why
 
@@ -405,6 +405,12 @@ uv run pytest
 
 - **v0.11**: internal APIs, scoped: agents learn internal APIs on demand within
   the domains you list (`internal_hosts`), instead of all-or-nothing `allow_private_networks`
+
+- **v0.11.1**: the Helm chart published to GHCR as an OCI artifact with every release
+- **v0.11.2**: fixes from the first real deployment (chart ids, `sslmode`, `github-app
+  init-repo`), `learning.model`, the Entra ID recipe and other deployment docs
+- **v0.12**: the console: what librarian knows and what waits on people, with revoke, block,
+  forget, invalidate, re-learn from a documentation URL, re-check and clear, all audited
 
 ### Next
 
