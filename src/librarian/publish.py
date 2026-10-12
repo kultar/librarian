@@ -42,6 +42,15 @@ class Publisher(Protocol):
         """Propose a change to an existing (possibly verified) entry; returns a URL."""
         ...
 
+    async def withdraw(self, api_id: str, reason: str) -> list[str]:
+        """Close the API's open review proposals (with `reason` as a comment) and delete
+        their branches; returns the URLs closed."""
+        ...
+
+    async def comment(self, api_id: str, text: str) -> list[str]:
+        """Leave `text` on the API's open review proposals; returns their URLs."""
+        ...
+
 
 class GitHubPublisher:
     def __init__(
@@ -115,6 +124,30 @@ class GitHubPublisher:
             title=title,
             body=body,
         )
+
+    async def _open_proposals(self, api_id: str) -> list[dict[str, Any]]:
+        prefixes = (f"librarian/onboard-{api_id}-", f"librarian/update-{api_id}-")
+        response = await self._call("GET", "/pulls", params={"state": "open", "per_page": 100})
+        pulls: list[dict[str, Any]] = response.json() if response.status_code == 200 else []
+        return [p for p in pulls if str(p.get("head", {}).get("ref", "")).startswith(prefixes)]
+
+    async def withdraw(self, api_id: str, reason: str) -> list[str]:
+        closed: list[str] = []
+        for pr in await self._open_proposals(api_id):
+            number = pr["number"]
+            await self._call("POST", f"/issues/{number}/comments", json={"body": reason})
+            await self._call("PATCH", f"/pulls/{number}", json={"state": "closed"})
+            branch = str(pr["head"]["ref"])
+            await self._call("DELETE", f"/git/refs/heads/{quote(branch)}")
+            closed.append(str(pr["html_url"]))
+        return closed
+
+    async def comment(self, api_id: str, text: str) -> list[str]:
+        urls: list[str] = []
+        for pr in await self._open_proposals(api_id):
+            await self._call("POST", f"/issues/{pr['number']}/comments", json={"body": text})
+            urls.append(str(pr["html_url"]))
+        return urls
 
     def _file_path(self, entry: ApiEntry) -> str:
         return f"{self.directory}/{entry.id}.yaml" if self.directory else f"{entry.id}.yaml"

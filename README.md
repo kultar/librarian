@@ -283,10 +283,11 @@ The pages listener's root (`/`) is a console for the people who run librarian: e
 knows (status, host, operations and where they were learned from), what is waiting on a person
 (keys to add, writes to approve, with the links), and the standing grants. It shows credential
 *references* only, never values. From there a signed-in approver can **revoke a grant**,
-**block** or **unblock** an API, **forget** a learned one, **invalidate a credential** (the next
-call asks for a fresh key), **re-learn** a provisional API from a documentation or spec URL you
+**block** or **unblock** an API, **forget** a learned one (its open review is closed as the App, and whatever waited on a
+person for it is cancelled), **invalidate a credential** (the next call asks for a fresh key), **re-learn** a provisional API from a documentation or spec URL you
 give it, **choose its authentication** when the spec and the model couldn't tell, **re-check**
-its source, and **clear a suspension**. Every action is recorded in the
+its source, and **clear a suspension**. Large APIs are shown by group (the spec's tags), with the
+operations that need attention first and a search box. Every action is recorded in the
 audit log with who did it. The console follows the approval pages' sign-in
 (`approvers.mode: trusted_header` behind your auth proxy); `approvers.console: open` serves it
 without sign-in on a laptop, `off` disables it.

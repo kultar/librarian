@@ -136,6 +136,21 @@ class Observations:
             self._items[(entry.id, op.id)] = obs
         return obs
 
+    async def forget(self, api_id: str) -> int:
+        """Drop everything observed about an API (it was forgotten): a re-learned entry
+        starts from scratch. Returns how many operations had observations."""
+        keys = [key for key in self._items if key[0] == api_id]
+        for key in keys:
+            obs = self._items.pop(key)
+            if self.store is not None:
+                await self.store.save_doc(
+                    "observation",
+                    f"{obs.api}/{obs.operation}"[:64],
+                    "retired",
+                    obs.model_dump_json(),
+                )
+        return len(keys)
+
     async def _save(self, obs: Observation) -> None:
         obs.updated_at = datetime.now(UTC)
         if self.store is not None:

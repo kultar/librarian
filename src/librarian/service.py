@@ -160,6 +160,16 @@ SOURCE_LABELS = {
 
 
 @dataclass
+class ForgetReport:
+    """What forgetting an API did besides dropping the entry."""
+
+    closed: list[str] = field(default_factory=list[str])  # review proposals closed
+    review_error: str | None = None  # why they could not be closed
+    cancelled: int = 0  # credential requests and write approvals denied
+    observations: int = 0  # operations whose observations were dropped
+
+
+@dataclass
 class RecheckReport:
     api: str
     status: str  # unchanged | changed | skipped | error
@@ -1061,10 +1071,22 @@ class Librarian:
     # -- console actions (a signed-in person; every one is audited) --------------------
 
     async def block(self, api_id: str, by: str) -> ApiEntry:
-        """Stop agents using an API until someone unblocks it."""
+        """Stop agents using an API until someone unblocks it. Open review proposals stay
+        open, with a comment saying so."""
         entry = await self.registry.set_status(api_id, EntryStatus.BLOCKED)
+        extra: dict[str, Any] = {}
+        if self.publisher is not None:
+            try:
+                extra["commented"] = await self.publisher.comment(
+                    api_id,
+                    f"Blocked in the console by {by}: agents are refused until someone "
+                    "unblocks it. This review stays open.",
+                )
+            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+                extra["review_error"] = str(exc)
+                log.warning("could not comment on %s's reviews: %s", api_id, exc)
         await self.audit.record(
-            AuditEvent(event="api_blocked", caller="console", principal=by, api=api_id)
+            AuditEvent(event="api_blocked", caller="console", principal=by, api=api_id, extra=extra)
         )
         return entry
 
@@ -1086,12 +1108,43 @@ class Librarian:
         )
         return entry
 
-    async def forget(self, api_id: str, by: str) -> None:
-        """Drop a learned API altogether (the next agent that needs it teaches it again)."""
+    async def forget(self, api_id: str, by: str) -> ForgetReport:
+        """Drop a learned API altogether: the entry, what was observed about it, anything
+        waiting on a person for it, and its open review proposals (closed as the App).
+        The next agent that needs it teaches it again."""
+        report = ForgetReport()
+        pending = self.broker.pending_for(api_id)
+        if pending is not None:
+            await self.broker.deny(pending.id, by)
+            report.cancelled += 1
+        for approval in [a for a in self.approvals.pending() if a.api == api_id]:
+            await self.approvals.deny(approval.id, by)
+            report.cancelled += 1
         await self.registry.forget(api_id)
+        report.observations = await self.observations.forget(api_id)
+        if self.publisher is not None:
+            try:
+                report.closed = await self.publisher.withdraw(
+                    api_id, f"Forgotten in the console by {by}; this proposal is withdrawn."
+                )
+            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+                report.review_error = str(exc)
+                log.warning("could not close %s's reviews: %s", api_id, exc)
         await self.audit.record(
-            AuditEvent(event="api_forgotten", caller="console", principal=by, api=api_id)
+            AuditEvent(
+                event="api_forgotten",
+                caller="console",
+                principal=by,
+                api=api_id,
+                extra={
+                    "closed_reviews": report.closed,
+                    "cancelled": report.cancelled,
+                    "observations": report.observations,
+                }
+                | ({"review_error": report.review_error} if report.review_error else {}),
+            )
         )
+        return report
 
     async def invalidate_credential(self, api_id: str, by: str) -> list[str]:
         """Overwrite the API's credential(s) with a useless value. The next call fails with

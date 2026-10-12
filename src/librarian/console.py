@@ -24,6 +24,7 @@ from librarian.audit import AuditEvent
 from librarian.calls import Caller
 from librarian.config import ApproverSettings
 from librarian.credentials import CredentialRequest, RequestState
+from librarian.opsearch import rank, tokens
 from librarian.registry.models import Access, ApiEntry, EntryStatus, Operation
 from librarian.registry.store import RegistryError
 from librarian.service import Librarian, LibrarianError
@@ -65,8 +66,8 @@ def _method(op: Operation) -> str:
     return f"<span class='method {e(op.method.lower())}'>{e(op.method.upper())}</span>"
 
 
-def _n(count: int, noun: str) -> str:
-    return f"{count} {noun}{'' if count == 1 else 's'}"
+def _n(count: int, noun: str, plural: str | None = None) -> str:
+    return f"{count} {noun if count == 1 else plural or noun + 's'}"
 
 
 def _when(moment: datetime | None) -> str:
@@ -126,13 +127,30 @@ def _form(action: str, token: str, button: str, cls: str = "", fields: str = "")
     )
 
 
+def _search_form(action: str, query: str, placeholder: str) -> str:
+    return (
+        f"<form method=get action='{e(action)}' class=search>"
+        f"<input name=q value='{e(query)}' placeholder='{e(placeholder)}' aria-label='Search'>"
+        "<button class=quiet>Search</button>"
+        + (f"<a href='{e(action)}'>Clear</a>" if query else "")
+        + "</form>"
+    )
+
+
 def _overview(
     librarian: Librarian,
     credentials: list[CredentialRequest],
     approvals: list[WriteApproval],
     token: str,
+    query: str = "",
 ) -> str:
     entries = librarian.registry.all()
+    total = len(entries)
+    if query:
+        needle = query.lower()
+        entries = [
+            x for x in entries if needle in f"{x.id} {x.name} {x.host} {x.description}".lower()
+        ]
     grants = [g for g in librarian.approvals.grants() if g.usable(datetime.now(UTC))]
     if credentials or approvals:
         rows = "".join(
@@ -167,8 +185,14 @@ def _overview(
         f"<table><tr><th>API</th><th>Status</th><th>Host</th><th>Operations</th>"
         f"<th>Learned from</th><th></th></tr>{api_rows}</table>"
         if entries
-        else "<p class=muted>No APIs yet. The first agent that needs one teaches it.</p>"
+        else (
+            f"<p class=muted>No API matches {e(query)!r}.</p>"
+            if query
+            else "<p class=muted>No APIs yet. The first agent that needs one teaches it.</p>"
+        )
     )
+    if total > 8 or query:
+        apis = _search_form("/", query, "Filter APIs by name, id or host") + apis
     errors = "".join(
         f"<p class=err><code>{e(path)}</code>: {e(problem)}</p>"
         for path, problem in librarian.registry.errors.items()
@@ -187,7 +211,7 @@ def _overview(
         else "<p class=muted>No standing grants: every write is approved one by one.</p>"
     )
     return f"""<h1>What librarian knows</h1>
-<p class=lede>{_n(len(entries), "API")}, {len(credentials) + len(approvals)} waiting on a person,
+<p class=lede>{_n(total, "API")}, {len(credentials) + len(approvals)} waiting on a person,
 {_n(len(grants), "standing grant")}.</p>
 <h2>Waiting on a person</h2>{waiting}
 <h2>APIs</h2>{errors}{apis}
@@ -220,7 +244,7 @@ def _expiry(grant: Grant) -> str:
     return ", ".join(parts) or "no limit"
 
 
-def _detail(librarian: Librarian, entry: ApiEntry, token: str) -> str:
+def _detail(librarian: Librarian, entry: ApiEntry, token: str, query: str = "") -> str:
     source_url = f": <code>{e(entry.source.url)}</code>" if entry.source.url else ""
     updated = e(entry.updated_at.isoformat(timespec="minutes")) if entry.updated_at else ""
     rows = [
@@ -243,26 +267,99 @@ def _detail(librarian: Librarian, entry: ApiEntry, token: str) -> str:
             )
         )
     details = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows)
-    op_rows = "".join(
-        f"<tr><td>{_method(op)}</td><td><code>{e(op.id)}</code></td>"
-        f"<td><code>{e(op.path)}</code></td>"
-        f"<td>{_access(op)}</td><td>{e(op.origin.value)}</td>"
-        f"<td>{_op_flags(librarian, entry, op, token)}</td></tr>"
-        for op in entry.operations
-    )
-    ops = (
-        f"<table><tr><th></th><th>Operation</th><th>Path</th><th>Access</th><th>From</th>"
-        f"<th></th></tr>{op_rows}</table>"
-        if entry.operations
-        else "<p class=muted>No operations.</p>"
-    )
     notes = f"<h2>Notes</h2><pre>{e(entry.notes)}</pre>" if entry.notes else ""
     return f"""<p><a href='/'>All APIs</a></p>
 <h1>{e(entry.name)}</h1>
 <p class=lede>{e(entry.description or entry.id)}</p>
 <div class=card><dl>{details}</dl></div>
-<h2>Operations</h2>{ops}{notes}
-{_actions(librarian, entry, token)}"""
+<h2>Operations</h2>{_operations(librarian, entry, token, query)}{notes}
+<h2>Actions</h2>{_actions(librarian, entry, token)}"""
+
+
+GROUP_THRESHOLD = 25  # above this many operations, group them
+
+
+def _group_of(op: Operation) -> str:
+    if op.tags:
+        return op.tags[0].strip().lower()[:40] or "other"
+    segments = [s for s in op.path.split("/") if s and not s.startswith("{")]
+    return segments[0].lower()[:40] if segments else "other"
+
+
+def _needs_attention(librarian: Librarian, entry: ApiEntry, op: Operation) -> bool:
+    return op.access is Access.UNKNOWN or librarian.observations.suspended(entry, op) is not None
+
+
+def _op_table(
+    librarian: Librarian, entry: ApiEntry, ops: list[Operation], token: str, origins: bool
+) -> str:
+    rows = "".join(
+        f"<tr><td>{_method(op)}</td>"
+        f"<td><code>{e(op.id)}</code>"
+        + (f"<br><span class=muted>{e(op.summary[:120])}</span>" if op.summary else "")
+        + f"</td><td><code>{e(op.path)}</code></td><td>{_access(op)}</td>"
+        + (f"<td>{e(op.origin.value)}</td>" if origins else "")
+        + f"<td>{_op_flags(librarian, entry, op, token)}</td></tr>"
+        for op in ops
+    )
+    head = "<th></th><th>Operation</th><th>Path</th><th>Access</th>"
+    head += "<th>From</th>" if origins else ""
+    return f"<table><tr>{head}<th></th></tr>{rows}</table>"
+
+
+def _operations(librarian: Librarian, entry: ApiEntry, token: str, query: str) -> str:
+    ops = entry.operations
+    if not ops:
+        return "<p class=muted>No operations.</p>"
+    obs = librarian.observations
+    origins = len({op.origin for op in ops}) > 1
+    reads = sum(1 for op in ops if op.access is Access.READ)
+    writes = sum(1 for op in ops if op.writable)
+    unknown = sum(1 for op in ops if op.access is Access.UNKNOWN)
+    suspended = sum(1 for op in ops if obs.suspended(entry, op))
+    unconfirmed = sum(1 for op in ops if op.access is Access.READ and not obs.confirmed(entry, op))
+    strip = [f"<b>{_n(len(ops), 'operation')}</b>", f"{reads} reads", f"{writes} writes enabled"]
+    if unknown:
+        strip.append(f"<span class=note>{unknown} need review</span>")
+    if suspended:
+        strip.append(f"<span class=bad>{suspended} suspended</span>")
+    if unconfirmed:
+        strip.append(f"{unconfirmed} unconfirmed")
+    parts = [f"<p class=strip>{' · '.join(strip)}</p>"]
+    if len(ops) > GROUP_THRESHOLD or query:
+        parts.append(_search_form(f"/apis/{entry.id}", query, "Search operations, paths, words"))
+    if query:
+        terms = set(tokens(query))
+        matches = [
+            op
+            for op in rank(entry, query, ops, limit=50)
+            if terms & set(tokens(f"{op.id} {op.path} {op.summary} {' '.join(op.tags)}"))
+        ]
+        parts.append(f"<p class=muted>{_n(len(matches), 'match', 'matches')} for {e(query)!r}.</p>")
+        if matches:
+            parts.append(_op_table(librarian, entry, matches, token, origins))
+        return "".join(parts)
+    attention = [op for op in ops if _needs_attention(librarian, entry, op)]
+    if attention and len(ops) > GROUP_THRESHOLD:
+        parts.append(
+            "<h3>Needs attention</h3>" + _op_table(librarian, entry, attention, token, origins)
+        )
+    if len(ops) <= GROUP_THRESHOLD:
+        parts.append(_op_table(librarian, entry, ops, token, origins))
+        return "".join(parts)
+    groups: dict[str, list[Operation]] = {}
+    for op in ops:
+        groups.setdefault(_group_of(op), []).append(op)
+    for name in sorted(groups):
+        members = groups[name]
+        open_ = any(_needs_attention(librarian, entry, op) for op in members)
+        parts.append(
+            f"<details{' open' if open_ else ''}><summary>{e(name)} "
+            f"<span class=muted>({len(members)})</span></summary>"
+            + _op_table(librarian, entry, members, token, origins)
+            + "</details>"
+        )
+    return "".join(parts)
 
 
 def _actions(librarian: Librarian, entry: ApiEntry, token: str) -> str:
@@ -344,8 +441,10 @@ def _actions(librarian: Librarian, entry: ApiEntry, token: str) -> str:
 
 
 def _auth(entry: ApiEntry) -> str:
+    if not entry.secret_ref:
+        return "none (no authentication)"
     kind = e(entry.auth.type)
-    ref = f"<code>{e(entry.secret_ref)}</code>" if entry.secret_ref else "none"
+    ref = f"<code>{e(entry.secret_ref)}</code>"
     write = ""
     if entry.write_secret_ref:
         write = f", writes with <code>{e(entry.write_secret_ref)}</code>"
@@ -396,7 +495,10 @@ def console_routes(librarian: Librarian) -> list[Route]:
         if denied is not None or identity is None:
             return denied or notice("bad", "Error", "Something went wrong.", 400)
         credentials = await _pending_credentials(librarian)
-        body = _overview(librarian, credentials, librarian.approvals.pending(), token_for(identity))
+        query = request.query_params.get("q", "").strip()[:100]
+        body = _overview(
+            librarian, credentials, librarian.approvals.pending(), token_for(identity), query
+        )
         return page("librarian", body, kind="console")
 
     async def api(request: Request) -> Response:
@@ -406,7 +508,9 @@ def console_routes(librarian: Librarian) -> list[Route]:
         entry = librarian.registry.get(request.path_params["api_id"])
         if entry is None:
             return notice("note", "Unknown API", "No API has that id.", 404)
-        return page(entry.name, _detail(librarian, entry, token_for(identity)), kind="console")
+        query = request.query_params.get("q", "").strip()[:100]
+        body = _detail(librarian, entry, token_for(identity), query)
+        return page(entry.name, body, kind="console")
 
     def back(api_id: str) -> str:
         return f" <a href='/apis/{e(api_id)}'>Back to the API</a>."
@@ -444,8 +548,19 @@ def console_routes(librarian: Librarian) -> list[Route]:
             status = e(entry.status.value)
             return notice("ok", "Unblocked", f"{e(api_id)} is {status} again.{back(api_id)}")
         if action == "forget":
-            await librarian.forget(api_id, identity)
-            return notice("ok", "Forgotten", f"{e(api_id)} is gone. <a href='/'>Back</a>.")
+            report = await librarian.forget(api_id, identity)
+            what = [f"{e(api_id)} is gone."]
+            if report.closed:
+                links = ", ".join(f"<a href='{e(u)}'>{e(u)}</a>" for u in report.closed)
+                what.append(f"Closed its review: {links}.")
+            if report.review_error:
+                what.append(
+                    f"<span class=bad>Its review could not be closed: "
+                    f"{e(report.review_error)}. Close it by hand.</span>"
+                )
+            if report.cancelled:
+                what.append(f"{report.cancelled} waiting request(s) denied.")
+            return notice("ok", "Forgotten", " ".join(what) + " <a href='/'>Back</a>.")
         if action == "invalidate":
             refs = await librarian.invalidate_credential(api_id, identity)
             return notice(

@@ -21,6 +21,18 @@ class FakeGitHub:
         self.calls: list[tuple[str, str, Any]] = []
         self.file_exists = file_exists
         self.existing_status = existing_status
+        self.open_pulls: list[dict[str, Any]] = [
+            {
+                "number": 7,
+                "html_url": "https://github.com/acme/registry/pull/7",
+                "head": {"ref": "librarian/onboard-jira-20261012"},
+            },
+            {
+                "number": 8,
+                "html_url": "https://github.com/acme/registry/pull/8",
+                "head": {"ref": "librarian/onboard-other-20261012"},
+            },
+        ]
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else None
@@ -40,6 +52,15 @@ class FakeGitHub:
             return httpx.Response(201, json={})
         if request.method == "POST" and path == "/pulls":
             return httpx.Response(201, json={"html_url": "https://github.com/acme/registry/pull/7"})
+        if request.method == "GET" and path == "/pulls":
+            return httpx.Response(200, json=self.open_pulls)
+        if request.method == "POST" and path.startswith("/issues/"):
+            return httpx.Response(201, json={})
+        if request.method == "PATCH" and path.startswith("/pulls/"):
+            self.open_pulls = [p for p in self.open_pulls if f"/pulls/{p['number']}" != path]
+            return httpx.Response(200, json={})
+        if request.method == "DELETE" and path.startswith("/git/refs/heads/"):
+            return httpx.Response(204)
         return httpx.Response(500)
 
 
@@ -120,6 +141,12 @@ async def test_onboard_publishes_and_survives_publish_failure(
         async def propose_update(self, entry: Any, title: str, body: str) -> str:
             raise PublishError("GitHub is down")
 
+        async def withdraw(self, api_id: str, reason: str) -> list[str]:
+            raise PublishError("GitHub is down")
+
+        async def comment(self, api_id: str, text: str) -> list[str]:
+            raise PublishError("GitHub is down")
+
     librarian.publisher = Failing()
     outcome = await librarian.onboard("jira", spec_url="https://x.example/spec.json")
     assert outcome.review_url is None
@@ -168,3 +195,19 @@ async def test_onboarding_says_when_an_internal_host_pattern_allowed_it(
         base_url="https://api.example.test",
     )
     assert "internal_hosts" not in outside.entry.notes
+
+
+async def test_withdraw_closes_only_the_apis_open_proposals() -> None:
+    fake = FakeGitHub()
+    closed = await publisher(fake).withdraw("jira", "Forgotten in the console by sam.")
+    assert closed == ["https://github.com/acme/registry/pull/7"]
+    calls = [(m, p) for m, p, _ in fake.calls]
+    assert ("POST", "/issues/7/comments") in calls
+    assert ("PATCH", "/pulls/7") in calls
+    assert ("DELETE", "/git/refs/heads/librarian/onboard-jira-20261012") in calls
+    assert not any(p.startswith(("/pulls/8", "/issues/8")) for _, p in calls)  # other API
+    assert [p["number"] for p in fake.open_pulls] == [8]
+    assert await publisher(fake).comment("jira", "note") == []  # nothing open any more
+    assert await publisher(fake).comment("other", "note") == [
+        "https://github.com/acme/registry/pull/8"
+    ]

@@ -78,6 +78,12 @@ class Proposals:
         self.updates.append((entry, title, body))
         return "https://github.test/acme/registry/pull/2"
 
+    async def withdraw(self, api_id: str, reason: str) -> list[str]:
+        return []
+
+    async def comment(self, api_id: str, text: str) -> list[str]:
+        return []
+
 
 @pytest.fixture
 def spec(router: Router, librarian: Librarian) -> Spec:

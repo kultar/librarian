@@ -103,6 +103,15 @@ form.inline{display:inline}
 button.small{width:auto;margin:0 0 0 6px;padding:4px 10px;font-size:.85em}
 main.console .zone button,main.console .card button{width:auto;min-width:200px}
 main.console label{margin-top:10px}
+details{border-top:1px solid var(--line);padding:4px 0}
+details:last-of-type{border-bottom:1px solid var(--line)}
+summary{cursor:pointer;font-family:var(--serif);font-size:1.1rem;padding:10px 0;
+list-style-position:inside}
+details table{margin:0 0 10px}.strip{color:var(--muted);margin:6px 0 14px}
+.strip b{color:var(--text)}
+form.search{display:flex;gap:8px;align-items:center;margin:4px 0 16px}
+form.search input{margin:0;flex:1}
+form.search button{margin:0;width:auto;min-width:0}
 @media (max-width:480px){dl{grid-template-columns:1fr;gap:2px 0}dt{margin-top:8px}}
 """
 )

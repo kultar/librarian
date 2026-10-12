@@ -137,10 +137,27 @@ async def test_block_unblock_and_forget(
     librarian.registry.overlay = tmp_path / "overlay"
     await librarian.onboard("learned", spec_url="https://x.example/spec.json")
     assert "Forget this API" in c.get("/apis/learned").text
-    assert c.post("/apis/learned/forget", data={"t": t}).status_code == 200
+    # forgetting also drops what was observed, denies what waited, and closes the review
+    from tests.test_publish import FakeGitHub, publisher
+
+    learned = librarian.registry.get("learned")
+    assert learned is not None
+    await librarian.observations.suspend(learned, learned.operations[0], "gone")
+    await librarian.broker.open(learned, Caller(agent="agent-a"), "missing")
+    fake = FakeGitHub()
+    fake.open_pulls[0]["head"]["ref"] = "librarian/onboard-learned-20261012"
+    librarian.publisher = publisher(fake)
+    done = c.post("/apis/learned/forget", data={"t": t})
+    assert done.status_code == 200 and "pull/7" in done.text and "1 waiting" in done.text
     assert librarian.registry.get("learned") is None
     assert not (tmp_path / "overlay" / "learned.yaml").exists()
-    assert audit.events[-1].event == "api_forgotten"
+    assert ("learned", learned.operations[0].id) not in librarian.observations._items  # pyright: ignore[reportPrivateUsage]
+    assert librarian.broker.pending_for("learned") is None
+    assert [p["number"] for p in fake.open_pulls] == [8]
+    event = audit.events[-1]
+    assert event.event == "api_forgotten"
+    assert event.extra["closed_reviews"] == ["https://github.com/acme/registry/pull/7"]
+    assert event.extra["cancelled"] == 1 and event.extra["observations"] == 1
 
 
 async def test_invalidate_credential_overwrites_the_secret(
@@ -231,3 +248,39 @@ async def test_revoke_grant_and_clear_suspension(
     assert librarian.observations.suspended(tracker, op) is None
     assert audit.events[-1].event == "suspension_cleared"
     assert c.post("/apis/tracker/ops/nope/clear", data={"t": t}).status_code == 404
+
+
+async def test_large_apis_are_grouped_searchable_and_flag_attention(librarian: Librarian) -> None:
+    from librarian.registry.models import ApiEntry
+
+    tags = ["repos", "issues", "pulls"]
+    ops = [
+        {
+            "id": f"op{i}",
+            "method": "POST" if i == 5 else "GET",
+            "path": f"/{tags[i % 3]}/{i}",
+            "access": "unknown" if i == 5 else "read",
+            "tags": [tags[i % 3]],
+            "summary": f"Operation number {i}",
+        }
+        for i in range(60)
+    ]
+    big = ApiEntry.model_validate(
+        {"id": "big", "name": "Big API", "base_url": "https://big.example.test", "operations": ops}
+    )
+    await librarian.registry.save(big)
+    librarian.settings.approvers.console = "open"
+    c = console(librarian)
+    page = c.get("/apis/big").text
+    assert "<b>60 operations</b>" in page and "1 need review" in page
+    assert page.count("<details") == 3 and "issues <span class=muted>(20)</span>" in page
+    assert page.count("<details open") == 1  # only the group with the unknown operation
+    assert "Needs attention" in page and page.index("op5") < page.index("<details")
+    assert "name=q" in page
+    found = c.get("/apis/big?q=issues").text
+    assert "<details" not in found and "match" in found and "op1" in found and "op0" not in found
+    none = c.get("/apis/big?q=zzzz").text
+    assert "0 matches" in none
+    small = c.get("/apis/tracker").text
+    assert "<details" not in small and "name=q" not in small  # few operations: one table
+    assert "Big API" in c.get("/?q=big").text and "Issue Tracker" not in c.get("/?q=big").text
