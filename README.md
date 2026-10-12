@@ -20,7 +20,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.12)**. Expect breaking changes. Website: [kultar.github.io/librarian](https://kultar.github.io/librarian/).
+> Status: **alpha (v0.13)**. Expect breaking changes. Website: [kultar.github.io/librarian](https://kultar.github.io/librarian/).
 
 ## Why
 
@@ -429,6 +429,15 @@ uv run pytest
   init-repo`), `learning.model`, the Entra ID recipe and other deployment docs
 - **v0.12**: the console: what librarian knows and what waits on people, with revoke, block,
   forget, invalidate, re-learn from a documentation URL, re-check and clear, all audited
+- **v0.12.1**: authentication settled by librarian when a spec declares none (inferred from the
+  model, or chosen in the console); a notice for every learned API; model refusals explained;
+  `fallback_model`
+- **v0.12.2**: the console copes with large APIs (groups, search, needs-attention first);
+  forgetting an API closes its review and cleans up
+- **v0.13**: the review step: a Slack card with a Review button to a signed-in page where an
+  approver decides operations that need it and approves (merged as the App; merging makes the
+  API verified) or denies; credential guidance inferred with the authentication; the pages
+  serve their own tab icon
 
 ### Next
 
