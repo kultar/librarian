@@ -96,7 +96,12 @@ high-value target. This document lists what we defend against, how, and what is 
 - DNS rebinding is closed by pinning: the host is resolved once, every address must be public,
   and the connection goes to that vetted IP. TLS still verifies the certificate against the real
   hostname (SNI), and pinned connections are never reused for another hostname.
-- Internal APIs belong in human-reviewed `verified` entries; keep `allow_private_networks` off.
+- `internal_hosts` narrows that exception to hosts matching the listed patterns (e.g.
+  `*.internal.example.com`): they may resolve to private addresses, but never to loopback or
+  link-local, and DNS pinning still applies. A pattern can't be a bare `*`.
+- Internal APIs belong in human-reviewed `verified` entries; keep `allow_private_networks` off
+  and list only the domains you mean in `internal_hosts`. The review PR and the audit log say
+  when an entry was learned under such a pattern.
 
 ### T5. Approval-link abuse
 - Links are HMAC tokens bound to one request, valid only while it is pending and until expiry,

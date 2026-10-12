@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 
 import httpx
@@ -8,6 +9,7 @@ import pytest
 from librarian.audit import MemoryAuditSink
 from librarian.calls import Caller, CallRequest
 from librarian.executor import CredentialMissing, PolicyDenied
+from librarian.net import PUBLIC, NetworkPolicy
 from librarian.registry import BasicAuth
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian
@@ -157,7 +159,7 @@ async def test_provisional_entries_cannot_reach_private_addresses(
     entry = librarian.registry.get("status")
     assert entry is not None
     await librarian.registry.save(entry.model_copy(update={"base_url": "http://127.0.0.1:9"}))
-    librarian.executor.allow_private_provisional = False
+    librarian.executor.net = PUBLIC
     with pytest.raises(PolicyDenied, match="non-public"):
         await librarian.executor.execute(CallRequest(api="status", operation="summary"), CALLER)
     assert router.requests == []
@@ -181,18 +183,18 @@ async def test_provisional_requests_are_pinned_to_the_vetted_address(
 ) -> None:
     from librarian import net
 
-    async def fake_resolve(host: str) -> list[str]:
+    async def fake_resolve(host: str, policy: NetworkPolicy = PUBLIC) -> list[str]:
         assert host == "status.example.test"
         return ["93.184.215.14"]
 
-    monkeypatch.setattr(net, "resolve_public", fake_resolve)
+    monkeypatch.setattr(net, "resolve", fake_resolve)
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return httpx.Response(200, json={"ok": True})
 
-    librarian.executor.allow_private_provisional = False
+    librarian.executor.net = PUBLIC
     librarian.executor._pinned_client_factory = lambda: httpx.AsyncClient(  # pyright: ignore[reportPrivateUsage]
         transport=httpx.MockTransport(handler)
     )
@@ -205,3 +207,34 @@ async def test_provisional_requests_are_pinned_to_the_vetted_address(
     assert sent.headers["host"] == "status.example.test"
     assert sent.extensions["sni_hostname"] == "status.example.test"  # TLS verifies the real name
     assert result.provenance.url == "https://status.example.test/summary"
+
+
+async def test_internal_hosts_let_provisional_entries_reach_private_addresses(
+    librarian: Librarian, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_notifiers_and_net import fake_dns
+
+    monkeypatch.setattr(
+        asyncio.get_running_loop(), "getaddrinfo", fake_dns({"status.example.test": ["10.0.0.5"]})
+    )
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    librarian.executor._pinned_client_factory = lambda: httpx.AsyncClient(  # pyright: ignore[reportPrivateUsage]
+        transport=httpx.MockTransport(handler)
+    )
+    librarian.executor.net = NetworkPolicy(internal_hosts=("*.example.test",))
+    result = await librarian.executor.execute(
+        CallRequest(api="status", operation="summary"), CALLER
+    )
+    assert result.ok
+    assert seen[0].url.host == "10.0.0.5"  # pinned to the private address that was vetted
+    assert seen[0].headers["host"] == "status.example.test"
+    # a host outside the listed patterns is still public-only
+    librarian.executor.net = NetworkPolicy(internal_hosts=("*.internal.example.test",))
+    with pytest.raises(PolicyDenied, match="non-public"):
+        await librarian.executor.execute(CallRequest(api="status", operation="summary"), CALLER)
+    assert len(seen) == 1

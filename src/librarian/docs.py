@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, NativeOutput, PromptedOutput
 from pydantic_ai.models import Model
 
+from librarian.net import PUBLIC, NetworkPolicy
 from librarian.openapi import (
     SpecError,
     classify,
@@ -197,7 +198,7 @@ async def crawl_docs(
     start_url: str,
     client: httpx.AsyncClient,
     *,
-    allow_private: bool = False,
+    net: NetworkPolicy = PUBLIC,
     max_pages: int = 8,
 ) -> DocsCrawl:
     """Read a docs page and up to `max_pages - 1` related pages on the same site.
@@ -217,9 +218,7 @@ async def crawl_docs(
             continue
         seen.add(key)
         try:
-            raw, final_url = await fetch_text(
-                url, client, allow_private=allow_private, max_bytes=MAX_PAGE_BYTES
-            )
+            raw, final_url = await fetch_text(url, client, net=net, max_bytes=MAX_PAGE_BYTES)
         except (SpecError, httpx.HTTPError):
             if not crawl.pages and url == start_url:
                 raise
@@ -230,7 +229,7 @@ async def crawl_docs(
             target = _without_fragment(urljoin(final_url, href))
             if _SPEC_LINK.search(target) and crawl.spec is None:
                 try:
-                    crawl.spec = await fetch_spec(target, client, allow_private=allow_private)
+                    crawl.spec = await fetch_spec(target, client, net=net)
                     crawl.spec_url = target
                     return crawl
                 except (SpecError, httpx.HTTPError):

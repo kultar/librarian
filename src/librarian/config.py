@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, SecretStr, field_validator, model_validat
 from pydantic_core import PydanticUseDefault
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from librarian.net import NetworkPolicy, host_pattern_ok
 from librarian.registry.models import RESERVED_SECRET_PREFIX
 
 
@@ -285,6 +286,11 @@ class Settings(BaseSettings):
     # Let onboarding and provisional entries reach private/internal addresses.
     # Keep off unless every caller is trusted (SSRF protection).
     allow_private_networks: bool = False
+    # Narrower than allow_private_networks: hostname patterns (e.g. "*.internal.example.com")
+    # that onboarding and provisional entries may reach even when they resolve to private
+    # addresses. Everything else stays public-only, and a listed host may still never
+    # resolve to loopback or link-local (cloud metadata) addresses.
+    internal_hosts: list[str] = Field(default_factory=list[str])
     onboarding_enabled: bool = True
     # Serve librarian's skills as MCP tools at /mcp (Streamable HTTP) on the A2A listener.
     # How many replicas run (the Helm chart sets this). Above 1, all state must be shared:
@@ -297,6 +303,23 @@ class Settings(BaseSettings):
     mcp_allowed_hosts: list[str] = Field(default_factory=list[str])
     # How long an A2A task waits for a human to provide a missing credential.
     credential_wait_seconds: float = 900
+
+    @field_validator("internal_hosts")
+    @classmethod
+    def _internal_hosts(cls, patterns: list[str]) -> list[str]:
+        for pattern in patterns:
+            if not host_pattern_ok(pattern):
+                raise ValueError(
+                    f"internal_hosts: {pattern!r} is not a hostname pattern (letters, digits, "
+                    "dots, dashes and *; to allow every private address set "
+                    "allow_private_networks instead)"
+                )
+        return [p.strip().lower() for p in patterns]
+
+    @property
+    def network(self) -> NetworkPolicy:
+        """What onboarding and provisional entries may reach (see net.py)."""
+        return NetworkPolicy(self.allow_private_networks, tuple(self.internal_hosts))
 
     # Caller authentication. Empty = open (local mode only).
     callers: list[CallerKey] = Field(default_factory=list[CallerKey])

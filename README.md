@@ -106,6 +106,19 @@ model_api_key: sk-litellm-...       # or LIBRARIAN_MODEL_API_KEY
 Environment variables are always checked last (`jira/readonly` → `LIBRARIAN_SECRET_JIRA_READONLY`).
 Internal secrets (caller keys, the link-signing key) live under the reserved `librarian/` prefix.
 
+**Internal APIs.** URLs that agents supply (onboarding) and the entries learned from them may
+only reach public addresses, so no agent can point librarian at your network. List the internal
+domains agents may learn on demand:
+
+```yaml
+internal_hosts: ["*.internal.example.com", "jira.corp"]   # or LIBRARIAN_INTERNAL_HOSTS='["*.internal.example.com"]'
+```
+
+A matching host may resolve to private addresses (never loopback or link-local, i.e. cloud
+metadata), with the same DNS pinning as public hosts; everything else stays public-only. The
+review PR and the audit log say when an API was learned under one of these patterns.
+`allow_private_networks: true` allows everything and is for a laptop.
+
 **State.** Credential requests, approvals, A2A tasks and APIs learned on demand are stored in
 SQLite by default (`.librarian/librarian.db`), so they survive restarts. For several replicas use
 Postgres (`database_url: postgresql+asyncpg://...`, the `postgres` extra; in the image) and
@@ -372,14 +385,15 @@ uv run pytest
   spread across nodes, survives a database failover); GitHub App for the registry repo, created
   with one command; step-by-step docs; on PyPI as `librarian-a2a`
 
+- **v0.11** (unreleased): internal APIs, scoped: agents learn internal APIs on demand within
+  the domains you list (`internal_hosts`), instead of all-or-nothing `allow_private_networks`
+
 ### Next
 
-- **Internal APIs, scoped**: let agents learn internal APIs on demand within domains you list
-  (e.g. `*.internal.example.com`), instead of all-or-nothing `allow_private_networks`.
+- Rate limits shared across replicas (today each replica counts on its own)
 
 ### Later
 
-- Rate limits shared across replicas (today each replica counts on its own)
 - Acting as the person: per-user OAuth for APIs that need the user's own access
 - More secret stores: Vault, GCP Secret Manager, Azure Key Vault
 - kagent: a tested recipe for using librarian as a `RemoteMCPServer`

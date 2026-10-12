@@ -20,7 +20,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 import yaml
 
-from librarian.net import BlockedAddress, check_url, pin
+from librarian.net import PUBLIC, BlockedAddress, NetworkPolicy, check_url, pin
 from librarian.registry.models import (
     Access,
     ApiEntry,
@@ -61,9 +61,9 @@ class SpecError(Exception):
     pass
 
 
-async def fetch_spec(url: str, client: httpx.AsyncClient, *, allow_private: bool = False) -> Json:
+async def fetch_spec(url: str, client: httpx.AsyncClient, *, net: NetworkPolicy = PUBLIC) -> Json:
     """Download and parse an OpenAPI/Swagger document (JSON or YAML), size-capped."""
-    text, _ = await fetch_text(url, client, allow_private=allow_private)
+    text, _ = await fetch_text(url, client, net=net)
     return parse_spec(text)
 
 
@@ -71,7 +71,7 @@ async def fetch_text(
     url: str,
     client: httpx.AsyncClient,
     *,
-    allow_private: bool = False,
+    net: NetworkPolicy = PUBLIC,
     max_bytes: int = MAX_SPEC_BYTES,
 ) -> tuple[str, str]:
     """Download a document (spec or docs page); returns (text, final URL).
@@ -82,9 +82,9 @@ async def fetch_text(
     for _ in range(6):
         target, headers, extensions = current, {}, None
         try:
-            await check_url(current, allow_private=True)  # scheme check
-            if not allow_private:
-                pinned = await pin(current)
+            await check_url(current, NetworkPolicy(allow_private=True))  # scheme check
+            if not net.allow_private:
+                pinned = await pin(current, net)
                 target = pinned.url
                 # Never reuse this connection for another hostname on the same IP.
                 headers = {"Host": pinned.host_header, "Connection": "close"}
@@ -136,11 +136,11 @@ def parse_spec(text: str) -> Json:
 
 
 async def discover_spec(
-    base_url: str, client: httpx.AsyncClient, *, allow_private: bool = False
+    base_url: str, client: httpx.AsyncClient, *, net: NetworkPolicy = PUBLIC
 ) -> tuple[str, Json]:
     """Try well-known spec locations under an API's origin."""
     try:
-        await check_url(base_url, allow_private)
+        await check_url(base_url, net)
     except BlockedAddress as exc:
         raise SpecError(str(exc)) from exc
     parts = urlsplit(base_url)
@@ -149,7 +149,7 @@ async def discover_spec(
         for path in SPEC_PATHS:
             url = root + path
             try:
-                return url, await fetch_spec(url, client, allow_private=allow_private)
+                return url, await fetch_spec(url, client, net=net)
             except (SpecError, httpx.HTTPError):
                 continue
     raise SpecError("no OpenAPI document found at well-known paths")

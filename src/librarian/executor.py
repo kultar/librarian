@@ -22,7 +22,7 @@ import httpx
 from librarian import __version__, telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance, WriteRequest
-from librarian.net import BlockedAddress, pin
+from librarian.net import PUBLIC, BlockedAddress, NetworkPolicy, pin
 from librarian.observations import Observations
 from librarian.policy import PolicyEngine
 from librarian.registry.models import (
@@ -71,7 +71,7 @@ class Executor:
         client: httpx.AsyncClient | None = None,
         timeout_seconds: float = 30.0,
         max_response_bytes: int = 2_000_000,
-        allow_private_provisional: bool = False,
+        net: NetworkPolicy = PUBLIC,
         pinned_client_factory: Callable[[], httpx.AsyncClient] | None = None,
         observations: Observations | None = None,
     ) -> None:
@@ -84,8 +84,9 @@ class Executor:
         )
         self.max_response_bytes = max_response_bytes
         # Provisional entries come from agent-supplied specs, so by default they
-        # may only reach public addresses. Verified entries were human-reviewed.
-        self.allow_private_provisional = allow_private_provisional
+        # may only reach public addresses (plus listed internal hosts). Verified
+        # entries were human-reviewed.
+        self.net = net
         # Pinned requests get a fresh client: httpcore pools connections by IP and
         # port, so a pooled connection verified for one hostname must not be reused
         # for another hostname on the same address.
@@ -382,13 +383,13 @@ class Executor:
         method = op.method
         current = url
         params: dict[str, ArgValue] = {**(query or {}), **secret_query}
-        must_pin = entry.status is not EntryStatus.VERIFIED and not self.allow_private_provisional
+        must_pin = entry.status is not EntryStatus.VERIFIED and not self.net.allow_private
         for _ in range(MAX_REDIRECTS + 1):
             _assert_same_origin(entry, current)
             target, send_headers, extensions = current, headers, None
             if must_pin:
                 try:
-                    pinned = await pin(current)
+                    pinned = await pin(current, self.net)
                 except BlockedAddress as exc:
                     raise PolicyDenied(f"provisional API {entry.id!r}: {exc}") from exc
                 target = pinned.url

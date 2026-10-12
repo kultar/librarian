@@ -13,6 +13,7 @@ from librarian.calls import Caller
 from librarian.config import SearchSettings
 from librarian.docs import build_extractor
 from librarian.finddocs import find_docs, registrable_domain, trust_of
+from librarian.net import NetworkPolicy
 from librarian.service import Librarian, LibrarianError
 from tests.conftest import Router
 from tests.test_learning import extractor_model
@@ -28,6 +29,9 @@ DOCS_PAGE = """<html><body><h1>Gizmo API reference</h1>
 <pre>DELETE /v1/gizmos/{id}</pre><p>Delete one.</p>
 </body></html>"""
 MARKETING = "<html><body><h1>Gizmo: the best gizmos</h1></body></html>"
+
+
+PRIVATE = NetworkPolicy(allow_private=True)
 
 
 def client(router: Router) -> httpx.AsyncClient:
@@ -55,7 +59,7 @@ def test_registrable_domain_and_trust() -> None:
 async def test_finds_docs_on_a_docs_subdomain(router: Router) -> None:
     router.add("GET", "https://gizmo.test/docs", page(MARKETING))  # not docs: no endpoints
     router.add("GET", "https://docs.gizmo.test/", page(DOCS_PAGE))
-    found, _ = await find_docs(BASE, client(router), allow_private=True)
+    found, _ = await find_docs(BASE, client(router), net=PRIVATE)
     assert found is not None
     assert (found.url, found.found_by, found.trust) == (
         "https://docs.gizmo.test/",
@@ -68,7 +72,7 @@ async def test_finds_docs_linked_from_the_homepage(router: Router) -> None:
     home = "<html><body><a href='/build/api-reference'>Developers</a></body></html>"
     router.add("GET", "https://gizmo.test/", page(home))
     router.add("GET", "https://gizmo.test/build/api-reference", page(DOCS_PAGE))
-    found, _ = await find_docs(BASE, client(router), allow_private=True)
+    found, _ = await find_docs(BASE, client(router), net=PRIVATE)
     assert found is not None and found.found_by == "homepage"
 
 
@@ -84,7 +88,7 @@ async def test_follows_a_landing_page_one_click_to_the_reference(router: Router)
     index = "<html><body><p>Try https://api.gizmo.test/v1/gizmos</p></body></html>"
     router.add("GET", "https://gizmo.test/gizmo-api/documentation", page(index))
     router.add("GET", "https://elsewhere.example/api", page(DOCS_PAGE * 5))
-    found, _ = await find_docs(BASE, client(router), allow_private=True)
+    found, _ = await find_docs(BASE, client(router), net=PRIVATE)
     assert found is not None and found.url == "https://gizmo.test/gizmo-api/documentation"
     assert not any("elsewhere" in str(r.url) for r in router.requests)  # official site only
 
@@ -92,13 +96,13 @@ async def test_follows_a_landing_page_one_click_to_the_reference(router: Router)
 async def test_a_page_with_one_example_is_not_docs_unless_it_says_so(router: Router) -> None:
     one = "<html><body><p>Try https://api.gizmo.test/v1/gizmos</p></body></html>"
     router.add("GET", "https://gizmo.test/developers", page(one))  # not a docs path
-    found, _ = await find_docs(BASE, client(router), allow_private=True)
+    found, _ = await find_docs(BASE, client(router), net=PRIVATE)
     assert found is None
 
 
 async def test_a_linked_spec_wins(router: Router) -> None:
     router.add("GET", "https://api.gizmo.test/docs", lambda r: httpx.Response(200, json=SPEC))
-    found, _ = await find_docs(BASE, client(router), allow_private=True)
+    found, _ = await find_docs(BASE, client(router), net=PRIVATE)
     assert found is not None and found.spec is not None
 
 
@@ -116,9 +120,7 @@ async def test_search_prefers_official_and_skips_third_party(router: Router) -> 
             "https://gizmo.test/help/rest",
         ]
 
-    found, notes = await find_docs(
-        BASE, client(router), name="Gizmo", searcher=search, allow_private=True
-    )
+    found, notes = await find_docs(BASE, client(router), name="Gizmo", searcher=search, net=PRIVATE)
     assert queries == ["Gizmo API documentation"]
     assert found is not None and found.url == "https://gizmo.test/help/rest"  # official first
     assert any("skipped 1 third-party" in n for n in notes)
@@ -129,7 +131,7 @@ async def test_search_prefers_official_and_skips_third_party(router: Router) -> 
         client(router),
         name="Gizmo",
         searcher=search,
-        allow_private=True,
+        net=PRIVATE,
         allow_third_party=True,
         look_nearby=False,
     )
@@ -143,7 +145,7 @@ async def test_a_redirect_off_the_official_site_counts_as_third_party(router: Ro
         lambda r: httpx.Response(302, headers={"location": "https://elsewhere.example/docs"}),
     )
     router.add("GET", "https://elsewhere.example/docs", page(DOCS_PAGE))
-    found, _ = await find_docs(BASE, client(router), allow_private=True)
+    found, _ = await find_docs(BASE, client(router), net=PRIVATE)
     assert found is None
 
 

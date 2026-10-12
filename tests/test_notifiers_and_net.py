@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import socket
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -9,7 +11,7 @@ import pytest
 
 from librarian.config import Settings
 from librarian.credentials import CredentialRequest, RequestState
-from librarian.net import BlockedAddress, check_url, resolve_public
+from librarian.net import PUBLIC, BlockedAddress, NetworkPolicy, check_url, host_pattern_ok, resolve
 from librarian.notifiers import SlackNotifier, WebhookNotifier, card_blocks, mention
 
 
@@ -29,6 +31,9 @@ def make_request(**overrides: Any) -> CredentialRequest:
     }
     values.update(overrides)
     return CredentialRequest.model_validate(values)
+
+
+PRIVATE = NetworkPolicy(allow_private=True)
 
 
 async def test_slack_posts_card_then_updates_and_threads() -> None:
@@ -158,14 +163,74 @@ async def test_webhook_payload() -> None:
 )
 async def test_private_addresses_blocked(url: str) -> None:
     with pytest.raises(BlockedAddress):
-        await check_url(url, allow_private=False)
-    await check_url(url, allow_private=True)  # explicitly allowed
+        await check_url(url)
+    await check_url(url, PRIVATE)  # explicitly allowed
 
 
 async def test_public_literal_allowed_and_schemes_checked() -> None:
-    assert await resolve_public("93.184.215.14") == ["93.184.215.14"]
+    assert await resolve("93.184.215.14") == ["93.184.215.14"]
     with pytest.raises(BlockedAddress):
-        await check_url("file:///etc/passwd", allow_private=True)
+        await check_url("file:///etc/passwd", PRIVATE)
+
+
+def test_internal_host_patterns() -> None:
+    policy = NetworkPolicy(internal_hosts=("*.internal.example.test", "api.corp.test"))
+    assert policy.internal_pattern("jira.internal.example.test") == "*.internal.example.test"
+    assert policy.internal_pattern("a.b.internal.example.test") == "*.internal.example.test"
+    assert policy.internal_pattern("API.CORP.TEST.") == "api.corp.test"  # case, trailing dot
+    assert policy.internal_pattern("internal.example.test") is None  # the wildcard needs a label
+    assert policy.internal_pattern("jira.internal.example.test.attacker.test") is None
+    assert policy.internal_pattern("xapi.corp.test") is None
+    assert PUBLIC.internal_pattern("jira.internal.example.test") is None
+    for bad in ("*", "*.", "", "http://x.test", "a b", "x/y", "*.*"):
+        assert not host_pattern_ok(bad), bad
+    assert host_pattern_ok("*.internal.example.test") and host_pattern_ok("api-1.corp.test")
+
+
+def fake_dns(answers: dict[str, list[str]]) -> Any:
+    async def getaddrinfo(host: str, port: Any, *args: Any, **kwargs: Any) -> list[Any]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (a, 0)) for a in answers[host]]
+
+    return getaddrinfo
+
+
+async def test_internal_hosts_allow_private_but_never_loopback_or_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = NetworkPolicy(internal_hosts=("*.internal.example.test",))
+    answers = {
+        "jira.internal.example.test": ["10.1.2.3"],
+        "pub.internal.example.test": ["93.184.215.14"],
+        "meta.internal.example.test": ["169.254.169.254"],
+        "lo.internal.example.test": ["127.0.0.1"],
+        "mapped.internal.example.test": ["::ffff:127.0.0.1"],
+        "mixed.internal.example.test": ["10.1.2.3", "169.254.169.254"],
+        "other.example.test": ["10.1.2.3"],
+    }
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", fake_dns(answers))
+    assert await resolve("jira.internal.example.test", policy) == ["10.1.2.3"]
+    assert await resolve("pub.internal.example.test", policy) == ["93.184.215.14"]
+    for host in ("meta", "lo", "mapped", "mixed"):
+        with pytest.raises(BlockedAddress, match="disallowed"):
+            await resolve(f"{host}.internal.example.test", policy)
+    with pytest.raises(BlockedAddress, match="non-public"):
+        await resolve("other.example.test", policy)  # not listed: public only, as before
+    with pytest.raises(BlockedAddress, match="non-public"):
+        await resolve("jira.internal.example.test")  # PUBLIC policy ignores the listing
+    pinned = await check_url("https://jira.internal.example.test/x", policy)
+    assert pinned is None
+
+
+def test_internal_hosts_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="allow_private_networks"):
+        Settings(internal_hosts=["*"])
+    with pytest.raises(ValueError, match="hostname pattern"):
+        Settings(internal_hosts=["https://x.test"])
+    settings = Settings(internal_hosts=[" *.Internal.Example.com "])
+    assert settings.network == NetworkPolicy(False, ("*.internal.example.com",))
+    monkeypatch.setenv("LIBRARIAN_INTERNAL_HOSTS", '["*.corp.test"]')
+    assert Settings().network.internal_hosts == ("*.corp.test",)
+    assert Settings(allow_private_networks=True).network.allow_private
 
 
 def test_settings_from_yaml_and_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,10 +253,10 @@ def test_settings_from_yaml_and_env(tmp_path: Any, monkeypatch: pytest.MonkeyPat
 async def test_pin_formats_ipv6_and_ports(monkeypatch: pytest.MonkeyPatch) -> None:
     from librarian import net
 
-    async def fake_resolve(host: str) -> list[str]:
+    async def fake_resolve(host: str, policy: NetworkPolicy = PUBLIC) -> list[str]:
         return ["2606:2800:21f:cb07:6820:80da:af6b:8b2c"]
 
-    monkeypatch.setattr(net, "resolve_public", fake_resolve)
+    monkeypatch.setattr(net, "resolve", fake_resolve)
     target = await net.pin("https://api.example.test:8443/v1/x?q=1")
     assert target.url == "https://[2606:2800:21f:cb07:6820:80da:af6b:8b2c]:8443/v1/x?q=1"
     assert target.host_header == "api.example.test:8443"

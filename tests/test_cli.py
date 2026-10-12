@@ -77,7 +77,7 @@ def test_learn_then_list_in_a_fresh_folder_with_defaults(
     from librarian.cli import app
     from tests.test_openapi import SPEC
 
-    async def fake_fetch(url: str, client: Any, *, allow_private: bool) -> Any:
+    async def fake_fetch(url: str, client: Any, *, net: Any) -> Any:
         return SPEC
 
     monkeypatch.setattr(service_module, "fetch_spec", fake_fetch)

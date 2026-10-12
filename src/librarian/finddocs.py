@@ -28,6 +28,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from librarian.docs import html_to_text
+from librarian.net import PUBLIC, NetworkPolicy
 from librarian.openapi import SpecError, fetch_text, parse_spec
 
 log = logging.getLogger(__name__)
@@ -130,7 +131,7 @@ async def find_docs(
     *,
     name: str | None = None,
     searcher: Searcher | None = None,
-    allow_private: bool = False,
+    net: NetworkPolicy = PUBLIC,
     allow_third_party: bool = False,
     look_nearby: bool = True,
 ) -> tuple[FoundDocs | None, list[str]]:
@@ -139,17 +140,13 @@ async def find_docs(
     if look_nearby:
         nearby = _nearby_candidates(base_url)
         onward: list[Candidate] = []
-        found = await _best(
-            nearby, base_url, client, allow_private, allow_third_party, len(nearby), onward
-        )
+        found = await _best(nearby, base_url, client, net, allow_third_party, len(nearby), onward)
         if found is None:
-            homepage = await _homepage_links(base_url, client, allow_private)
-            found = await _best(
-                homepage, base_url, client, allow_private, allow_third_party, follow=onward
-            )
+            homepage = await _homepage_links(base_url, client, net)
+            found = await _best(homepage, base_url, client, net, allow_third_party, follow=onward)
         if found is None:
             # Landing pages often link to the reference one click further.
-            found = await _best(onward, base_url, client, allow_private, allow_third_party)
+            found = await _best(onward, base_url, client, net, allow_third_party)
         if found is not None:
             return found, notes
         notes.append("no documentation in the usual places")
@@ -173,7 +170,7 @@ async def find_docs(
             f"skipped {len(skipped)} third-party search result(s) "
             "(set learning.search.allow_third_party to use them)"
         )
-    found = await _best(candidates, base_url, client, allow_private, allow_third_party)
+    found = await _best(candidates, base_url, client, net, allow_third_party)
     if found is None:
         notes.append(f"search for {query!r} found no usable documentation")
     return found, notes
@@ -198,14 +195,12 @@ def _nearby_candidates(base_url: str) -> list[Candidate]:
 
 
 async def _homepage_links(
-    base_url: str, client: httpx.AsyncClient, allow_private: bool
+    base_url: str, client: httpx.AsyncClient, net: NetworkPolicy
 ) -> list[Candidate]:
     domain = registrable_domain(urlsplit(base_url).hostname or "")
     home = f"https://{domain}/"
     try:
-        raw, final = await fetch_text(
-            home, client, allow_private=allow_private, max_bytes=MAX_DOC_BYTES
-        )
+        raw, final = await fetch_text(home, client, net=net, max_bytes=MAX_DOC_BYTES)
     except (SpecError, httpx.HTTPError):
         return []
     _, links = html_to_text(raw)
@@ -225,7 +220,7 @@ async def _best(
     candidates: list[Candidate],
     base_url: str,
     client: httpx.AsyncClient,
-    allow_private: bool,
+    net: NetworkPolicy,
     allow_third_party: bool,
     limit: int = MAX_CANDIDATES,
     follow: list[Candidate] | None = None,
@@ -242,9 +237,7 @@ async def _best(
         if trust == "third-party" and not allow_third_party:
             continue
         try:
-            raw, final = await fetch_text(
-                candidate.url, client, allow_private=allow_private, max_bytes=MAX_DOC_BYTES
-            )
+            raw, final = await fetch_text(candidate.url, client, net=net, max_bytes=MAX_DOC_BYTES)
         except (SpecError, httpx.HTTPError):
             continue
         trust = trust_of(final, base_url)  # a redirect can leave the official site

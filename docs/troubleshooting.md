@@ -50,7 +50,8 @@ memory. Or use `learning.search.provider: searxng` / `brave`.
 
 **An internal API can't be reached: "... resolves to non-public address(es) ...".**
 By default librarian only learns and calls public addresses, because any agent can point it at a
-URL. `allow_private_networks: true` allows private ones (all of them).
+URL. List the domains agents may learn in `internal_hosts` (e.g. `["*.internal.example.com"]`);
+`allow_private_networks: true` allows every private address and is for a laptop.
 
 **Learned APIs disappear after a restart.**
 With Postgres they are stored there. Without a database they are files on the pod's volume

@@ -91,9 +91,10 @@ publicUrl: https://librarian.internal.example.com
 | your search provider (if `learning.search` is on) | finding API documentation |
 | the APIs your agents use | the calls themselves, plus their specs and docs when learning them |
 
-The last row is open-ended by design (agents bring APIs on demand). Calls to private
-addresses are refused unless `allow_private_networks` is set; restrict egress further with
-your cluster's network policies or egress proxy if you need to.
+The last row is open-ended by design (agents bring APIs on demand). Private addresses are
+refused unless the host matches a pattern in `config.internal_hosts` (see step 9), or
+`allow_private_networks` is set; restrict egress further with your cluster's network policies
+or egress proxy if you need to.
 
 ## 1. The registry repo and its GitHub App
 
@@ -313,6 +314,7 @@ ingress:
 config:
   secrets_backend: aws
   aws_secrets: {prefix: librarian/}
+  internal_hosts: ["*.internal.example.com"]   # internal APIs agents may learn on demand
   notifier:
     type: slack
     slack: {channel: "#api-access", approver_group: S0123ABCD}
@@ -391,7 +393,7 @@ Per-replica on purpose: rate limits (`rate_limit_per_minute` applies per replica
   State is in Postgres and Secrets Manager; the registry is in git.
 - **Turning things on later**: writes per agent (`write_apis`), standing grants
   (`config.writes.grants`), verified sign-in for agents' users (`config.principals`), internal
-  APIs (`allow_private_networks`). See [`examples/librarian.yaml`](../examples/librarian.yaml)
+  APIs within the domains you list (`config.internal_hosts`). See [`examples/librarian.yaml`](../examples/librarian.yaml)
   for every option.
 - **Audit**: one JSON line per call, decision and approval on stdout (`"audit"` events), plus
   OpenTelemetry traces and metrics when enabled.

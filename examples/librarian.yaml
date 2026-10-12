@@ -32,6 +32,7 @@ request_timeout_seconds: 30
 max_response_bytes: 2000000
 allow_provisional: true                # serve auto-learned (unreviewed) entries, GET/HEAD only
 allow_private_networks: false          # SSRF guard for onboarding + provisional entries
+internal_hosts: []                     # e.g. ["*.internal.example.com"]: private addresses allowed for these hosts only
 onboarding_enabled: true
 credential_wait_seconds: 900           # how long a task waits for an approver
 

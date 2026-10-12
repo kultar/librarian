@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic_ai import Agent
@@ -206,7 +207,7 @@ class Librarian:
             self.audit,
             client=self.http,
             max_response_bytes=settings.max_response_bytes,
-            allow_private_provisional=settings.allow_private_networks,
+            net=settings.network,
         )
         self.notifier = notifier or _default_notifier(settings)
         self.broker = CredentialBroker(
@@ -653,6 +654,9 @@ class Librarian:
         )
         if existing is not None:
             entry = _keep_human_fields(existing, entry)
+        internal = self._internal_note(entry)
+        if internal:
+            entry = entry.model_copy(update={"notes": (entry.notes + "\n" + internal)[:8000]})
         path = await self.registry.save(entry)
         reads = sum(1 for op in entry.operations if op.access is Access.READ)
         review = sum(1 for op in entry.operations if op.access is Access.UNKNOWN)
@@ -672,10 +676,20 @@ class Librarian:
                 api=api_id,
                 detail=f"{len(entry.operations)} operations ({reads} read, {review} need review)"
                 f" from {entry.source.kind}",
-                extra={"source": entry.source.url, "review_url": review_url},
+                extra={"source": entry.source.url, "review_url": review_url}
+                | ({"internal": internal} if internal else {}),
             )
         )
         return OnboardResult(entry, path, reads, review, review_url, review_error)
+
+    def _internal_note(self, entry: ApiEntry) -> str:
+        """Says so when the API is reachable only because of an `internal_hosts` pattern,
+        for the reviewer of the PR and the audit log."""
+        host = urlsplit(entry.base_url).hostname or ""
+        pattern = self.settings.network.internal_pattern(host)
+        if pattern is None or self.settings.allow_private_networks:
+            return ""
+        return f"Internal API: {host} is reachable because it matches internal_hosts {pattern!r}."
 
     async def _learn(
         self,
@@ -686,11 +700,11 @@ class Librarian:
         docs_url: str | None = None,
         name: str | None = None,
     ) -> ApiEntry:
-        private = self.settings.allow_private_networks
+        net = self.settings.network
         client = self.source_client_factory()
         try:
             if spec_url is not None:
-                spec = await fetch_spec(spec_url, client, allow_private=private)
+                spec = await fetch_spec(spec_url, client, net=net)
                 return entry_from_spec(
                     spec, api_id=api_id, spec_url=spec_url, base_url=base_url, name=name
                 )
@@ -703,7 +717,7 @@ class Librarian:
                 crawl = await crawl_docs(
                     docs_url,
                     client,
-                    allow_private=private,
+                    net=net,
                     max_pages=self.settings.learning.docs_max_pages,
                 )
                 if crawl.spec is not None:  # the docs link a real spec: use it
@@ -732,7 +746,7 @@ class Librarian:
             if base_url is None:
                 raise LibrarianError("onboarding needs spec_url, docs_url or base_url")
             try:
-                found_url, spec = await discover_spec(base_url, client, allow_private=private)
+                found_url, spec = await discover_spec(base_url, client, net=net)
             except SpecError as no_spec:
                 return await self._learn_without_spec(api_id, base_url, name, client, no_spec)
             return entry_from_spec(
@@ -754,7 +768,7 @@ class Librarian:
         """No spec at the usual paths: find documentation (usual places, then a web
         search if configured), else fall back to the model's own knowledge."""
         learning = self.settings.learning
-        private = self.settings.allow_private_networks
+        net = self.settings.network
         notes: list[str] = [str(no_spec)]
         searcher = self._searcher(client)
         if learning.find_docs or searcher is not None:
@@ -763,7 +777,7 @@ class Librarian:
                 client,
                 name=name,
                 searcher=searcher,
-                allow_private=private,
+                net=net,
                 allow_third_party=learning.search.allow_third_party,
                 look_nearby=learning.find_docs,
             )
@@ -777,7 +791,7 @@ class Librarian:
                     return _with_source(entry, provenance)
                 extractor = self._require_extractor("learning from documentation")
                 crawl = await crawl_docs(
-                    found.url, client, allow_private=private, max_pages=learning.docs_max_pages
+                    found.url, client, net=net, max_pages=learning.docs_max_pages
                 )
                 if crawl.spec is not None:
                     entry = entry_from_spec(
@@ -836,11 +850,11 @@ class Librarian:
         if source.kind not in ("openapi", "docs") or not source.url:
             return RecheckReport(api_id, "skipped", detail="no spec or docs to re-read")
         last = await self._last_hash(entry)
-        private = self.settings.allow_private_networks
+        net = self.settings.network
         client = self.source_client_factory()
         try:
             if source.kind == "openapi":
-                spec = await fetch_spec(source.url, client, allow_private=private)
+                spec = await fetch_spec(source.url, client, net=net)
                 current_hash = spec_hash(spec)
                 if current_hash == last:
                     return RecheckReport(api_id, "unchanged")
@@ -855,7 +869,7 @@ class Librarian:
                 crawl = await crawl_docs(
                     source.url,
                     client,
-                    allow_private=private,
+                    net=net,
                     max_pages=max(len(source.pages), 1),
                 )
                 current_hash = spec_hash(crawl.spec) if crawl.spec else crawl.content_hash

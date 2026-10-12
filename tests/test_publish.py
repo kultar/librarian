@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from librarian import service as service_module
+from librarian.audit import MemoryAuditSink
 from librarian.openapi import entry_from_spec
 from librarian.publish import GitHubPublisher, PublishError, review_body
 from librarian.service import Librarian
@@ -102,7 +103,7 @@ def test_review_body_lists_decisions() -> None:
 async def test_onboard_publishes_and_survives_publish_failure(
     librarian: Librarian, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake_fetch(url: str, client: httpx.AsyncClient, *, allow_private: bool) -> Any:
+    async def fake_fetch(url: str, client: httpx.AsyncClient, *, net: Any) -> Any:
         return SPEC
 
     monkeypatch.setattr(service_module, "fetch_spec", fake_fetch)
@@ -141,3 +142,29 @@ async def test_updates_to_verified_entries_are_proposed_not_refused() -> None:
     assert put["sha"] == "old-sha" and put["branch"].startswith("librarian/update-jira-")
     pr = next(body for _, path, body in fake.calls if path == "/pulls")
     assert pr["title"] == "registry: `jira` changed"
+
+
+async def test_onboarding_says_when_an_internal_host_pattern_allowed_it(
+    librarian: Librarian, monkeypatch: pytest.MonkeyPatch, audit: MemoryAuditSink
+) -> None:
+    async def fake_fetch(url: str, client: httpx.AsyncClient, *, net: Any) -> Any:
+        return SPEC
+
+    monkeypatch.setattr(service_module, "fetch_spec", fake_fetch)
+    librarian.settings = librarian.settings.model_copy(
+        update={"allow_private_networks": False, "internal_hosts": ["*.internal.example.test"]}
+    )
+    result = await librarian.onboard(
+        "inside",
+        spec_url="https://jira.internal.example.test/openapi.json",
+        base_url="https://jira.internal.example.test/api",
+    )
+    note = "matches internal_hosts '*.internal.example.test'"
+    assert note in result.entry.notes  # the reviewer of the PR sees it
+    assert note in str(audit.events[-1].extra.get("internal"))
+    outside = await librarian.onboard(
+        "outside",
+        spec_url="https://api.example.test/openapi.json",
+        base_url="https://api.example.test",
+    )
+    assert "internal_hosts" not in outside.entry.notes
