@@ -20,7 +20,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.13)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
+> Status: **alpha (v0.14)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
 ## Why
 
@@ -515,6 +515,10 @@ uv run pytest
   approver decides operations that need it and approves (merged as the App; merging makes the
   API verified) or denies; credential guidance inferred with the authentication; the pages
   serve their own tab icon
+- **v0.14**: acting as the person: per-person OAuth sign-in (each person's own token, the API
+  enforces their access; verified live against GitHub); the console redesigned as an admin
+  tool with navigation, a people page and sign-in management; screenshots; the site at
+  librarian-agent.com
 
 ### Next
 
@@ -522,7 +526,6 @@ uv run pytest
 
 ### Later
 
-- Acting as the person: per-user OAuth for APIs that need the user's own access
 - More secret stores: Vault, GCP Secret Manager, Azure Key Vault
 - kagent: a tested recipe for using librarian as a `RemoteMCPServer`
 - A community registry of reviewed, signed entries
