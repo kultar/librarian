@@ -64,7 +64,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.13.1
+docker pull ghcr.io/kultar/librarian:0.14.0
 ```
 
 ### What happens on a request
