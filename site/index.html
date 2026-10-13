@@ -24,6 +24,7 @@
   </a>
   <nav class="nav" aria-label="Sections">
     <a href="#how">How it works</a>
+    <a href="#access">How access is held</a>
     <a href="#see">What people see</a>
     <a href="#save">What agents save</a>
     <a href="#safe">Why it's safe</a>
@@ -93,9 +94,21 @@ docker pull ghcr.io/kultar/librarian:0.14.0</code></pre></div>
     <ol class="ledger">
       <li><div><h3>An agent asks for data from an API librarian doesn't know yet</h3><p>Over A2A or MCP, through a gateway such as LiteLLM or directly. The agent names the API and what it wants; it never names a host, so it can't point librarian anywhere else.</p></div></li>
       <li><div><h3>librarian learns the API</h3><p>From its OpenAPI spec, else its documentation (found by itself if needed, with every extracted operation quote-checked against the page), else the model's own knowledge. Reads work at once; a pull request is opened on your registry repo so a person can review the entry.</p></div></li>
-      <li><div><h3>If the API needs a key, a person is asked once</h3><p>The agent's task waits and approvers get a Slack card. Someone follows the one-time link, signs in and pastes the key. It goes straight to your secret store, never through Slack, an agent or a model, and the task carries on by itself.</p></div></li>
+      <li><div><h3>If the API needs a key, a person is asked once</h3><p>The agent's task waits and approvers get a Slack card. Someone follows the one-time link, signs in and pastes the key. It goes straight to your secret store, never through Slack, an agent or a model, and the task carries on by itself. When the API needs the person's own sign-in instead, the person behind the agent gets the link, signs in to the provider once, and every later request for them carries their own token.</p></div></li>
       <li><div><h3>Writes wait for a person's approval, every time</h3><p>The approval page shows exactly what will be sent: method, path, arguments and body. Approve once, or allow similar writes with a narrow, expiring grant. DELETEs can only ever be approved one at a time.</p></div></li>
     </ol>
+  </div>
+</section>
+
+<section id="access">
+  <div class="wrap">
+    <h2>How access is held</h2>
+    <p>Three kinds of access, chosen per API, and none of them ever in an agent's hands.</p>
+    <dl class="rules">
+      <div><dt>A shared read-only key</dt><dd>Added once by an approver on a one-time page, straight into your secret store. Every agent's reads use it, within policy. Agents, logs and the model only see a reference like <code>jira/readonly</code>.</dd></div>
+      <div><dt>A separate write credential</dt><dd>Reviewed into the entry, and used only after a person approves that exact write, or a narrow, expiring grant covers it. DELETE is never granted.</dd></div>
+      <div><dt>The person's own sign-in</dt><dd>For APIs where what you see depends on who you are: librarian is the OAuth client, each person signs in once in their browser, and every request their agents make for them carries their own token, so the API enforces their access. Tokens are stored per person, refreshed by librarian, never shown to agents, and a request for one person can never go out with another's token. People see and drop their own sign-ins in the console.</dd></div>
+    </dl>
   </div>
 </section>
 

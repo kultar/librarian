@@ -32,6 +32,11 @@ credential out.
   agent after that benefits.
 - **The LLM proposes, code decides.** The optional planner can suggest any call, but only the rule
   engine (no LLM) can approve it. No prompt can talk its way into a write.
+- **Access is held three ways, and none of them by an agent.** A shared read-only key an
+  approver adds once; a separate write credential, used only after a person approves the write;
+  or, for APIs where what you see depends on who you are, each person's own OAuth sign-in,
+  done once in their browser and used only for their requests (see
+  [Acting as the person](#acting-as-the-person-per-person-oauth)).
 
 ### What your agents save
 
@@ -75,7 +80,9 @@ docker pull ghcr.io/kultar/librarian:0.14.0
    is opened on your registry repo for a person to review.
 3. If the API needs a key, the agent's task waits and approvers get a Slack card. Someone follows
    the link, signs in and adds the key (it goes straight to your secret store), and the task
-   carries on by itself.
+   carries on by itself. If the API needs the *person's own* sign-in (OAuth), the person
+   behind the agent gets the link instead, signs in to the provider once, and every later
+   request for them carries their own token.
 4. Writes wait for a person's approval every time, unless a narrow, expiring grant covers them.
 
 Nothing is set up per API in advance: the registry fills itself as agents need things.
