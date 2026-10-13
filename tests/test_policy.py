@@ -3,12 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
+from librarian.audit import MemoryAuditSink
 from librarian.calls import ArgValue, Caller, CallRequest
+from librarian.executor import PolicyDenied
 from librarian.policy import PolicyEngine, RateLimiter
-from librarian.registry import Registry
-from tests.conftest import OPEN, TRACKER, write_entries
+from librarian.registry import ApiEntry, Registry
+from librarian.secrets import FileSecretStore
+from librarian.service import Librarian
+from tests.conftest import BASE, OPEN, TRACKER, Router, write_entries
 
 CALLER = Caller(agent="agent-a")
 
@@ -123,3 +128,52 @@ def test_caller_allowlist_globs(engine: PolicyEngine) -> None:
     assert not decision.allowed
     assert "not allowed to use API 'tracker'" in decision.reason
     assert not engine.check(req(), Caller(agent="nobody", apis=())).allowed
+
+
+async def test_shared_rate_limit_is_one_limit_across_replicas(tmp_path: Path) -> None:
+    from librarian.policy import SharedRateLimiter
+    from librarian.state import StateStore, make_engine
+
+    store = StateStore(make_engine(f"sqlite+aiosqlite:///{tmp_path}/shared.db"))
+    await store.initialize()
+    replica_a = SharedRateLimiter(2, store, "read")
+    replica_b = SharedRateLimiter(2, store, "read")
+    assert await replica_a.allow("agent", "api", now=0)
+    assert await replica_b.allow("agent", "api", now=1)  # the other replica counts too
+    assert not await replica_a.allow("agent", "api", now=2)  # 3rd hit in the minute, anywhere
+    assert not await replica_b.allow("agent", "api", now=3)
+    assert await replica_b.allow("other-agent", "api", now=3)  # separate bucket per caller
+    assert await replica_a.allow("agent", "other-api", now=3)  # and per API
+    assert await replica_a.allow("agent", "api", now=61)  # a new minute
+    writes = SharedRateLimiter(1, store, "write")
+    assert await writes.allow("agent", "api", now=61)  # reads and writes count apart
+    assert not await writes.allow("agent", "api", now=62)
+    await store.prune_rate_limits(before_window=1)  # drops the first minute's rows
+    assert await replica_a.allow("agent", "api", now=62)  # still within 2 in minute 1
+    assert not await replica_a.allow("agent", "api", now=63)
+    engine = PolicyEngine(
+        Registry(tmp_path / "registry"), rate_limit_per_minute=1, shared_limits=store
+    )
+    entry = ApiEntry.model_validate(
+        {"id": "x", "name": "X", "base_url": "https://x.test", "operations": []}
+    )
+    assert await engine.rate_limited(CALLER, entry) is None
+    denied = await engine.rate_limited(CALLER, entry)
+    assert denied and "rate limit exceeded" in denied
+    assert (
+        await engine.rate_limited(CALLER, entry, write=True) is None
+    )  # the write limit is its own
+    await store.engine.dispose()
+
+
+async def test_rate_limit_denial_is_audited(
+    librarian: Librarian, audit: MemoryAuditSink, router: Router, secrets_store: FileSecretStore
+) -> None:
+    await secrets_store.put("tracker/readonly", "k")
+    router.add("GET", f"{BASE}/v1/me", lambda r: httpx.Response(200, json={}))
+    librarian.policy.rate_limiter = RateLimiter(1)
+    request = CallRequest(api="tracker", operation="whoami")
+    assert (await librarian.executor.execute(request, CALLER)).ok
+    with pytest.raises(PolicyDenied, match="rate limit exceeded"):
+        await librarian.executor.execute(request, CALLER)
+    assert audit.events[-1].event == "denied" and "rate limit" in (audit.events[-1].detail or "")

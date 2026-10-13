@@ -54,6 +54,37 @@ def _append(path: Path, line: str) -> None:
         handle.write(line + "\n")
 
 
+class AuditStore(Protocol):
+    async def record_audit(self, event: AuditEvent) -> None: ...
+
+
+class DatabaseAuditSink:
+    """Keeps events in the shared database, so the console can show recent activity and
+    measure what agents cost. A failure to write never breaks the call it describes."""
+
+    def __init__(self, store: AuditStore) -> None:
+        self.store = store
+
+    async def record(self, event: AuditEvent) -> None:
+        try:
+            await self.store.record_audit(event)
+        except Exception:  # the JSONL line is still written by the other sink
+            import logging
+
+            logging.getLogger(__name__).exception("writing an audit event to the database")
+
+
+class FanoutAuditSink:
+    """Writes every event to several sinks (e.g. the JSONL stream and the database)."""
+
+    def __init__(self, sinks: list[AuditSink]) -> None:
+        self.sinks = sinks
+
+    async def record(self, event: AuditEvent) -> None:
+        for sink in self.sinks:
+            await sink.record(event)
+
+
 class MemoryAuditSink:
     """Keeps events in memory; used by tests."""
 

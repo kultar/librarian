@@ -253,6 +253,8 @@ class Settings(BaseSettings):
     secrets_dir: Path | None = Path(".librarian/secrets")
     aws_secrets: AwsSecretsSettings = Field(default_factory=AwsSecretsSettings)
     audit_file: Path | None = None  # stdout when unset
+    # With a database, audit events are also kept there for the console; older ones are pruned.
+    audit_retention_days: int = Field(default=30, ge=1)
     state_dir: Path = Path(".librarian")
     # Durable state (credential requests, A2A tasks). SQLite for one instance;
     # postgresql+asyncpg://... (install the `postgres` extra) for several replicas.

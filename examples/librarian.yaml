@@ -17,6 +17,7 @@ aws_secrets:
   cache_seconds: 60
 database_url: sqlite+aiosqlite:///.librarian/librarian.db   # or postgresql+asyncpg://... (`postgres` extra)
 # audit_file: .librarian/audit.jsonl   # default: JSON lines on stdout
+# audit_retention_days: 30            # with a database, events are also kept there for the console's Activity pages
 
 # The `fetch` skill (plain-language requests). Leave unset to run without an LLM.
 # model: anthropic:claude-sonnet-5-5   # uses ANTHROPIC_API_KEY

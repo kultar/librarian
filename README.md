@@ -20,7 +20,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.14)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
+> Status: **alpha (v0.15)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
 ## Why
 
@@ -69,7 +69,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.14.0
+docker pull ghcr.io/kultar/librarian:0.15.0
 ```
 
 ### What happens on a request
@@ -154,7 +154,8 @@ SQLite by default (`.librarian/librarian.db`), so they survive restarts. For sev
 Postgres (`database_url: postgresql+asyncpg://...`, the `postgres` extra; in the image) and
 `secrets_backend: aws`: then every replica shares everything, an API learned through one is usable
 through the others at once, and pods need no volume. Set `replicas` (the Helm chart does) and
-librarian refuses to start with per-replica state. Rate limits are per replica.
+librarian refuses to start with per-replica state. Rate limits are counted in the database
+too, so every replica enforces the same limit together.
 
 **Caller authentication.** List agents and the secret holding each one's key:
 
@@ -355,6 +356,11 @@ No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 <em>A large API: search, the operations that need a decision first, then groups by tag.</em>
 </p>
 
+<p align="center">
+<img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/console-activity.png" alt="The Activity page: the last seven days in numbers (reads, writes, denied, plain-language requests and the share answered without a model), the busiest APIs, and recent events with who, where and how much" width="760"><br>
+<em>Activity: what agents did, and what it cost.</em>
+</p>
+
 <table align="center"><tr>
 <td><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/review.png" alt="The review page for a learned API: the proposal, operations that need a decision, approve and merge, or deny" width="380"></td>
 <td><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/approve-write.png" alt="A write approval page: method, path, arguments and body, approve once, allow similar, or deny" width="300"></td>
@@ -368,7 +374,11 @@ No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 The pages listener's root (`/`) is a console for the people who run librarian, with pages for
 the overview, the APIs (status, host, operations and where they were learned from), what is
 waiting on a person (keys to add, writes to approve, proposals to review, sign-ins), the
-standing grants, the people signed in to per-person APIs, and each person's own sign-ins. It shows credential
+standing grants, the people signed in to per-person APIs, each person's own sign-ins, and
+**activity**: what agents did in the last seven days (reads, writes, denials, plain-language
+requests answered from a recipe versus by the model, bytes fetched), the busiest APIs, and the
+recent events for the whole deployment or one API. Activity needs the database; it keeps
+`audit_retention_days` (30) of events, while the audit stream keeps everything. The console shows credential
 *references* only, never values. From there a signed-in approver can **revoke a grant**,
 **block** or **unblock** an API, **forget** a learned one (its open review is closed as the App, and whatever waited on a
 person for it is cancelled), **invalidate a credential** (the next call asks for a fresh key), **re-learn** a provisional API from a documentation or spec URL you
@@ -526,10 +536,15 @@ uv run pytest
   enforces their access; verified live against GitHub); the console redesigned as an admin
   tool with navigation, a people page and sign-in management; screenshots; the site at
   librarian-agent.com
+- **v0.15**: rate limits shared across replicas (counted in the database); audit events kept
+  in the database too, with an Activity page in the console: the last seven days in numbers
+  (reads, writes, denials, requests answered without a model), the busiest APIs, recent
+  events per API
 
 ### Next
 
-- Rate limits shared across replicas (today each replica counts on its own)
+- Verify the SearXNG and Brave documentation-search providers and the Google and Microsoft
+  sign-in providers live
 
 ### Later
 

@@ -40,7 +40,7 @@
     <h1>One librarian for every API your agents&nbsp;use.</h1>
     <p class="lede">Agents ask librarian for data instead of carrying their own API keys. It learns an API the first time one is needed, asks a person for the key once, serves reads within policy, and holds every write until a person approves it.</p>
     <div class="install"><pre><code>pip install librarian-a2a
-docker pull ghcr.io/kultar/librarian:0.14.0</code></pre></div>
+docker pull ghcr.io/kultar/librarian:0.15.0</code></pre></div>
     <div class="actions">
       <a class="btn" href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Try it in ten minutes</a>
       <a class="btn quiet" href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploy it for a team</a>
@@ -119,6 +119,7 @@ docker pull ghcr.io/kultar/librarian:0.14.0</code></pre></div>
     <div class="shots">
       <figure><img src="assets/screens/console-overview.png" alt="The console overview with tiles and the waiting list" loading="lazy"><figcaption>The console: what librarian knows, and what waits on a person.</figcaption></figure>
       <figure><img src="assets/screens/console-api.png" alt="An API page with search, needs-attention operations and groups by tag" loading="lazy"><figcaption>A large API: search, the operations needing a decision first, then groups by tag.</figcaption></figure>
+      <figure><img src="assets/screens/console-activity.png" alt="The Activity page: seven-day numbers, the busiest APIs and recent events" loading="lazy"><figcaption>Activity: what agents did through librarian, and what it cost.</figcaption></figure>
       <figure><img src="assets/screens/review.png" alt="The review page for a learned API" loading="lazy"><figcaption>Approving a learned API from the Slack card: decide the open operations, then merge as the App.</figcaption></figure>
       <figure><img src="assets/screens/approve-write.png" alt="A write approval page" loading="lazy"><figcaption>Approving one write: method, path, arguments and body, nothing hidden.</figcaption></figure>
     </div>
@@ -174,7 +175,7 @@ docker compose up -d
         <h3>For your team</h3>
         <p>A Helm chart with oauth2-proxy sign-in, git-sync for the registry, Postgres for shared state and AWS Secrets Manager for keys. Two or more replicas, no volumes, nothing exposed to the internet.</p>
 <pre><code>helm install librarian oci://ghcr.io/kultar/charts/librarian \
-  --version 0.14.0 -n librarian -f values.yaml
+  --version 0.15.0 -n librarian -f values.yaml
 helm test librarian -n librarian</code></pre>
         <a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a>
       </div>
@@ -236,14 +237,15 @@ mcp_servers:
         <li>Slack cards, Helm chart, GitHub App for the registry repo</li>
         <li>MCP endpoint and the LiteLLM gateway</li>
         <li>Verified principals from your identity provider</li>
-        <li>Replicas with shared state and no volumes</li>
+        <li>Replicas with shared state and no volumes, and one rate limit across them</li>
         <li>Internal APIs learned on demand within the domains you list</li>
         <li>A console for the people who run it: everything it knows, what waits on them, and the levers to revoke, block, re-learn and invalidate</li>
         <li>Approve or deny a learned API from Slack: the review card leads to a signed-in page, and approving merges the proposal as the App</li>
         <li>Acting as the person: APIs that need each person's own sign-in, with their own token and the API enforcing their access</li>
+        <li>Activity in the console: the last seven days in numbers, the busiest APIs, and recent events per API</li>
       </ul></div>
       <div><h3>Next</h3><ul>
-        <li>Rate limits shared across replicas</li>
+        <li>Verifying the SearXNG and Brave documentation search, and Google and Microsoft sign-in, live</li>
       </ul></div>
       <div><h3>Later</h3><ul>
         <li>Vault, GCP Secret Manager and Azure Key Vault</li>

@@ -8,12 +8,15 @@ Postgres (several replicas). A2A tasks are stored by the SDK's own
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import (
     Column,
     DateTime,
+    Integer,
     MetaData,
     String,
     Table,
@@ -27,6 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from librarian.audit import AuditEvent
 from librarian.credentials import CredentialRequest, RequestState
 
 metadata = MetaData()
@@ -41,6 +45,32 @@ credential_requests = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+
+rate_limits = Table(
+    "rate_limits",
+    metadata,
+    Column("key", String(200), primary_key=True),
+    Column("window", Integer, nullable=False),
+    Column("count", Integer, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+audit_events = Table(
+    "audit_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("ts", DateTime(timezone=True), nullable=False, index=True),
+    Column("event", String(32), nullable=False, index=True),
+    Column("caller", String(128)),
+    Column("principal", String(200)),
+    Column("api", String(64), index=True),
+    Column("operation", String(128)),
+    Column("status_code", Integer),
+    Column("bytes", Integer),
+    Column("duration_ms", Integer),
+    Column("detail", Text),
+    Column("extra", Text),
+)
 
 documents = Table(
     "librarian_documents",
@@ -156,6 +186,124 @@ class StateStore:
         return [CredentialRequest.model_validate_json(row) for row in rows]
 
     # -- generic documents (write approvals, grants) ---------------------------------
+
+    # -- audit --------------------------------------------------------------------
+
+    async def record_audit(self, event: AuditEvent) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                insert(audit_events).values(
+                    ts=event.ts,
+                    event=event.event[:32],
+                    caller=(event.caller or "")[:128] or None,
+                    principal=(event.principal or "")[:200] or None,
+                    api=(event.api or "")[:64] or None,
+                    operation=(event.operation or "")[:128] or None,
+                    status_code=event.status_code,
+                    bytes=event.bytes,
+                    duration_ms=event.duration_ms,
+                    detail=event.detail,
+                    extra=json.dumps(event.extra, default=str) if event.extra else None,
+                )
+            )
+
+    async def recent_audit(self, api: str | None = None, limit: int = 50) -> list[AuditEvent]:
+        query = (
+            select(audit_events)
+            .order_by(audit_events.c.ts.desc(), audit_events.c.id.desc())
+            .limit(limit)
+        )
+        if api is not None:
+            query = query.where(audit_events.c.api == api)
+        async with self.engine.connect() as conn:
+            rows = (await conn.execute(query)).mappings().all()
+        events: list[AuditEvent] = []
+        for row in rows:
+            data = dict(row)
+            data.pop("id", None)
+            raw = data.pop("extra", None)
+            data["extra"] = json.loads(raw) if raw else {}
+            ts = data["ts"]
+            if ts.tzinfo is None:  # SQLite hands naive datetimes back
+                data["ts"] = ts.replace(tzinfo=UTC)
+            events.append(AuditEvent.model_validate(data))
+        return events
+
+    async def audit_summary(self, since: datetime) -> dict[str, Any]:
+        """Counts for the console: calls, denials, bytes, and plain-language requests
+        answered by the planner versus replayed from a recipe."""
+        async with self.engine.connect() as conn:
+            counts = (
+                await conn.execute(
+                    select(audit_events.c.event, func.count(), func.sum(audit_events.c.bytes))
+                    .where(audit_events.c.ts >= since)
+                    .group_by(audit_events.c.event)
+                )
+            ).all()
+            fetches = (
+                await conn.execute(
+                    select(audit_events.c.detail, func.count())
+                    .where(audit_events.c.ts >= since)
+                    .where(audit_events.c.event == "fetch")
+                    .group_by(audit_events.c.detail)
+                )
+            ).all()
+            per_api = (
+                await conn.execute(
+                    select(audit_events.c.api, func.count())
+                    .where(audit_events.c.ts >= since)
+                    .where(audit_events.c.event == "call")
+                    .group_by(audit_events.c.api)
+                    .order_by(func.count().desc())
+                    .limit(10)
+                )
+            ).all()
+        by_event = {str(event): int(count) for event, count, _ in counts}
+        total_bytes = sum(int(total or 0) for event, _, total in counts if event == "call")
+        return {
+            "calls": by_event.get("call", 0),
+            "denied": by_event.get("denied", 0) + by_event.get("write_denied", 0),
+            "writes": by_event.get("write", 0),
+            "fetch_planner": sum(int(n) for how, n in fetches if how == "planner"),
+            "fetch_recipe": sum(int(n) for how, n in fetches if how == "recipe"),
+            "bytes": total_bytes,
+            "by_api": [(str(api), int(n)) for api, n in per_api if api],
+        }
+
+    async def prune_audit(self, before: datetime) -> int:
+        async with self.engine.begin() as conn:
+            result = await conn.execute(delete(audit_events).where(audit_events.c.ts < before))
+        return int(result.rowcount or 0)
+
+    async def count_hit(self, key: str, window: int) -> int:
+        """Count one hit for `key` in `window` and return the window's total, atomically
+        across replicas. A new window replaces the previous one for that key."""
+        now = datetime.now(UTC)
+        for _ in range(3):
+            try:
+                async with self.engine.begin() as conn:
+                    bumped = await conn.execute(
+                        update(rate_limits)
+                        .where(rate_limits.c.key == key)
+                        .where(rate_limits.c.window == window)
+                        .values(count=rate_limits.c.count + 1, updated_at=now)
+                        .returning(rate_limits.c.count)
+                    )
+                    row = bumped.first()
+                    if row is not None:
+                        return int(row[0])
+                    await conn.execute(delete(rate_limits).where(rate_limits.c.key == key))
+                    await conn.execute(
+                        insert(rate_limits).values(key=key, window=window, count=1, updated_at=now)
+                    )
+                    return 1
+            except IntegrityError:  # another replica opened this window first: count on it
+                continue
+        return 1_000_000  # could not count: fail closed
+
+    async def prune_rate_limits(self, before_window: int) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(delete(rate_limits).where(rate_limits.c.window < before_window))
 
     async def save_doc(self, kind: str, doc_id: str, state: str, data: str) -> None:
         async with self.engine.begin() as conn:

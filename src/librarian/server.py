@@ -685,6 +685,11 @@ async def _sweep_forever(librarian: Librarian) -> None:
             await librarian.registry.refresh_stored()  # changes saved by other replicas
         except Exception:
             log.exception("registry reload failed")
+        if ticks % 240 == 0:  # about hourly
+            try:
+                await librarian.prune_audit()
+            except Exception:
+                log.exception("pruning audit events failed")
         if ticks % 4 == 0:
             try:
                 await librarian.broker.sweep()

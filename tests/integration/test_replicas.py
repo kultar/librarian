@@ -249,3 +249,33 @@ def test_both_replicas_survive_a_database_restart() -> None:
     for base in (A, B):  # the first request after the restart, on each replica
         task = send(base, {"skill": "capabilities"})
         assert task["status"]["state"] == "TASK_STATE_COMPLETED", task["status"]
+
+
+def test_one_rate_limit_across_replicas_and_shared_activity() -> None:
+    """Last on purpose: it uses up agent-a's read allowance on echo for this minute.
+    The limit is 60/min; counted per replica, 130 reads split across two would all pass."""
+    # An earlier test deleted the read key to leave a request pending; put one back.
+    secrets_manager().create_secret(Name="lib/echo/read", SecretString="read-secret-2")
+    time.sleep(2)  # the 1s value cache
+    accepted, refused = 0, None
+    for i in range(130):  # a fixed window can roll over once during the burst, hence 130
+        task = send(
+            A if i % 2 else B,
+            {"skill": "execute", "api": "echo", "operation": "getAnything", "args": {"key": "RL"}},
+        )
+        state = task["status"]["state"]
+        if state == "TASK_STATE_REJECTED":
+            refused = task
+            break
+        assert state == "TASK_STATE_COMPLETED", task["status"]
+        accepted += 1
+    assert refused is not None, "130 reads across two replicas all passed: limits are per replica"
+    assert accepted <= 120, accepted
+    assert "rate limit exceeded" in json.dumps(refused["status"])
+
+    # The audit copy in the database is shared: replica B shows what both did.
+    page = httpx.get(f"{B}/activity?api=echo")
+    assert page.status_code == 200, page.text
+    assert "rate limit exceeded" in page.text and "getAnything" in page.text
+    overview = httpx.get(f"{A}/")
+    assert "Last 7 days" in overview.text and "<em>denied</em>" in overview.text

@@ -159,6 +159,19 @@ class Executor:
             raise PolicyDenied(decision.reason)
 
         entry, op = decision.entry, decision.operation
+        limited = await self.policy.rate_limited(caller, entry)
+        if limited:
+            await self.audit.record(
+                AuditEvent(
+                    event="denied",
+                    caller=caller.agent,
+                    principal=caller.principal,
+                    api=request.api,
+                    operation=request.operation,
+                    detail=limited,
+                )
+            )
+            raise PolicyDenied(limited)
         secret = await self._resolve_secret(entry, caller)
         started = time.monotonic()
         url, headers, query = _build_request(entry, op, request.args)

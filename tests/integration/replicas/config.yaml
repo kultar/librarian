@@ -12,4 +12,4 @@ callers:
     write_apis: [echo]
     owner: ops@example.com
 writes: {approvers: requester_or_group}
-approvers: {mode: token}
+approvers: {mode: token, console: open}   # the console without sign-in, for the activity check

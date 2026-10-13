@@ -365,7 +365,7 @@ Secret called `librarian-env`.
 
 ```yaml
 image:
-  tag: "0.14.0"
+  tag: "0.15.0"
 
 replicaCount: 2                          # needs steps 4 and 5; see "Replicas" below
 persistence:
@@ -434,7 +434,7 @@ The chart is published with every release as an OCI artifact, with the same vers
 image (`image.tag` above):
 
 ```bash
-helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.14.0 \
+helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.15.0 \
   -n librarian -f values.yaml
 ```
 
@@ -486,7 +486,7 @@ without Postgres and `secrets_backend: aws` (rather than let replicas drift apar
 PodDisruptionBudget (`maxUnavailable: 1`), and spreads pods across nodes. It refuses a
 ReadWriteOnce volume with several replicas.
 
-Per-replica on purpose: rate limits (`rate_limit_per_minute` applies per replica).
+Rate limits are shared: with Postgres, `rate_limit_per_minute` is one limit across all replicas.
 
 ## Running it
 
@@ -498,5 +498,7 @@ Per-replica on purpose: rate limits (`rate_limit_per_minute` applies per replica
   APIs within the domains you list (`config.internal_hosts`). See [`examples/librarian.yaml`](../examples/librarian.yaml)
   for every option.
 - **Audit**: one JSON line per call, decision and approval on stdout (`"audit"` events), plus
-  OpenTelemetry traces and metrics when enabled.
+  OpenTelemetry traces and metrics when enabled. With a database, the same events are also
+  kept there for `audit_retention_days` (30) and shown on the console's Activity pages; the
+  stream remains the complete record. Ship it with your log pipeline.
 - **Problems**: [troubleshooting](troubleshooting.md).

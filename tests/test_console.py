@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
@@ -16,6 +17,7 @@ from librarian.console import console_routes
 from librarian.registry.models import EntryStatus
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian
+from tests.conftest import BASE, Router
 from tests.test_web import themed
 from tests.test_writes import KIM, comment
 
@@ -419,3 +421,60 @@ async def test_console_pages_have_navigation_and_scoping(librarian: Librarian) -
     assert "class=grid2" in detail and "Danger" in detail
     for path in ("/apis", "/waiting", "/grants", "/people", "/me"):
         themed(c.get(path))
+
+
+async def test_activity_pages_show_what_agents_did(tmp_path: Path, router: Router) -> None:
+    from librarian.calls import CallRequest
+    from librarian.config import Settings
+    from tests.conftest import TRACKER, RecordingNotifier, write_entries
+
+    write_entries(tmp_path / "registry", TRACKER)
+    settings = Settings(
+        registry_dir=tmp_path / "registry",
+        secrets_dir=tmp_path / "secrets",
+        database_url=f"sqlite+aiosqlite:///{tmp_path}/state.db",
+        public_url="https://librarian.example.test",
+        allow_private_networks=True,
+        audit_file=tmp_path / "audit.jsonl",
+    )
+    librarian = Librarian(  # no audit sink given: JSONL plus the database copy
+        settings,
+        secrets_store=FileSecretStore(tmp_path / "secrets"),
+        notifier=RecordingNotifier(),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(router)),
+    )
+    await librarian.start()
+    librarian.settings.approvers.console = "open"
+    await librarian.secrets.put("tracker/readonly", "k")
+    router.add("GET", f"{BASE}/v1/me", lambda r: httpx.Response(200, json={}))
+    caller = Caller(agent="agent-a", principal="kim@x.test")
+    assert (
+        await librarian.executor.execute(CallRequest(api="tracker", operation="whoami"), caller)
+    ).ok
+    with pytest.raises(Exception, match="unknown operation"):
+        await librarian.executor.execute(CallRequest(api="tracker", operation="nope"), caller)
+    c = console(librarian)
+    overview = c.get("/")
+    themed(overview)
+    assert "Last 7 days" in overview.text and "Recent activity" in overview.text
+    assert ">1</b><em>reads</em>" in overview.text and ">1</b><em>denied</em>" in overview.text
+    page = c.get("/activity")
+    themed(page)
+    assert page.status_code == 200 and "Busiest APIs" in page.text
+    assert "Read</td><td>agent-a <span class=muted>for kim@x.test</span>" in page.text
+    assert "class=bad>Denied</td>" in page.text and "HTTP 200" in page.text
+    assert "href='/activity'" in page.text  # the nav
+    scoped = c.get("/activity?api=weather")
+    assert "Nothing yet" in scoped.text and "Show all" in scoped.text
+    api_page = c.get("/apis/tracker")
+    assert "id=activity" in api_page.text and "whoami" in api_page.text
+    assert "All activity for this API" in api_page.text
+    await librarian.aclose()
+
+
+async def test_activity_without_a_database_says_so(librarian: Librarian) -> None:
+    librarian.settings.approvers.console = "open"
+    c = console(librarian)
+    assert "needs a database" in c.get("/activity").text
+    assert "needs a database" in c.get("/").text
+    assert "needs a database" in c.get("/apis/tracker").text

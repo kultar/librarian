@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from librarian.audit import MemoryAuditSink
 from librarian.calls import Caller
 from librarian.opsearch import rank, tokens
 from librarian.planner import Planner
@@ -190,7 +191,7 @@ async def issue_api(secrets_store: FileSecretStore, router: Router) -> None:
 
 
 async def test_successful_plan_becomes_a_recipe_replayed_without_llm(
-    librarian: Librarian, router: Router, issue_api: None
+    librarian: Librarian, router: Router, issue_api: None, audit: MemoryAuditSink
 ) -> None:
     model, _ = scripted(
         [
@@ -210,6 +211,10 @@ async def test_successful_plan_becomes_a_recipe_replayed_without_llm(
     again = await librarian.fetch("is PAY-7 open", A)
     assert again.recipe is not None and again.results[0].data == {"key": "PAY-7", "state": "open"}
     assert next(iter(librarian.recipes.values())).uses == 1
+    # Each plain-language request leaves one audit event saying whether a model was involved.
+    fetches = [ev for ev in audit.events if ev.event == "fetch"]
+    assert [ev.detail for ev in fetches] == ["planner", "recipe"]
+    assert fetches[0].extra["calls"] == 1 and fetches[1].extra["recipe"] == again.recipe
 
     # Replays still obey the caller's permissions: this agent may not use the tracker.
     with pytest.raises(AssertionError, match="must not be called"):

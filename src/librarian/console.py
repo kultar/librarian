@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import html
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from starlette.requests import Request
@@ -221,7 +221,160 @@ Pending = tuple[
 ]
 
 
-def _dashboard(librarian: Librarian, pending: Pending, people: int | None) -> str:
+EVENT_LABELS = {
+    "call": "Read",
+    "write": "Write",
+    "denied": "Denied",
+    "write_denied": "Write denied",
+    "write_requested": "Write asked",
+    "write_decided": "Write decided",
+    "credential_request": "Key asked",
+    "credential_resolved": "Key added",
+    "credential_invalidated": "Key invalidated",
+    "consent_request": "Sign-in asked",
+    "consent_resolved": "Signed in",
+    "onboard": "Learned",
+    "api_forgotten": "Forgotten",
+    "api_changed": "Changed",
+    "api_blocked": "Blocked",
+    "api_unblocked": "Unblocked",
+    "recipe_learned": "Recipe saved",
+    "grant_created": "Grant",
+    "grant_revoked": "Grant revoked",
+    "review_approved": "Approved",
+    "review_denied": "Review denied",
+    "person_disconnected": "Signed out",
+    "signins_checked": "Sign-ins checked",
+}
+
+
+def _event_label(event: AuditEvent) -> str:
+    if event.event == "fetch":
+        return "Answered from a recipe" if event.detail == "recipe" else "Answered by the model"
+    return EVENT_LABELS.get(event.event, event.event.replace("_", " ").capitalize())
+
+
+def _size(count: int | None) -> str:
+    if not count:
+        return ""
+    size = float(count)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return ""  # pragma: no cover
+
+
+def _event_detail(event: AuditEvent) -> str:
+    parts: list[str] = []
+    if event.status_code is not None:
+        parts.append(f"HTTP {event.status_code}")
+    if event.bytes:
+        parts.append(_size(event.bytes))
+    if event.duration_ms is not None:
+        parts.append(f"{event.duration_ms} ms")
+    if event.event == "fetch":
+        calls = event.extra.get("calls")
+        if calls is not None:
+            parts.append(_n(int(calls), "call"))
+    elif event.detail:
+        parts.append(event.detail)
+    return e(", ".join(parts))
+
+
+def _activity_rows(events: list[AuditEvent], *, show_api: bool = True) -> str:
+    if not events:
+        return "<p class=empty>Nothing yet.</p>"
+    rows: list[str] = []
+    for ev in events:
+        who = e(ev.caller or "")
+        if ev.principal:
+            who += f" <span class=muted>for {e(ev.principal)}</span>"
+        what = e(ev.operation or "")
+        if show_api and ev.api:
+            what = f"<a href='/apis/{e(ev.api)}'>{e(ev.api)}</a>" + (f" / {what}" if what else "")
+        bad = ev.event in ("denied", "write_denied") or (ev.status_code or 0) >= 400
+        cls = " class=bad" if bad else ""
+        rows.append(
+            f"<tr><td>{_when(ev.ts)}</td><td{cls}>{e(_event_label(ev))}</td><td>{who}</td>"
+            f"<td>{what}</td><td class=muted>{_event_detail(ev)}</td></tr>"
+        )
+    return (
+        "<table class=activity><tr><th>When</th><th>What</th><th>Who</th><th>Where</th>"
+        f"<th></th></tr>{''.join(rows)}</table>"
+    )
+
+
+def _summary_tiles(summary: dict[str, Any]) -> str:
+    answered = summary["fetch_planner"] + summary["fetch_recipe"]
+    recipe_share = (
+        f"{round(100 * summary['fetch_recipe'] / answered)}% without a model" if answered else ""
+    )
+    tiles: list[tuple[str, str, str]] = [
+        (
+            str(summary["calls"]),
+            "reads",
+            _size(summary["bytes"]) + " fetched" if summary["bytes"] else "",
+        ),
+        (str(summary["writes"]), "writes", "each one approved or granted"),
+        (str(summary["denied"]), "denied", "policy, limits, unknown operations"),
+        (
+            str(answered),
+            "plain-language requests",
+            recipe_share or "recipes replay without a model",
+        ),
+    ]
+    return (
+        "<div class=tiles>"
+        + "".join(
+            f"<div class=tile><b>{e(count)}</b><em>{e(label)}</em><span>{e(note)}</span></div>"
+            for count, label, note in tiles
+        )
+        + "</div>"
+    )
+
+
+NO_ACTIVITY_DB = (
+    "<p class=empty>Showing activity here needs a database. Every event is still written "
+    "to the audit stream.</p>"
+)
+
+
+def _activity_page(
+    librarian: Librarian,
+    events: list[AuditEvent] | None,
+    summary: dict[str, Any] | None,
+    api: str,
+) -> str:
+    if events is None or summary is None:
+        body = NO_ACTIVITY_DB
+    else:
+        scope = f" for <code>{e(api)}</code>" if api else ""
+        by_api = "".join(
+            f"<li><a href='/activity?api={e(name)}'>{e(name)}</a> <span class=muted>"
+            f"{_n(count, 'read')}</span></li>"
+            for name, count in summary["by_api"]
+        )
+        busiest = (
+            f"<h2>Busiest APIs, last 7 days</h2><ul class=plain>{by_api}</ul>" if by_api else ""
+        )
+        clear = " <a class=muted href='/activity'>Show all</a>" if api else ""
+        body = (
+            f"<h2>Last 7 days</h2>{_summary_tiles(summary)}{busiest}"
+            f"<h2>Recent events{scope}{clear}</h2>{_activity_rows(events)}"
+        )
+    return f"""<div class=pagehead><h1>Activity</h1></div>
+<p class=lede>What agents did through librarian, and what it cost.</p>
+{body}"""
+
+
+def _dashboard(
+    librarian: Librarian,
+    pending: Pending,
+    people: int | None,
+    summary: dict[str, Any] | None = None,
+    recent_events: list[AuditEvent] | None = None,
+) -> str:
     credentials, approvals, reviews, consents = pending
     entries = librarian.registry.all()
     grants = [g for g in librarian.approvals.grants() if g.usable(datetime.now(UTC))]
@@ -260,10 +413,19 @@ def _dashboard(librarian: Librarian, pending: Pending, people: int | None) -> st
             apis += f"<p class=more><a href='/apis'>All {len(entries)} APIs</a></p>"
     else:
         apis = "<p class=empty>No APIs yet. The first agent that needs one teaches it.</p>"
+    if summary is None or recent_events is None:
+        activity = f"<h2>Last 7 days</h2>{NO_ACTIVITY_DB}"
+    else:
+        activity = (
+            f"<h2>Last 7 days</h2>{_summary_tiles(summary)}"
+            f"<h2>Recent activity</h2>{_activity_rows(recent_events)}"
+            "<p class=more><a href='/activity'>All activity</a></p>"
+        )
     return f"""<div class=pagehead><h1>Overview</h1></div>
 <p class=lede>What librarian knows, and what waits on a person.</p>
 <div class=tiles>{tiles_html}</div>
 <h2>Waiting on a person</h2>{_waiting_rows(librarian, credentials, approvals, reviews, consents, 8)}
+{activity}
 <h2>Recently changed APIs</h2>{errors}{apis}"""
 
 
@@ -428,6 +590,7 @@ def _detail(
     token: str,
     query: str = "",
     connections: list[Any] | None = None,
+    events: list[AuditEvent] | None = None,
 ) -> str:
     connections = connections or []
     source_url = f": <code>{e(entry.source.url)}</code>" if entry.source.url else ""
@@ -493,7 +656,14 @@ def _detail(
             )
         people = f"<h2 id=people>Signed-in people</h2>{listing}"
     cards, danger = _actions(librarian, entry, token)
-    links = ["<a href='#operations'>Operations</a>"]
+    if events is None:
+        activity = f"<h2 id=activity>Activity</h2>{NO_ACTIVITY_DB}"
+    else:
+        activity = (
+            f"<h2 id=activity>Activity</h2>{_activity_rows(events, show_api=False)}"
+            f"<p class=more><a href='/activity?api={e(entry.id)}'>All activity for this API</a></p>"
+        )
+    links = ["<a href='#operations'>Operations</a>", "<a href='#activity'>Activity</a>"]
     if entry.per_person:
         links.append("<a href='#people'>People</a>")
     if entry.notes:
@@ -506,7 +676,7 @@ def _detail(
 <div class=card><dl>{details}</dl></div>
 <nav class=subnav aria-label='On this page'>{"".join(links)}</nav>
 <h2 id=operations>Operations</h2>{_operations(librarian, entry, token, query)}
-{people}{notes}
+{activity}{people}{notes}
 <h2 id=actions>Actions</h2><div class=grid2>{cards}</div>{danger}"""
 
 
@@ -766,8 +936,24 @@ def console_routes(librarian: Librarian) -> list[Route]:
             return denied or notice("bad", "Error", "Something went wrong.", 400)
         pending = await _pending(librarian)
         people = len(await librarian.consents.connections()) if librarian.consents.store else None
-        body = _dashboard(librarian, pending, people)
+        summary = recent = None
+        if librarian.state is not None:
+            summary = await librarian.state.audit_summary(datetime.now(UTC) - timedelta(days=7))
+            recent = await librarian.state.recent_audit(limit=8)
+        body = _dashboard(librarian, pending, people, summary, recent)
         return page("librarian", body, kind="console", active="overview")
+
+    async def activity(request: Request) -> Response:
+        identity, denied = await guard(request)
+        if denied is not None or identity is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        api_id = request.query_params.get("api", "").strip()[:64]
+        events = summary = None
+        if librarian.state is not None:
+            events = await librarian.state.recent_audit(api_id or None, limit=100)
+            summary = await librarian.state.audit_summary(datetime.now(UTC) - timedelta(days=7))
+        body = _activity_page(librarian, events, summary, api_id)
+        return page("Activity", body, kind="console", active="activity")
 
     async def apis(request: Request) -> Response:
         identity, denied = await guard(request)
@@ -851,7 +1037,12 @@ def console_routes(librarian: Librarian) -> list[Route]:
             return notice("note", "Unknown API", "No API has that id.", 404)
         query = request.query_params.get("q", "").strip()[:100]
         connections = await librarian.consents.connections(entry.id) if entry.per_person else []
-        body = _detail(librarian, entry, token_for(identity), query, connections)
+        events = (
+            await librarian.state.recent_audit(entry.id, limit=20)
+            if librarian.state is not None
+            else None
+        )
+        body = _detail(librarian, entry, token_for(identity), query, connections, events)
         return page(entry.name, body, kind="console", active="apis")
 
     def back(api_id: str) -> str:
@@ -1085,6 +1276,7 @@ def console_routes(librarian: Librarian) -> list[Route]:
         Route("/grants", grants, methods=["GET"]),
         Route("/people", people, methods=["GET"]),
         Route("/me", me, methods=["GET"]),
+        Route("/activity", activity, methods=["GET"]),
         Route("/me/disconnect", me_disconnect, methods=["POST"]),
         Route("/apis/{api_id}", api, methods=["GET"]),
         Route("/grants/{grant_id}/{action}", act, methods=["POST"]),

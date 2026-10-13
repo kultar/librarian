@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from librarian import credentials
 from librarian.audit import MemoryAuditSink
-from librarian.calls import Caller
+from librarian.calls import Caller, CallRequest
 from librarian.config import CallerKey, Settings
 from librarian.credentials import RequestState
 from librarian.registry import ApiEntry
@@ -195,6 +195,87 @@ async def test_another_replica_can_update_the_posted_message(
     assert posting.closed_refs[-1] == {"channel": "C1", "ts": f"write-{approval.id}"}
     await first.aclose()
     await second.aclose()
+
+
+async def test_audit_events_are_kept_in_the_database_for_the_console(
+    tmp_path: Path, router: Router, secrets_store: FileSecretStore
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from librarian.audit import AuditEvent, DatabaseAuditSink, FanoutAuditSink
+
+    settings = Settings(
+        registry_dir=tmp_path / "registry",
+        secrets_dir=tmp_path / "secrets",
+        database_url=f"sqlite+aiosqlite:///{tmp_path}/state.db",
+        public_url="https://librarian.example.test",
+        allow_private_networks=True,
+        audit_file=tmp_path / "audit.jsonl",
+    )
+    write_entries(tmp_path / "registry", TRACKER)
+    first = Librarian(
+        settings,
+        secrets_store=FileSecretStore(tmp_path / "secrets"),
+        notifier=RecordingNotifier(),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(router)),
+    )
+    await first.start()
+    assert first.state is not None
+    # Without a sink given, the JSONL stream stays and the database gets a copy.
+    assert isinstance(first.audit, FanoutAuditSink)
+    assert any(isinstance(s, DatabaseAuditSink) for s in first.audit.sinks)
+    await first.secrets.put("tracker/readonly", "k")
+    router.add("GET", f"{BASE}/v1/me", lambda r: httpx.Response(200, json={"login": "a"}))
+    assert (await first.executor.execute(CallRequest(api="tracker", operation="whoami"), A)).ok
+    with pytest.raises(Exception, match="unknown operation"):
+        await first.executor.execute(CallRequest(api="tracker", operation="nope"), A)
+    lines = (tmp_path / "audit.jsonl").read_text().splitlines()
+    assert sum('"event": "call"' in line for line in lines) == 1  # the stream still gets it
+
+    second = replica(tmp_path, router)  # another replica sees the same activity
+    await second.start()
+    assert second.state is not None
+    events = await second.state.recent_audit("tracker")
+    assert [ev.event for ev in events] == ["denied", "call"]  # newest first
+    assert events[1].caller == "agent-a" and events[1].status_code == 200 and events[1].bytes
+    assert events[1].ts.tzinfo is not None
+    assert await second.state.recent_audit("weather") == []
+    await second.state.record_audit(AuditEvent(event="fetch", caller="agent-a", detail="recipe"))
+    await second.state.record_audit(AuditEvent(event="fetch", caller="agent-a", detail="planner"))
+    await second.state.record_audit(AuditEvent(event="fetch", caller="agent-a", detail="recipe"))
+    summary = await second.state.audit_summary(datetime.now(UTC) - timedelta(days=7))
+    assert summary["calls"] == 1 and summary["denied"] == 1 and summary["writes"] == 0
+    assert summary["fetch_recipe"] == 2 and summary["fetch_planner"] == 1
+    assert summary["bytes"] == events[1].bytes and summary["by_api"] == [("tracker", 1)]
+    assert await second.state.audit_summary(datetime.now(UTC) + timedelta(days=1)) == {
+        "calls": 0,
+        "denied": 0,
+        "writes": 0,
+        "fetch_planner": 0,
+        "fetch_recipe": 0,
+        "bytes": 0,
+        "by_api": [],
+    }
+    # Retention: an hourly sweep drops database rows older than the setting.
+    second.settings.audit_retention_days = 1
+    assert await second.prune_audit() == 0
+    await second.state.record_audit(
+        AuditEvent(ts=datetime.now(UTC) - timedelta(days=2), event="call", api="tracker")
+    )
+    assert await second.prune_audit() == 1
+    assert len(await second.state.recent_audit()) == 5
+    await first.aclose()
+    await second.aclose()
+
+
+async def test_a_failing_database_sink_never_breaks_the_call() -> None:
+    from librarian.audit import AuditEvent, DatabaseAuditSink
+
+    class Broken:
+        async def record_audit(self, event: AuditEvent) -> None:
+            raise RuntimeError("db down")
+
+    await DatabaseAuditSink(Broken()).record(AuditEvent(event="call"))  # logged, not raised
 
 
 def test_psql_style_sslmode_is_translated_for_asyncpg() -> None:

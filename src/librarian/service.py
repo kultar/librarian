@@ -27,7 +27,13 @@ from pydantic_ai.models.fallback import FallbackModel
 
 from librarian import telemetry
 from librarian.approvals import ApprovalBroker, ApprovalState, Grant, WriteApproval
-from librarian.audit import AuditEvent, AuditSink, JsonlAuditSink
+from librarian.audit import (
+    AuditEvent,
+    AuditSink,
+    DatabaseAuditSink,
+    FanoutAuditSink,
+    JsonlAuditSink,
+)
 from librarian.calls import Caller, CallRequest, CallResult, WriteRequest
 from librarian.config import Settings
 from librarian.credentials import CredentialBroker, CredentialRequest, Notifier, RequestState
@@ -231,12 +237,15 @@ class Librarian:
         self.settings = settings
         self.registry = registry or Registry(settings.registry_dir, settings.registry_overlay_dir)
         self.secrets = secrets_store or _default_secrets(settings)
-        self.audit = audit or JsonlAuditSink(settings.audit_file)
+        self.audit: AuditSink = audit or JsonlAuditSink(settings.audit_file)
         self.http = http_client or httpx.AsyncClient(
             timeout=settings.request_timeout_seconds, follow_redirects=False
         )
         self.engine = make_engine(settings.database_url) if settings.database_url else None
         self.state = StateStore(self.engine) if self.engine is not None else None
+        if audit is None and self.state is not None:
+            # The JSONL stream stays the system of record; the database copy feeds the console.
+            self.audit = FanoutAuditSink([self.audit, DatabaseAuditSink(self.state)])
         if self.state is not None and self.registry.store is None:
             # Learned APIs live in the shared database, so every replica sees them.
             self.registry.store = self.state
@@ -248,6 +257,7 @@ class Librarian:
             write_rate_limit_per_minute=settings.writes.rate_limit_per_minute,
             allow_provisional=settings.allow_provisional,
             observations=self.observations,
+            shared_limits=self.state,
         )
         self.executor = Executor(
             self.policy,
@@ -437,6 +447,7 @@ class Librarian:
     ) -> FetchOutcome:
         replayed = await self._replay_recipe(intent, caller, on_auth_required)
         if replayed is not None:
+            await self._audit_fetch(caller, "recipe", replayed)
             return replayed
         if self.planner is None:
             raise LibrarianError("the fetch skill is disabled: no model is configured")
@@ -454,8 +465,29 @@ class Librarian:
             except (ContentFilterError, ModelAPIError, UnexpectedModelBehavior) as exc:
                 raise await self._model_failed(exc, caller, "planning") from exc
             await self._learn_recipe(intent, outcome)
+            await self._audit_fetch(caller, "planner", outcome)
             return outcome
         raise LibrarianError("credential still not usable after it was provided")
+
+    async def _audit_fetch(self, caller: Caller, how: str, outcome: FetchOutcome) -> None:
+        """One event per plain-language request, saying whether a model was involved."""
+        await self.audit.record(
+            AuditEvent(
+                event="fetch",
+                caller=caller.agent,
+                principal=caller.principal,
+                detail=how,
+                extra={"calls": len(outcome.results), "recipe": outcome.recipe},
+            )
+        )
+
+    async def prune_audit(self) -> int:
+        """Drop database audit events older than `audit_retention_days` (the JSONL stream
+        keeps everything). Returns how many went."""
+        if self.state is None:
+            return 0
+        cutoff = datetime.now(UTC) - timedelta(days=self.settings.audit_retention_days)
+        return await self.state.prune_audit(cutoff)
 
     # -- recipes ---------------------------------------------------------------------
 
@@ -605,6 +637,20 @@ class Librarian:
             telemetry.write_requests.add(1, {"librarian.api": request.api, "outcome": "denied"})
             raise PolicyDenied(decision.reason)
         entry, op = decision.entry, decision.operation
+        limited = await self.policy.rate_limited(caller, entry, write=True)
+        if limited:
+            await self.audit.record(
+                AuditEvent(
+                    event="write_denied",
+                    caller=caller.agent,
+                    principal=caller.principal,
+                    api=request.api,
+                    operation=request.operation,
+                    detail=limited,
+                )
+            )
+            telemetry.write_requests.add(1, {"librarian.api": request.api, "outcome": "denied"})
+            raise PolicyDenied(limited)
 
         grant = self.approvals.find_grant(request, caller)
         if grant is not None:

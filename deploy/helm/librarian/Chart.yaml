@@ -2,8 +2,8 @@ apiVersion: v2
 name: librarian
 description: An A2A agent that learns APIs on demand and gives other agents safe, audited access.
 type: application
-version: 0.14.0
-appVersion: "0.14.0"
+version: 0.15.0
+appVersion: "0.15.0"
 home: https://github.com/kultar/librarian
 sources:
   - https://github.com/kultar/librarian

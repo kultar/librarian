@@ -131,6 +131,10 @@ padding:0 0 10px}
 .empty{color:var(--muted);padding:22px;border:1px dashed var(--line);border-radius:var(--radius);
 text-align:center}
 .more{margin:8px 0 0;font-size:.93em}
+ul.plain{list-style:none;padding:0;margin:0 0 8px;display:flex;flex-wrap:wrap;gap:6px 18px}
+.activity td:first-child{white-space:nowrap;color:var(--muted);font-size:.93em}
+.activity td:last-child{font-size:.9em}
+td.bad{color:var(--danger)}
 .ok-dot{color:var(--ok)}
 th{text-align:left;font-weight:600;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);
 color:var(--muted);font-size:.9em}
@@ -185,6 +189,7 @@ CONSOLE_NAV = (
     ("waiting", "/waiting", "Waiting"),
     ("grants", "/grants", "Grants"),
     ("people", "/people", "People"),
+    ("activity", "/activity", "Activity"),
 )
 
 

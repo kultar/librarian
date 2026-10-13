@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from typing import Protocol
 
 from librarian.calls import ArgValue, Caller, CallRequest, WriteRequest
 from librarian.observations import Observations
@@ -57,6 +58,35 @@ class RateLimiter:
         return True
 
 
+class RateLimitStore(Protocol):
+    """Counts hits per key and window across replicas (see `librarian.state.StateStore`)."""
+
+    async def count_hit(self, key: str, window: int) -> int: ...
+    async def prune_rate_limits(self, before_window: int) -> None: ...
+
+
+class SharedRateLimiter:
+    """A fixed one-minute window per (caller, api), counted in the shared database, so
+    several replicas enforce one limit together instead of one each."""
+
+    def __init__(self, per_minute: int, store: RateLimitStore, kind: str) -> None:
+        self.per_minute = per_minute
+        self.store = store
+        self.kind = kind
+        self._hits = 0
+
+    async def allow(self, caller: str, api: str, now: float | None = None) -> bool:
+        if self.per_minute <= 0:
+            return True
+        now = time.time() if now is None else now
+        window = int(now // 60)
+        count = await self.store.count_hit(f"{self.kind}:{caller}:{api}"[:200], window)
+        self._hits += 1
+        if self._hits % 500 == 0:  # old windows are never read again
+            await self.store.prune_rate_limits(window - 2)
+        return count <= self.per_minute
+
+
 class PolicyEngine:
     def __init__(
         self,
@@ -67,12 +97,23 @@ class PolicyEngine:
         allow_provisional: bool = True,
         allowed_hosts: frozenset[str] | None = None,
         observations: Observations | None = None,
+        shared_limits: RateLimitStore | None = None,
     ) -> None:
         self.registry = registry
         # Runtime facts about operations, including suspensions after an API changed.
         self.observations = observations or Observations()
-        self.rate_limiter = RateLimiter(rate_limit_per_minute)
-        self.write_rate_limiter = RateLimiter(write_rate_limit_per_minute)
+        # With a shared database the limits are counted there, so N replicas enforce one
+        # limit; without one, each process counts on its own.
+        self.rate_limiter: RateLimiter | SharedRateLimiter = (
+            SharedRateLimiter(rate_limit_per_minute, shared_limits, "read")
+            if shared_limits is not None
+            else RateLimiter(rate_limit_per_minute)
+        )
+        self.write_rate_limiter: RateLimiter | SharedRateLimiter = (
+            SharedRateLimiter(write_rate_limit_per_minute, shared_limits, "write")
+            if shared_limits is not None
+            else RateLimiter(write_rate_limit_per_minute)
+        )
         self.allow_provisional = allow_provisional
         # Optional extra guard: when set, entries outside these hosts are refused
         # even if they are in the registry.
@@ -111,11 +152,23 @@ class PolicyEngine:
         problem = _check_args(op, request.args)
         if problem:
             return Decision.deny(problem)
-
-        if not self.rate_limiter.allow(caller.agent, entry.id):
-            return Decision.deny(f"rate limit exceeded for {caller.agent!r} on {entry.id!r}")
-
         return Decision(True, "allowed", entry, op)
+
+    async def rate_limited(
+        self, caller: Caller, entry: ApiEntry, *, write: bool = False
+    ) -> str | None:
+        """The rate-limit part of the decision, taken after `check`/`check_write` allowed
+        the call (it may need the shared database). None when within the limit, else why."""
+        limiter = self.write_rate_limiter if write else self.rate_limiter
+        allowed = (
+            await limiter.allow(caller.agent, entry.id)
+            if isinstance(limiter, SharedRateLimiter)
+            else limiter.allow(caller.agent, entry.id)
+        )
+        if allowed:
+            return None
+        what = "write rate limit" if write else "rate limit"
+        return f"{what} exceeded for {caller.agent!r} on {entry.id!r}"
 
     def check_write(self, request: WriteRequest, caller: Caller) -> Decision:
         """Whether a write may be *requested*. Approval is still required to run it."""
@@ -143,8 +196,6 @@ class PolicyEngine:
         problem = _check_args(op, request.args)
         if problem:
             return Decision.deny(problem)
-        if not self.write_rate_limiter.allow(caller.agent, entry.id):
-            return Decision.deny(f"write rate limit exceeded for {caller.agent!r} on {entry.id!r}")
         return Decision(True, "write may be requested", entry, op)
 
 
