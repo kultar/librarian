@@ -112,6 +112,14 @@ class WebhookNotifier(Notifier):
     async def review_closed(self, review: Any) -> None:
         await self._post_write("review.closed", {"review": review.model_dump(mode="json")})
 
+    async def consent_opened(self, request: Any, link: str) -> None:
+        data = request.model_dump(mode="json", exclude={"code_verifier"})
+        await self._post_write("consent.opened", {"request": data, "link": link})
+
+    async def consent_closed(self, request: Any) -> None:
+        data = request.model_dump(mode="json", exclude={"code_verifier"})
+        await self._post_write("consent.closed", {"request": data})
+
     async def grant_used(self, grant: Grant, approval_like: WriteApproval) -> None:
         await self._post_write(
             "grant.used",
@@ -347,6 +355,39 @@ class SlackNotifier(Notifier):
                 "text": review_outcome_text(review),
             },
         )
+
+    async def consent_opened(self, request: Any, link: str) -> None:
+        """A direct message to the person; the channel (with a mention) when Slack does
+        not know their address."""
+        user = await self._user_id(request.principal)
+        text = (
+            f":key: *{request.api_name}* needs you to sign in, so that *{request.agent}* can "
+            f"act as you there. <{link}|Sign in to {request.api_name}> (one-time link, "
+            f"{int(CONSENT_MINUTES)} minutes). Only what you can see is shared; agents never "
+            "see your token."
+        )
+        target = user or self.default_channel
+        if user is None:
+            text = f"{await self._user_mention(request.principal)} {text}"
+        await self._call("chat.postMessage", {"channel": target, "text": text})
+
+    async def consent_closed(self, request: Any) -> None:
+        user = await self._user_id(request.principal)
+        if user is None or str(request.state) == "pending":
+            return
+        done = {"connected": ":white_check_mark: Signed in", "denied": ":no_entry: Not signed in"}
+        text = done.get(str(request.state), f":hourglass: {request.state}")
+        await self._call(
+            "chat.postMessage",
+            {"channel": user, "text": f"{text} to {request.api_name}; your agent carries on."},
+        )
+
+    async def _user_id(self, email: str) -> str | None:
+        mention = await self._user_mention(email)
+        return mention[2:-1] if mention.startswith("<@") else None
+
+
+CONSENT_MINUTES = 30
 
 
 def review_outcome_text(review: Any) -> str:

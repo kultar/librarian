@@ -23,6 +23,7 @@ from librarian import __version__, telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance, WriteRequest
 from librarian.net import PUBLIC, BlockedAddress, NetworkPolicy, pin
+from librarian.oauth import ConsentBroker, principal_key
 from librarian.observations import Observations
 from librarian.policy import PolicyEngine
 from librarian.registry.models import (
@@ -33,6 +34,7 @@ from librarian.registry.models import (
     BearerAuth,
     EntryStatus,
     NoAuth,
+    OAuth2UserAuth,
     Operation,
     ParamLocation,
     is_reserved_secret,
@@ -55,10 +57,15 @@ class PolicyDenied(Exception):
 class CredentialMissing(Exception):
     """The API needs a credential that is not in the secret store."""
 
-    def __init__(self, entry: ApiEntry, reason: str = "missing") -> None:
+    def __init__(
+        self, entry: ApiEntry, reason: str = "missing", principal: str | None = None
+    ) -> None:
         super().__init__(f"no usable credential for {entry.id!r} ({reason})")
         self.entry = entry
         self.reason = reason
+        # Set when the credential is the person's own (per-person OAuth): that person,
+        # not the approvers, has to act.
+        self.principal = principal
 
 
 class Executor:
@@ -87,6 +94,10 @@ class Executor:
         # return the entry with the authentication librarian worked out, in which case
         # the normal credential flow takes over.
         self.on_unexpected_auth: Callable[[ApiEntry, int], Awaitable[ApiEntry | None]] | None = None
+        # Per-person sign-in (OAuth): where each person's tokens come from, and whether
+        # the person must be verified by the identity provider (principals.mode != off).
+        self.consents: ConsentBroker | None = None
+        self.require_verified_principal = False
         # Provisional entries come from agent-supplied specs, so by default they
         # may only reach public addresses (plus listed internal hosts). Verified
         # entries were human-reviewed.
@@ -148,7 +159,7 @@ class Executor:
             raise PolicyDenied(decision.reason)
 
         entry, op = decision.entry, decision.operation
-        secret = await self._resolve_secret(entry)
+        secret = await self._resolve_secret(entry, caller)
         started = time.monotonic()
         url, headers, query = _build_request(entry, op, request.args)
         secret_query = _auth_query(entry, secret)
@@ -232,7 +243,12 @@ class Executor:
             caller=caller.agent,
             principal=caller.principal,
             principal_verified=caller.principal_verified,
-            credential_ref=entry.secret_ref,
+            credential_ref=entry.secret_ref
+            or (
+                principal_key(entry.id, caller.principal)
+                if caller.principal and entry.per_person
+                else None
+            ),
             pages=page_count,
             origin=op.origin.value,
             confirmed=self.observations.confirmed(entry, op),
@@ -251,6 +267,13 @@ class Executor:
                 extra={"pages": page_count, "truncated": truncated},
             )
         )
+        if status_code == 401 and isinstance(entry.auth, OAuth2UserAuth):
+            # The person's token no longer works: drop it and ask them to sign in again.
+            if self.consents is not None and caller.principal:
+                await self.consents.forget_tokens(entry.id, caller.principal)
+            raise CredentialMissing(
+                entry, reason="the sign-in was rejected (HTTP 401)", principal=caller.principal
+            )
         if status_code == 401 and not isinstance(entry.auth, NoAuth):
             # The credential itself is missing, expired or revoked: ask for a new one.
             raise CredentialMissing(entry, reason="rejected with HTTP 401")
@@ -299,12 +322,16 @@ class Executor:
         would replay the write against another URL.
         """
         auth = entry.write_auth
-        ref = entry.write_secret_ref
-        if auth is None or ref is None or is_reserved_secret(ref):
-            raise PolicyDenied(f"API {entry.id!r} has no usable write credential")
-        secret = await self.secrets.get(ref)
-        if secret is None:
-            raise CredentialMissing(entry, reason=f"write credential {ref!r} is missing")
+        if isinstance(auth, OAuth2UserAuth):
+            secret: str | None = await self._person_token(entry, auth, caller)
+            ref = principal_key(entry.id, caller.principal or "")
+        else:
+            ref = entry.write_secret_ref
+            if auth is None or ref is None or is_reserved_secret(ref):
+                raise PolicyDenied(f"API {entry.id!r} has no usable write credential")
+            secret = await self.secrets.get(ref)
+            if secret is None:
+                raise CredentialMissing(entry, reason=f"write credential {ref!r} is missing")
         url, headers, query = _build_request(entry, op, request.args)
         _apply_auth_headers(entry, secret, headers, auth)
         params: dict[str, ArgValue] = {**query, **_auth_query(entry, secret, auth)}
@@ -377,7 +404,9 @@ class Executor:
             ),
         )
 
-    async def _resolve_secret(self, entry: ApiEntry) -> str | None:
+    async def _resolve_secret(self, entry: ApiEntry, caller: Caller) -> str | None:
+        if isinstance(entry.auth, OAuth2UserAuth):
+            return await self._person_token(entry, entry.auth, caller)
         ref = entry.secret_ref
         if ref is None:
             return None
@@ -387,6 +416,26 @@ class Executor:
         if value is None:
             raise CredentialMissing(entry)
         return value
+
+    async def _person_token(self, entry: ApiEntry, auth: OAuth2UserAuth, caller: Caller) -> str:
+        """The calling person's own access token for this API, or the reasons there is none."""
+        if self.consents is None:
+            raise PolicyDenied(f"API {entry.id!r} needs per-person sign-in, which is not set up")
+        if entry.status is not EntryStatus.VERIFIED:
+            raise PolicyDenied(
+                f"API {entry.id!r} uses per-person sign-in, which needs a verified entry"
+            )
+        if not caller.principal:
+            raise PolicyDenied(f"API {entry.id!r} acts as the person, and this request has none")
+        if self.require_verified_principal and not caller.principal_verified:
+            raise PolicyDenied(
+                f"API {entry.id!r} acts as the person, so the person must be verified "
+                "(send an X-Principal-Token)"
+            )
+        tokens = await self.consents.tokens_for(entry, auth, caller.principal)
+        if tokens is None:
+            raise CredentialMissing(entry, reason="sign-in needed", principal=caller.principal)
+        return tokens.access_token
 
     async def _send(
         self,
@@ -476,7 +525,7 @@ def _apply_auth_headers(
     auth = auth if auth is not None else entry.auth
     if secret is None or isinstance(auth, NoAuth):
         return
-    if isinstance(auth, BearerAuth):
+    if isinstance(auth, BearerAuth | OAuth2UserAuth):
         headers["Authorization"] = f"Bearer {secret}"
     elif isinstance(auth, BasicAuth):
         headers["Authorization"] = "Basic " + base64.b64encode(secret.encode()).decode()

@@ -249,8 +249,40 @@ class BasicAuth(StrictModel):
     secret_ref: str
 
 
+class OAuth2UserAuth(StrictModel):
+    """Acting as the person: OAuth 2.0 authorization code (PKCE) per principal.
+
+    Each person signs in once through librarian's pages; their tokens live under
+    `<api>/users/<hash of the principal>` and every call for them carries their own
+    token, so the API enforces their access. librarian is the OAuth client: register
+    it with the provider once and put the client secret under `client_secret_ref`.
+    Only verified entries may use this (the URLs are where tokens and secrets go)."""
+
+    type: Literal["oauth2_user"] = "oauth2_user"
+    authorization_url: str
+    token_url: str
+    scopes: list[str] = Field(default_factory=list[str], max_length=50)
+    client_id: str = Field(min_length=1, max_length=256)
+    client_secret_ref: str | None = None  # None: a public client (PKCE only)
+    revocation_url: str | None = None  # RFC 7009 endpoint: disconnecting revokes there too
+    pkce: bool = True
+    # Provider extras on the authorization request, e.g. Google's
+    # {"access_type": "offline", "prompt": "consent"} to get a refresh token.
+    extra_authorize_params: dict[str, str] = Field(default_factory=dict[str, str])
+
+    @field_validator("authorization_url", "token_url", "revocation_url")
+    @classmethod
+    def _https(cls, url: str | None) -> str | None:
+        if url is None:
+            return None
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not parts.hostname:
+            raise ValueError("OAuth endpoints must be https URLs")
+        return url
+
+
 AuthSpec = Annotated[
-    NoAuth | BearerAuth | ApiKeyAuth | BasicAuth,
+    NoAuth | BearerAuth | ApiKeyAuth | BasicAuth | OAuth2UserAuth,
     Field(discriminator="type"),
 ]
 
@@ -355,6 +387,11 @@ class ApiEntry(StrictModel):
         for auth in (self.auth, self.write_auth):
             if auth is None or isinstance(auth, NoAuth):
                 continue
+            if isinstance(auth, OAuth2UserAuth):
+                ref = auth.client_secret_ref
+                if ref is not None and (not SECRET_REF.match(ref) or is_reserved_secret(ref)):
+                    raise ValueError(f"invalid client_secret_ref {ref!r}")
+                continue
             if not SECRET_REF.match(auth.secret_ref):
                 raise ValueError(f"invalid secret_ref {auth.secret_ref!r}")
             if is_reserved_secret(auth.secret_ref):
@@ -381,12 +418,23 @@ class ApiEntry(StrictModel):
 
     @property
     def secret_ref(self) -> str | None:
-        return None if isinstance(self.auth, NoAuth) else self.auth.secret_ref
+        """The shared read credential's reference (None for no auth, and for per-person
+        sign-in, whose tokens live under `<id>/users/...`)."""
+        if isinstance(self.auth, NoAuth | OAuth2UserAuth):
+            return None
+        return self.auth.secret_ref
 
     @property
     def write_secret_ref(self) -> str | None:
         auth = self.write_auth
-        return None if auth is None or isinstance(auth, NoAuth) else auth.secret_ref
+        if auth is None or isinstance(auth, NoAuth | OAuth2UserAuth):
+            return None
+        return auth.secret_ref
+
+    @property
+    def per_person(self) -> bool:
+        """Reads use each person's own sign-in rather than a shared credential."""
+        return isinstance(self.auth, OAuth2UserAuth)
 
     @property
     def has_writable_operations(self) -> bool:

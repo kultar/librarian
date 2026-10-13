@@ -1,4 +1,4 @@
-<p align="center"><a href="https://kultar.github.io/librarian/"><picture>
+<p align="center"><a href="https://librarian-agent.com/"><picture>
 <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/banner-dark.svg">
 <img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/banner.svg" alt="librarian: one agent that learns APIs on demand and keeps the keys" width="760">
 </picture></a></p>
@@ -20,7 +20,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.13)**. Expect breaking changes. Website: [kultar.github.io/librarian](https://kultar.github.io/librarian/).
+> Status: **alpha (v0.13)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
 ## Why
 
@@ -257,6 +257,42 @@ responses that lose most of the fields seen before are reported to the API's own
 callers see a warning. `librarian registry recheck [api]` runs a check now;
 `librarian registry clear <api> <operation>` lifts a suspension after checking by hand.
 
+## Acting as the person (per-person OAuth)
+
+Some APIs have no credential that is right for everyone: what Google Drive or Jira returns
+depends on who is asking. For those, librarian is the OAuth client and each person signs in
+once:
+
+```yaml
+# in the registry entry (verified entries only)
+auth:
+  type: oauth2_user
+  authorization_url: https://accounts.example.com/o/oauth2/auth
+  token_url: https://oauth2.example.com/token
+  scopes: [files.read]
+  client_id: "<the OAuth client you registered for librarian>"
+  client_secret_ref: drive/oauth-client          # in the secret store; omit for a public client
+  extra_authorize_params: {access_type: offline, prompt: consent}   # provider extras
+```
+
+Register librarian with the provider once, with the redirect URI `<public_url>/oauth/callback`.
+For GitHub, `librarian github-app create --oauth-callback <public_url>/oauth/callback` creates
+an App that is also the OAuth client and saves its client secret next to the key (GitHub Apps
+use the App's permissions, so `scopes` stays empty).
+The first time a person's agent needs the API, that person (not the approver group) gets a
+one-time link, by Slack direct message when Slack knows their address: they sign in to the
+provider in their browser and librarian stores their tokens under `<api>/users/<hash>`. From
+then on every request their agents make for them carries their own token, so the API enforces
+their access and librarian's policy applies on top. Tokens are refreshed by librarian; a
+rejected or expired sign-in simply asks the person again. Agents never see the tokens, and a
+request for person B can never go out with person A's token (recipes and credentials are kept
+per person). The console lists who is signed in to what and can disconnect them.
+
+With `principals.mode: required` the person must be verified by your identity provider before
+their token is used; with `off` (a laptop) the agent's claimed principal is trusted. Requests
+with no person behind them are refused for these APIs. MCP callers get `consent_pending` while
+the person signs in.
+
 ## Verified principals
 
 By default the person an agent acts for (`principal`) is whatever the agent claims. Turn on
@@ -300,11 +336,32 @@ updates in place and the outcome is posted in the thread. The key itself never g
 
 No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 
+## What it looks like
+
+<p align="center">
+<img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/console-overview.png" alt="The console overview: tiles for APIs, what waits on a person, grants and signed-in people, then the waiting list and recently changed APIs" width="760"><br>
+<em>The console: what librarian knows, and what waits on a person.</em>
+</p>
+
+<p align="center">
+<img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/console-api.png" alt="An API page: summary, search, the operations that need attention first, then operations grouped by tag" width="760"><br>
+<em>A large API: search, the operations that need a decision first, then groups by tag.</em>
+</p>
+
+<table align="center"><tr>
+<td><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/review.png" alt="The review page for a learned API: the proposal, operations that need a decision, approve and merge, or deny" width="380"></td>
+<td><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/approve-write.png" alt="A write approval page: method, path, arguments and body, approve once, allow similar, or deny" width="300"></td>
+</tr><tr>
+<td align="center"><em>Approving a learned API, from the Slack card.</em></td>
+<td align="center"><em>Approving one write: exactly what will be sent.</em></td>
+</tr></table>
+
 ## The console
 
-The pages listener's root (`/`) is a console for the people who run librarian: every API it
-knows (status, host, operations and where they were learned from), what is waiting on a person
-(keys to add, writes to approve, proposals to review, with the links), and the standing grants. It shows credential
+The pages listener's root (`/`) is a console for the people who run librarian, with pages for
+the overview, the APIs (status, host, operations and where they were learned from), what is
+waiting on a person (keys to add, writes to approve, proposals to review, sign-ins), the
+standing grants, the people signed in to per-person APIs, and each person's own sign-ins. It shows credential
 *references* only, never values. From there a signed-in approver can **revoke a grant**,
 **block** or **unblock** an API, **forget** a learned one (its open review is closed as the App, and whatever waited on a
 person for it is cancelled), **invalidate a credential** (the next call asks for a fresh key), **re-learn** a provisional API from a documentation or spec URL you

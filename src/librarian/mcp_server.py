@@ -25,7 +25,13 @@ from librarian.approvals import WriteApproval
 from librarian.calls import ArgValue, Caller, CallRequest, WriteRequest
 from librarian.executor import PolicyDenied
 from librarian.server_state import CALLER_STATE_KEY
-from librarian.service import CredentialPending, Librarian, LibrarianError, WriteOutcome
+from librarian.service import (
+    ConsentPending,
+    CredentialPending,
+    Librarian,
+    LibrarianError,
+    WriteOutcome,
+)
 
 INSTRUCTIONS = """\
 librarian gives you read access to registered APIs (Jira, GitHub, internal services, ...)
@@ -100,6 +106,13 @@ def build_mcp(librarian: Librarian) -> MCPServer:
                 "status": "credential_pending",
                 "credential_request": pending.request.id,
                 "message": str(pending),
+            }
+        except ConsentPending as consent:
+            return {
+                "status": "consent_pending",
+                "consent_request": consent.request.id,
+                "principal": consent.request.principal,
+                "message": str(consent),
             }
         except ValidationError as exc:
             raise ToolError(f"invalid request: {exc.errors()[0]['msg']}") from exc

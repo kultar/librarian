@@ -87,6 +87,18 @@ high-value target. This document lists what we defend against, how, and what is 
   Registry entries may not reference that prefix and approvers are never offered it, so no entry
   (community, learned or hand-written) can make the librarian send an internal secret to a host.
 
+### T3b. Acting as the person (per-person OAuth)
+- Each person's tokens live in the secret store under the API and a hash of the principal,
+  never in messages, logs or the registry. The executor picks the token by the request's
+  principal; nothing is cached across people, and a test proves B's request never carries A's
+  token.
+- Only the person themselves can use their sign-in link (the proxy identity must match the
+  principal; the link is one-time and expires in 30 minutes). The OAuth `state` carries the
+  link token, and PKCE binds the code to librarian's request.
+- Per-person auth is only honoured on verified entries, so the token and authorization URLs
+  (where the client secret and codes go) were approved by a person. With `principals.mode`
+  other than `off`, the person must be verified by the identity provider.
+
 ### T4. Server-side request forgery (SSRF)
 - URLs are built from the registry entry; callers only supply argument values. Path arguments
   cannot contain `/` or `..`; header arguments can't set auth headers; CR/LF are rejected.

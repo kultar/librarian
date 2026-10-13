@@ -61,6 +61,14 @@ operations:
     warning: null                 # shown to callers with every result
 ```
 
+## Acting as the person
+
+`auth.type: oauth2_user` makes librarian the OAuth client for the API and each person sign in
+once (see the README's "Acting as the person"). Fields: `authorization_url`, `token_url`
+(both https), `scopes`, `client_id`, `client_secret_ref` (optional; a secret reference, never
+under `librarian/`), `pkce` (default true), `extra_authorize_params`. Only verified entries may
+use it. The same type works for `write_auth`.
+
 ## Discovery and glossary
 
 ```yaml

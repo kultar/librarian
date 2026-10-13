@@ -157,8 +157,8 @@ async def init_repo(auth: GitHubAppAuth, *, readme: str = FIRST_README) -> bool:
 # -- one-step creation (manifest flow) --------------------------------------------------
 
 
-def manifest(name: str, redirect_url: str) -> dict[str, Any]:
-    return {
+def manifest(name: str, redirect_url: str, callback_url: str | None = None) -> dict[str, Any]:
+    data: dict[str, Any] = {
         "name": name,
         "url": "https://github.com/kultar/librarian",
         "description": "librarian: opens pull requests for APIs it learned, and reads the "
@@ -168,6 +168,12 @@ def manifest(name: str, redirect_url: str) -> dict[str, Any]:
         "default_permissions": {**PERMISSIONS, "metadata": "read"},
         "default_events": [],
     }
+    if callback_url:
+        # The same App can sign people in to GitHub's API (per-person OAuth): GitHub sends
+        # them back to librarian's pages here.
+        data["callback_urls"] = [callback_url]
+        data["request_oauth_on_install"] = False
+    return data
 
 
 def new_app_url(owner: str, owner_is_org: bool, state: str) -> str:
@@ -200,23 +206,35 @@ class CreatedApp:
     client_id: str
     html_url: str
     key_file: Path
+    client_secret_file: Path | None = None  # saved only when a callback URL was asked for
 
 
 async def exchange_code(
-    code: str, key_file: Path, client: httpx.AsyncClient, api_url: str = API
+    code: str,
+    key_file: Path,
+    client: httpx.AsyncClient,
+    api_url: str = API,
+    *,
+    save_client_secret: bool = False,
 ) -> CreatedApp:
-    """Trade the one-time code for the App's credentials; save the private key."""
+    """Trade the one-time code for the App's credentials; save the private key (and the
+    OAuth client secret next to it when asked, for per-person sign-in)."""
     response = await client.post(f"{api_url}/app-manifests/{code}/conversions")
     if response.status_code != 201:
         raise GitHubAppError(f"GitHub did not accept the code: HTTP {response.status_code}")
     data = cast(dict[str, Any], response.json())
     write_private_key(key_file, str(data["pem"]))
+    secret_file: Path | None = None
+    if save_client_secret and data.get("client_secret"):
+        secret_file = key_file.with_name(key_file.stem + ".client-secret")
+        write_private_key(secret_file, str(data["client_secret"]))
     return CreatedApp(
         app_id=int(data["id"]),
         slug=str(data["slug"]),
         client_id=str(data.get("client_id") or ""),
         html_url=str(data.get("html_url") or ""),
         key_file=key_file,
+        client_secret_file=secret_file,
     )
 
 
@@ -238,6 +256,7 @@ async def create_app(
     *,
     name: str | None = None,
     port: int = 8977,
+    callback_url: str | None = None,
     client: httpx.AsyncClient,
     api_url: str = API,
     echo: Callable[[str], None] = print,
@@ -264,7 +283,7 @@ async def create_app(
     is_org = who.json().get("type") == "Organization"
     state = new_state()
     local = f"http://127.0.0.1:{port}"
-    app_manifest = manifest(name or f"librarian-{owner}", f"{local}/callback")
+    app_manifest = manifest(name or f"librarian-{owner}", f"{local}/callback", callback_url)
     created: asyncio.Future[CreatedApp] = asyncio.get_running_loop().create_future()
 
     async def start(request: Request) -> HTMLResponse:
@@ -275,7 +294,9 @@ async def create_app(
         if request.query_params.get("state") != state or not code or created.done():
             return HTMLResponse("<h1>This link is not valid</h1>", status_code=400)
         try:
-            result = await exchange_code(code, key_file, client, api_url)
+            result = await exchange_code(
+                code, key_file, client, api_url, save_client_secret=callback_url is not None
+            )
         except GitHubAppError as exc:
             created.set_exception(exc)
             return HTMLResponse(f"<h1>Could not create the App</h1><p>{escape(str(exc))}</p>")

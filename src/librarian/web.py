@@ -59,9 +59,15 @@ _STYLE = (
     + """
 *{box-sizing:border-box}
 body{margin:0;font:16px/1.55 var(--sans);color:var(--text);background:var(--paper)}
-.top{max-width:680px;margin:0 auto;padding:18px 20px 0;display:flex;align-items:center;gap:10px;
-font-family:var(--serif);font-size:1.3rem}
-.top svg{width:28px;height:28px;flex:none}.top .muted{margin-left:auto;font-family:var(--sans)}
+.top{max-width:680px;margin:0 auto;padding:14px 20px;display:flex;align-items:center;gap:10px;
+border-bottom:1px solid var(--line)}
+.top .brand{display:flex;align-items:center;gap:10px;font-family:var(--serif);font-size:1.3rem;
+color:var(--text);text-decoration:none}
+.top svg{width:28px;height:28px;flex:none}.top .muted{margin-left:auto}
+.top nav{display:flex;gap:20px;margin-left:32px;flex-wrap:wrap}
+.top nav a{color:var(--text);text-decoration:none;padding:6px 0;border-bottom:2px solid transparent}
+.top nav a:hover{color:var(--brass-ink)}.top nav a.active{border-bottom-color:var(--brass)}
+.top .me{margin-left:auto;font-size:.93em;color:var(--muted)}.top .muted+.me{margin-left:12px}
 main{max-width:680px;margin:0 auto;padding:16px 20px 56px}
 h1{font:400 clamp(1.7rem,4vw,2.2rem)/1.15 var(--serif);margin:12px 0 6px;letter-spacing:-.01em}
 h2{font:400 1.3rem/1.2 var(--serif);margin:0 0 8px}
@@ -103,8 +109,29 @@ border-radius:8px;padding:10px 14px;margin:0 0 16px}
 .status{display:flex;align-items:center;gap:14px;margin:28px 0 8px}
 .status svg{width:44px;height:44px;flex:none}.status h1{margin:0}
 a{color:var(--link)}
+a.btn{display:block;text-align:center;padding:10px 16px;border-radius:8px;background:var(--ink);
+color:#fff;text-decoration:none;font-weight:500;margin-top:14px}a.btn:hover{background:var(--ink-deep)}
 main.console,.top.console,main.review,.top.review{max-width:1040px}
 main.console h2,main.review h2{margin-top:28px}
+.crumbs{color:var(--muted);font-size:.93em;margin:4px 0 10px}.crumbs a{color:var(--muted)}
+.pagehead{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 4px}
+.pagehead h1{margin:0}.pagehead .tag{font-size:13px;padding:4px 10px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;
+margin:18px 0 8px}
+.tile{display:block;background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);padding:14px 16px;color:var(--text);text-decoration:none}
+.tile b{display:block;font:400 2rem/1.1 var(--serif)}.tile em{display:block;font-style:normal}
+.tile span{display:block;color:var(--muted);font-size:.85em;margin-top:2px}
+a.tile:hover{border-color:var(--ink)}
+.subnav{display:flex;gap:18px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin:18px 0 6px;
+padding:0 0 10px}
+.subnav a{color:var(--muted);text-decoration:none;font-size:.95em}.subnav a:hover{color:var(--text)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin:12px 0}
+.grid2 .card{margin:0}
+.empty{color:var(--muted);padding:22px;border:1px dashed var(--line);border-radius:var(--radius);
+text-align:center}
+.more{margin:8px 0 0;font-size:.93em}
+.ok-dot{color:var(--ok)}
 th{text-align:left;font-weight:600;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);
 color:var(--muted);font-size:.9em}
 .tag{display:inline-block;font-size:12px;padding:3px 8px;border-radius:6px;background:var(--line)}
@@ -152,14 +179,33 @@ _ICONS = {
 }
 
 
-def _page(title: str, body: str, status: int = 200, kind: str = "approval") -> HTMLResponse:
+CONSOLE_NAV = (
+    ("overview", "/", "Overview"),
+    ("apis", "/apis", "APIs"),
+    ("waiting", "/waiting", "Waiting"),
+    ("grants", "/grants", "Grants"),
+    ("people", "/people", "People"),
+)
+
+
+def _page(
+    title: str, body: str, status: int = 200, kind: str = "approval", active: str = ""
+) -> HTMLResponse:
+    if kind == "console":
+        links = "".join(
+            f"<a href='{href}'{' class=active' if key == active else ''}>{label}</a>"
+            for key, href, label in CONSOLE_NAV
+        )
+        right = f"<nav aria-label='Console'>{links}</nav><a class=me href='/me'>Your sign-ins</a>"
+    else:
+        right = f"<span class=muted>{html.escape(kind)}</span><a class=me href='/'>Console</a>"
     doc = (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         f"<title>{html.escape(title)}</title>{_ICON_LINKS}<style>{_STYLE}</style></head>"
-        f"<body><header class='top {html.escape(kind)}'>{_MARK}librarian"
-        f"<span class=muted>{html.escape(kind)}</span>"
-        f"</header><main class={html.escape(kind)}>{body}</main></body></html>"
+        f"<body><header class='top {html.escape(kind)}'><a class=brand href='/'>{_MARK}"
+        f"librarian</a>{right}</header>"
+        f"<main class={html.escape(kind)}>{body}</main></body></html>"
     )
     return HTMLResponse(doc, status_code=status, headers=_SECURITY_HEADERS)
 

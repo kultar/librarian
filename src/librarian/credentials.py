@@ -164,6 +164,19 @@ class Notifier:
             review.review_url,
         )
 
+    async def consent_opened(self, request: Any, link: str) -> None:
+        """A person must sign in to an API themselves (per-person OAuth)."""
+        log.warning(
+            "%s must sign in to %s for %s; link: %s",
+            request.principal,
+            request.api,
+            request.agent,
+            link,
+        )
+
+    async def consent_closed(self, request: Any) -> None:
+        log.info("sign-in of %s to %s: %s", request.principal, request.api, request.state)
+
     async def review_closed(self, review: Any) -> None:
         log.info(
             "review of %s %s by %s: %s", review.api, review.state, review.decided_by, review.note

@@ -68,7 +68,13 @@ class FakeGitHub:
         if path == "/app-manifests/one-time-code/conversions":
             return httpx.Response(
                 201,
-                json={"id": 777, "slug": "librarian-acme", "client_id": "Iv1.x", "pem": PEM},
+                json={
+                    "id": 777,
+                    "slug": "librarian-acme",
+                    "client_id": "Iv1.x",
+                    "client_secret": "cs-very-secret",
+                    "pem": PEM,
+                },
             )
         if path == f"/repos/{REPO}/branches":
             return httpx.Response(200, json=self.branches)
@@ -194,6 +200,7 @@ async def test_one_step_creation_end_to_end(tmp_path: Path) -> None:
             on_ready=ready.put_nowait,
             wait_seconds=10,
             poll_seconds=0.01,
+            callback_url="https://librarian.example.test/oauth/callback",
         )
     )
     url = await asyncio.wait_for(ready.get(), 10)
@@ -214,6 +221,7 @@ async def test_one_step_creation_end_to_end(tmp_path: Path) -> None:
             "metadata": "read",
         }
         assert manifest["redirect_url"] == f"http://127.0.0.1:{port}/callback"
+        assert manifest["callback_urls"] == ["https://librarian.example.test/oauth/callback"]
         forged = await browser.get(f"{url}callback", params={"code": "x", "state": "wrong"})
         assert forged.status_code == 400
         done = await browser.get(f"{url}callback", params={"code": "one-time-code", "state": state})
@@ -222,6 +230,11 @@ async def test_one_step_creation_end_to_end(tmp_path: Path) -> None:
     assert (created.app_id, installation) == (777, 4242)
     assert key_file.read_text() == PEM
     assert not any(PEM.splitlines()[1] in line for line in lines)  # the key is never printed
+    secret_file = created.client_secret_file
+    assert secret_file == tmp_path / "github-app.client-secret"
+    assert secret_file is not None and secret_file.read_text() == "cs-very-secret"
+    assert oct(secret_file.stat().st_mode)[-3:] == "600"
+    assert not any("cs-very-secret" in line for line in lines)
 
 
 async def test_init_repo_makes_the_first_commit_only_when_the_repo_is_empty() -> None:

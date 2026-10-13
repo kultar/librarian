@@ -61,10 +61,11 @@ from librarian import __version__, telemetry
 from librarian.approvals import WriteApproval
 from librarian.calls import Caller, CallRequest, WriteRequest
 from librarian.config import PrincipalSettings
-from librarian.console import console_routes, review_routes
+from librarian.console import consent_routes, console_routes, review_routes
 from librarian.credentials import CredentialRequest
 from librarian.executor import PolicyDenied
 from librarian.mcp_server import build_mcp
+from librarian.oauth import ConsentRequest
 from librarian.principals import Issuer, PrincipalError, PrincipalVerifier
 from librarian.server_state import CALLER_STATE_KEY, TRACE_STATE_KEY
 from librarian.service import CredentialUnavailable, Librarian, LibrarianError, WriteRefused
@@ -207,24 +208,32 @@ class LibrarianExecutor(AgentExecutor):
                 return
             caller = caller.model_copy(update={"principal": claimed[:200]})
 
-        async def on_auth_required(request: CredentialRequest) -> None:
-            await updater.requires_auth(
-                updater.new_agent_message(
-                    [
-                        new_text_part(
-                            f"{request.api_name} needs a credential. An approver has been "
-                            f"notified (request {request.id}); this task resumes automatically "
-                            "once access is granted."
-                        ),
-                        new_data_part(
-                            {
-                                "credential_request": request.id,
-                                "api": request.api,
-                                "state": request.state.value,
-                            }
-                        ),
-                    ]
+        async def on_auth_required(request: CredentialRequest | ConsentRequest) -> None:
+            if isinstance(request, ConsentRequest):
+                text = (
+                    f"{request.api_name} acts as the person: {request.principal} must sign "
+                    f"in to it themselves (they were sent a link; sign-in {request.id}). This "
+                    "task resumes automatically once they have."
                 )
+                data: dict[str, Any] = {
+                    "consent_request": request.id,
+                    "api": request.api,
+                    "principal": request.principal,
+                    "state": request.state.value,
+                }
+            else:
+                text = (
+                    f"{request.api_name} needs a credential. An approver has been "
+                    f"notified (request {request.id}); this task resumes automatically "
+                    "once access is granted."
+                )
+                data = {
+                    "credential_request": request.id,
+                    "api": request.api,
+                    "state": request.state.value,
+                }
+            await updater.requires_auth(
+                updater.new_agent_message([new_text_part(text), new_data_part(data)])
             )
 
         async def on_approval_required(approval: WriteApproval) -> None:
@@ -519,6 +528,7 @@ def create_pages_app(librarian: Librarian) -> Starlette:
             *approval_routes(librarian.approvals, librarian.settings.approvers),
             *console_routes(librarian),
             *review_routes(librarian),
+            *consent_routes(librarian),
             *asset_routes(),
             Route("/healthz", healthz, methods=["GET"]),
         ]
@@ -596,6 +606,7 @@ def create_app(
             *approval_routes(librarian.approvals, librarian.settings.approvers),
             *console_routes(librarian),
             *review_routes(librarian),
+            *consent_routes(librarian),
             *asset_routes(),
         ]
 

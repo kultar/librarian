@@ -54,6 +54,7 @@ from librarian.finddocs import (
 )
 from librarian.github_app import GitHubAppAuth
 from librarian.notifiers import SlackNotifier, WebhookNotifier
+from librarian.oauth import ConsentBroker, ConsentRequest, ConsentState
 from librarian.observations import Finding, Observations
 from librarian.openapi import (
     SpecError,
@@ -94,7 +95,7 @@ log = logging.getLogger(__name__)
 
 SYSTEM_CALLER = Caller(agent="librarian", authenticated=True)
 
-AuthRequiredHook = Callable[[CredentialRequest], Awaitable[None]]
+AuthRequiredHook = Callable[[CredentialRequest | ConsentRequest], Awaitable[None]]
 
 
 class LibrarianError(Exception):
@@ -106,6 +107,18 @@ class CredentialUnavailable(LibrarianError):
         super().__init__(
             f"no credential for {request.api!r}: request {request.state}"
             + (f" ({request.resolution_note})" if request.resolution_note else "")
+        )
+        self.request = request
+
+
+class ConsentPending(LibrarianError):
+    """The person behind the agent must sign in to the API themselves; they were sent a
+    link. Retry later (non-waiting callers)."""
+
+    def __init__(self, request: ConsentRequest) -> None:
+        super().__init__(
+            f"{request.api_name} acts as the person: {request.principal} must sign in to it "
+            f"first; they were sent a link (sign-in {request.id}). Retry once they have."
         )
         self.request = request
 
@@ -311,6 +324,16 @@ class Librarian:
         self.executor.on_unexpected_auth = self._settle_auth_after_401
         self._auth_notified: set[str] = set()
         slack = settings.notifier.slack if settings.notifier.type == "slack" else None
+        self.consents = ConsentBroker(
+            self.secrets,
+            self.notifier,
+            self.audit,
+            public_url=settings.public_url,
+            signing_key=pysecrets.token_bytes(32),
+            store=self.state,
+        )
+        self.executor.consents = self.consents
+        self.executor.require_verified_principal = settings.principals.mode != "off"
         self.reviews = ReviewBroker(
             self.notifier,
             self.audit,
@@ -355,6 +378,7 @@ class Librarian:
         self.broker.set_signing_key(key)
         self.approvals.set_signing_key(key)
         self.reviews.set_signing_key(key)
+        self.consents.set_signing_key(key)
         await self.reviews.restore()
 
     async def _signing_key(self) -> bytes:
@@ -394,6 +418,9 @@ class Librarian:
             return await self.executor.execute(request, caller)
         except CredentialMissing as missing:
             if not wait_for_credential:
+                if missing.principal:
+                    consent = await self.consents.open(missing.entry, caller, missing.reason)
+                    raise ConsentPending(consent) from missing
                 pending = await self.broker.open(missing.entry, caller, missing.reason)
                 raise CredentialPending(pending) from missing
             await self._await_credential(missing, caller, on_auth_required)
@@ -1585,6 +1612,18 @@ class Librarian:
         caller: Caller,
         on_auth_required: AuthRequiredHook | None,
     ) -> None:
+        if missing.principal:  # the person, not the approvers, has to act
+            consent = await self.consents.open(missing.entry, caller, missing.reason)
+            if on_auth_required is not None:
+                await on_auth_required(consent)
+            done = await self.consents.wait(
+                consent.id, max_wait=self.settings.credential_wait_seconds
+            )
+            if done.state is not ConsentState.CONNECTED:
+                raise LibrarianError(
+                    f"{missing.entry.name}: {consent.principal} did not sign in ({done.state})"
+                )
+            return
         request = await self.broker.open(missing.entry, caller, missing.reason)
         if on_auth_required is not None:
             await on_auth_required(request)

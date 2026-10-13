@@ -8,8 +8,8 @@
 <meta name="color-scheme" content="light dark">
 <meta property="og:title" content="librarian">
 <meta property="og:description" content="One agent that learns APIs on demand and keeps the keys. Reads within policy, writes with a person's approval.">
-<meta property="og:image" content="https://kultar.github.io/librarian/assets/social.png">
-<meta property="og:url" content="https://kultar.github.io/librarian/">
+<meta property="og:image" content="https://librarian-agent.com/assets/social.png">
+<meta property="og:url" content="https://librarian-agent.com/">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
 <link rel="icon" href="assets/favicon-32.png" sizes="32x32" type="image/png">
@@ -24,6 +24,7 @@
   </a>
   <nav class="nav" aria-label="Sections">
     <a href="#how">How it works</a>
+    <a href="#see">What people see</a>
     <a href="#save">What agents save</a>
     <a href="#safe">Why it's safe</a>
     <a href="#start">Get started</a>
@@ -95,6 +96,19 @@ docker pull ghcr.io/kultar/librarian:0.13.1</code></pre></div>
       <li><div><h3>If the API needs a key, a person is asked once</h3><p>The agent's task waits and approvers get a Slack card. Someone follows the one-time link, signs in and pastes the key. It goes straight to your secret store, never through Slack, an agent or a model, and the task carries on by itself.</p></div></li>
       <li><div><h3>Writes wait for a person's approval, every time</h3><p>The approval page shows exactly what will be sent: method, path, arguments and body. Approve once, or allow similar writes with a narrow, expiring grant. DELETEs can only ever be approved one at a time.</p></div></li>
     </ol>
+  </div>
+</section>
+
+<section id="see">
+  <div class="wrap">
+    <h2>What people see</h2>
+    <p>Agents talk to librarian over A2A or MCP. People get pages: a console for the people who run it, and one-time pages for the decisions only a person can make.</p>
+    <div class="shots">
+      <figure><img src="assets/screens/console-overview.png" alt="The console overview with tiles and the waiting list" loading="lazy"><figcaption>The console: what librarian knows, and what waits on a person.</figcaption></figure>
+      <figure><img src="assets/screens/console-api.png" alt="An API page with search, needs-attention operations and groups by tag" loading="lazy"><figcaption>A large API: search, the operations needing a decision first, then groups by tag.</figcaption></figure>
+      <figure><img src="assets/screens/review.png" alt="The review page for a learned API" loading="lazy"><figcaption>Approving a learned API from the Slack card: decide the open operations, then merge as the App.</figcaption></figure>
+      <figure><img src="assets/screens/approve-write.png" alt="A write approval page" loading="lazy"><figcaption>Approving one write: method, path, arguments and body, nothing hidden.</figcaption></figure>
+    </div>
   </div>
 </section>
 

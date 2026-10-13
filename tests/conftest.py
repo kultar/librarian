@@ -119,6 +119,7 @@ class RecordingNotifier(Notifier):
     def __init__(self) -> None:
         self.learned: list[dict[str, Any]] = []
         self.reviews: list[tuple[str, Any, str | None]] = []
+        self.consents: list[tuple[str, Any, str | None]] = []
         self.opened_links: list[str] = []
         self.events: list[tuple[str, CredentialRequest]] = []
         self.write_links: list[str] = []
@@ -150,6 +151,12 @@ class RecordingNotifier(Notifier):
 
     async def review_closed(self, review: Any) -> None:
         self.reviews.append(("closed", review, None))
+
+    async def consent_opened(self, request: Any, link: str) -> None:
+        self.consents.append(("opened", request, link))
+
+    async def consent_closed(self, request: Any) -> None:
+        self.consents.append(("closed", request, None))
 
     async def api_learned(
         self,

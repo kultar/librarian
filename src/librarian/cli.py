@@ -233,6 +233,14 @@ def github_app_create(
             help="If the repo has no commits yet, make the first one (a README) as the App",
         ),
     ] = False,
+    oauth_callback: Annotated[
+        str | None,
+        typer.Option(
+            help="Also let the App sign people in to GitHub's API (per-person OAuth): "
+            "librarian's callback URL, <public_url>/oauth/callback. Saves the client secret "
+            "next to the key."
+        ),
+    ] = None,
 ) -> None:
     """Create a GitHub App for the registry repo in one step (GitHub's manifest flow)."""
     import webbrowser
@@ -250,11 +258,17 @@ def github_app_create(
                     key_file,
                     name=name,
                     port=port,
+                    callback_url=oauth_callback,
                     client=client,
                     echo=typer.echo,
                     on_ready=webbrowser.open,
                 )
-            except (GitHubAppError, TimeoutError) as exc:
+            except TimeoutError as exc:
+                raise typer.BadParameter(
+                    "timed out waiting for the browser step; run the command again and open "
+                    "the local page it prints"
+                ) from exc
+            except GitHubAppError as exc:
                 raise typer.BadParameter(str(exc)) from exc
             if init_repo:
                 auth = GitHubAppAuth(
@@ -273,6 +287,18 @@ def github_app_create(
                     if made
                     else f"{repo} already has commits; nothing to initialise."
                 )
+        if created.client_secret_file is not None:
+            typer.echo(
+                f"\nOAuth client for per-person sign-in: client id {created.client_id}; "
+                f"client secret saved to {created.client_secret_file} (put it in the secret "
+                "store, e.g. as github/oauth-client). In a verified registry entry:\n"
+                "  auth:\n    type: oauth2_user\n"
+                "    authorization_url: https://github.com/login/oauth/authorize\n"
+                "    token_url: https://github.com/login/oauth/access_token\n"
+                f"    client_id: {created.client_id}\n"
+                "    client_secret_ref: github/oauth-client\n"
+                "    scopes: []    # GitHub Apps use the App's permissions, not scopes\n"
+            )
         typer.echo(
             "\nlibrarian config:\n"
             f"  publish:\n    type: github\n    repo: {repo}\n    github_app:\n"

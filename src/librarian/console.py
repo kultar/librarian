@@ -24,8 +24,9 @@ from librarian.audit import AuditEvent
 from librarian.calls import Caller
 from librarian.config import ApproverSettings
 from librarian.credentials import CredentialRequest, RequestState
+from librarian.oauth import ConsentRequest, OAuthError, authorize_url
 from librarian.opsearch import rank, tokens
-from librarian.registry.models import Access, ApiEntry, EntryStatus, Operation
+from librarian.registry.models import Access, ApiEntry, EntryStatus, OAuth2UserAuth, Operation
 from librarian.registry.store import RegistryError
 from librarian.reviews import ReviewRequest
 from librarian.service import Librarian, LibrarianError
@@ -138,53 +139,68 @@ def _search_form(action: str, query: str, placeholder: str) -> str:
     )
 
 
-def _overview(
+async def _pending(
+    librarian: Librarian,
+) -> tuple[list[CredentialRequest], list[WriteApproval], list[ReviewRequest], list[ConsentRequest]]:
+    return (
+        await _pending_credentials(librarian),
+        librarian.approvals.pending(),
+        librarian.reviews.pending(),
+        librarian.consents.pending(),
+    )
+
+
+def _waiting_rows(
     librarian: Librarian,
     credentials: list[CredentialRequest],
     approvals: list[WriteApproval],
-    token: str,
-    query: str = "",
+    reviews: list[ReviewRequest],
+    consents: list[ConsentRequest],
+    limit: int | None = None,
 ) -> str:
-    entries = librarian.registry.all()
-    reviews = librarian.reviews.pending()
-    total = len(entries)
-    if query:
-        needle = query.lower()
-        entries = [
-            x for x in entries if needle in f"{x.id} {x.name} {x.host} {x.description}".lower()
-        ]
-    grants = [g for g in librarian.approvals.grants() if g.usable(datetime.now(UTC))]
-    if credentials or approvals or reviews:
-        rows = (
-            "".join(
-                f"<tr><td>Review <b>{e(r.api_name)}</b>: {e(r.summary)}</td>"
-                f"<td>{e(r.learned_by)}</td><td>{_when(r.created_at)}</td>"
-                f"<td><a href='{e(librarian.reviews.link(r))}'>Review</a></td></tr>"
-                for r in reviews
-            )
-            + "".join(
-                f"<tr><td>Key for <b>{e(r.api_name)}</b> "
-                f"<span class=muted>({e(r.host)})</span></td>"
-                f"<td>{e(', '.join(r.requested_by) or 'an agent')}</td>"
-                f"<td>{r.waiting} waiting, {_when(r.created_at)}</td>"
-                f"<td><a href='{e(librarian.broker.link(r))}'>Review</a></td></tr>"
-                for r in credentials
-            )
-            + "".join(
-                f"<tr><td>Write to <b>{e(a.api_name)}</b>: {_method_text(a)}"
-                f"<code>{e(a.operation)}</code></td>"
-                f"<td>{e(a.agent)}{' for ' + e(a.principal) if a.principal else ''}</td>"
-                f"<td>{_when(a.created_at)}</td>"
-                f"<td><a href='{e(librarian.approvals.link(a))}'>Review</a></td></tr>"
-                for a in approvals
-            )
+    rows: list[str] = []
+    for r in reviews:
+        rows.append(
+            f"<tr><td>Review <b>{e(r.api_name)}</b>: {e(r.summary)}</td>"
+            f"<td>{e(r.learned_by)}</td><td>{_when(r.created_at)}</td>"
+            f"<td><a href='{e(librarian.reviews.link(r))}'>Review</a></td></tr>"
         )
-        waiting = (
-            f"<table><tr><th>What</th><th>Who asked</th><th>Since</th><th></th></tr>{rows}</table>"
+    for c in credentials:
+        rows.append(
+            f"<tr><td>Key for <b>{e(c.api_name)}</b> <span class=muted>({e(c.host)})</span></td>"
+            f"<td>{e(', '.join(c.requested_by) or 'an agent')}</td>"
+            f"<td>{c.waiting} waiting, {_when(c.created_at)}</td>"
+            f"<td><a href='{e(librarian.broker.link(c))}'>Add a key</a></td></tr>"
         )
-    else:
-        waiting = "<p class=muted>Nothing is waiting on a person.</p>"
-    api_rows = "".join(
+    for a in approvals:
+        rows.append(
+            f"<tr><td>Write to <b>{e(a.api_name)}</b>: {_method_text(a)}"
+            f"<code>{e(a.operation)}</code></td>"
+            f"<td>{e(a.agent)}{' for ' + e(a.principal) if a.principal else ''}</td>"
+            f"<td>{_when(a.created_at)}</td>"
+            f"<td><a href='{e(librarian.approvals.link(a))}'>Decide</a></td></tr>"
+        )
+    for s in consents:
+        rows.append(
+            f"<tr><td>Sign-in to <b>{e(s.api_name)}</b> by {e(s.principal)}</td>"
+            f"<td>{e(s.agent)}</td><td>{_when(s.created_at)}</td>"
+            "<td><span class=muted>waiting for the person</span></td></tr>"
+        )
+    if not rows:
+        return "<p class=empty>Nothing is waiting on a person.</p>"
+    shown = rows if limit is None else rows[:limit]
+    table = (
+        "<table><tr><th>What</th><th>Who</th><th>Since</th><th></th></tr>"
+        + "".join(shown)
+        + "</table>"
+    )
+    if limit is not None and len(rows) > limit:
+        table += f"<p class=more><a href='/waiting'>All {len(rows)} waiting</a></p>"
+    return table
+
+
+def _api_rows(librarian: Librarian, entries: list[ApiEntry]) -> str:
+    return "".join(
         f"<tr><td><a href='/apis/{e(entry.id)}'>{e(entry.name)}</a> "
         f"<span class=muted>{e(entry.id)}</span></td><td>{_tag(entry.status)}</td>"
         f"<td>{e(entry.host)}</td>"
@@ -193,43 +209,192 @@ def _overview(
         f"<td>{_learned_from(entry)}</td><td>{', '.join(_flags(librarian, entry))}</td></tr>"
         for entry in entries
     )
-    apis = (
-        f"<table><tr><th>API</th><th>Status</th><th>Host</th><th>Operations</th>"
-        f"<th>Learned from</th><th></th></tr>{api_rows}</table>"
-        if entries
-        else (
-            f"<p class=muted>No API matches {e(query)!r}.</p>"
-            if query
-            else "<p class=muted>No APIs yet. The first agent that needs one teaches it.</p>"
-        )
+
+
+API_TABLE_HEAD = (
+    "<table><tr><th>API</th><th>Status</th><th>Host</th><th>Operations</th>"
+    "<th>Learned from</th><th></th></tr>"
+)
+
+Pending = tuple[
+    list[CredentialRequest], list[WriteApproval], list[ReviewRequest], list[ConsentRequest]
+]
+
+
+def _dashboard(librarian: Librarian, pending: Pending, people: int | None) -> str:
+    credentials, approvals, reviews, consents = pending
+    entries = librarian.registry.all()
+    grants = [g for g in librarian.approvals.grants() if g.usable(datetime.now(UTC))]
+    waiting = len(credentials) + len(approvals) + len(reviews) + len(consents)
+    attention = sum(1 for x in entries if _flags(librarian, x))
+    tiles: list[tuple[str, str, str, str]] = [
+        (
+            "/apis",
+            str(len(entries)),
+            "APIs",
+            f"{attention} need attention" if attention else "all quiet",
+        ),
+        ("/waiting", str(waiting), "waiting on a person", "keys, writes, reviews, sign-ins"),
+        ("/grants", str(len(grants)), "standing grants", "writes allowed without asking"),
+        (
+            "/people",
+            "n/a" if people is None else str(people),
+            "signed-in people",
+            "needs a database" if people is None else "per-person APIs",
+        ),
+    ]
+    tiles_html = "".join(
+        f"<a class=tile href='{href}'><b>{e(count)}</b><em>{e(label)}</em>"
+        f"<span>{e(note)}</span></a>"
+        for href, count, label, note in tiles
     )
-    if total > 8 or query:
-        apis = _search_form("/", query, "Filter APIs by name, id or host") + apis
+    recent = sorted(entries, key=lambda x: x.updated_at or datetime.min.replace(tzinfo=UTC))
+    recent = list(reversed(recent))[:8]
     errors = "".join(
         f"<p class=err><code>{e(path)}</code>: {e(problem)}</p>"
         for path, problem in librarian.registry.errors.items()
     )
-    grant_rows = "".join(
+    if entries:
+        apis = API_TABLE_HEAD + _api_rows(librarian, recent) + "</table>"
+        if len(entries) > 8:
+            apis += f"<p class=more><a href='/apis'>All {len(entries)} APIs</a></p>"
+    else:
+        apis = "<p class=empty>No APIs yet. The first agent that needs one teaches it.</p>"
+    return f"""<div class=pagehead><h1>Overview</h1></div>
+<p class=lede>What librarian knows, and what waits on a person.</p>
+<div class=tiles>{tiles_html}</div>
+<h2>Waiting on a person</h2>{_waiting_rows(librarian, credentials, approvals, reviews, consents, 8)}
+<h2>Recently changed APIs</h2>{errors}{apis}"""
+
+
+def _apis_page(librarian: Librarian, query: str) -> str:
+    entries = librarian.registry.all()
+    total = len(entries)
+    if query:
+        needle = query.lower()
+        entries = [
+            x for x in entries if needle in f"{x.id} {x.name} {x.host} {x.description}".lower()
+        ]
+    errors = "".join(
+        f"<p class=err><code>{e(path)}</code>: {e(problem)}</p>"
+        for path, problem in librarian.registry.errors.items()
+    )
+    if entries:
+        table = API_TABLE_HEAD + _api_rows(librarian, entries) + "</table>"
+    elif query:
+        table = f"<p class=empty>No API matches {e(query)!r}.</p>"
+    else:
+        table = "<p class=empty>No APIs yet. The first agent that needs one teaches it.</p>"
+    count = _n(total, "entry", "entries")
+    return f"""<div class=pagehead><h1>APIs</h1><span class=muted>{count}</span></div>
+<p class=lede>Every API librarian knows: reviewed ones and the ones learned on demand.</p>
+{_search_form("/apis", query, "Filter by name, id or host")}{errors}{table}"""
+
+
+def _waiting_page(librarian: Librarian, pending: Pending) -> str:
+    credentials, approvals, reviews, consents = pending
+    return f"""<div class=pagehead><h1>Waiting on a person</h1></div>
+<p class=lede>Keys to add, writes to decide, learned APIs to review, and people who still have
+to sign in. The links are the same one-time links the notifications carry.</p>
+{_waiting_rows(librarian, credentials, approvals, reviews, consents)}"""
+
+
+def _grants_page(librarian: Librarian, token: str, include_inactive: bool) -> str:
+    now = datetime.now(UTC)
+    grants = librarian.approvals.grants(include_inactive=include_inactive)
+
+    def last(g: Grant) -> str:
+        if g.usable(now):
+            return f"<td>{_form(f'/grants/{g.id}/revoke', token, 'Revoke', 'deny small')}</td>"
+        if g.revoked:
+            return "<td><span class=muted>revoked</span></td>"
+        return "<td><span class=muted>expired or used up</span></td>"
+
+    rows = "".join(
         f"<tr><td>{e(g.agent)}{' for ' + e(g.principal) if g.principal else ''}</td>"
         f"<td><code>{e(g.api)}.{e(g.operation)}</code></td>"
         f"<td>{_pins(g)}</td><td>{_expiry(g)}</td><td>{e(g.source)}, by {e(g.created_by)}</td>"
-        f"<td>{_form(f'/grants/{g.id}/revoke', token, 'Revoke', 'deny small')}</td></tr>"
+        f"{last(g)}</tr>"
         for g in grants
     )
-    grants_html = (
+    table = (
         f"<table><tr><th>Agent</th><th>Operation</th><th>Pinned</th><th>Limits</th>"
-        f"<th>Source</th><th></th></tr>{grant_rows}</table>"
+        f"<th>Source</th><th></th></tr>{rows}</table>"
         if grants
-        else "<p class=muted>No standing grants: every write is approved one by one.</p>"
+        else "<p class=empty>No standing grants: every write is approved one by one.</p>"
     )
-    return f"""<h1>What librarian knows</h1>
-<p class=lede>{_n(total, "API")}, {len(credentials) + len(approvals) + len(reviews)} waiting on a
-person,
-{_n(len(grants), "standing grant")}.</p>
-<h2>Waiting on a person</h2>{waiting}
-<h2>APIs</h2>{errors}{apis}
-<h2>Grants</h2><p class=muted>Revoking a grant is the kill switch: the agent's next such write
-waits for a person again. Grants from the config file come back on restart.</p>{grants_html}"""
+    toggle = (
+        "<p class=more><a href='/grants'>Only active grants</a></p>"
+        if include_inactive
+        else "<p class=more><a href='/grants?all=1'>Include revoked and expired</a></p>"
+    )
+    return f"""<div class=pagehead><h1>Grants</h1></div>
+<p class=lede>Writes an agent may make without asking each time. Revoking one is the kill
+switch: the next such write waits for a person again. Grants from the config file come back
+on restart.</p>{table}{toggle}"""
+
+
+def _people_page(librarian: Librarian, token: str, connections: list[Any]) -> str:
+    if librarian.consents.store is None:
+        body = (
+            "<p class=empty>Listing who is signed in needs a database (Postgres). Sign-ins "
+            "still work without one; they just cannot be listed here.</p>"
+        )
+    elif not connections:
+        body = "<p class=empty>Nobody has signed in to a per-person API yet.</p>"
+    else:
+        rows = "".join(
+            f"<tr><td>{e(c.principal)}</td><td><a href='/apis/{e(c.api)}'>{e(c.api)}</a></td>"
+            f"<td>{e(' '.join(c.scopes))}</td><td>{_when(c.connected_at)}</td><td>"
+            + _form(
+                f"/apis/{c.api}/disconnect",
+                token,
+                "Disconnect",
+                "deny small",
+                f"<input type=hidden name=principal value='{e(c.principal)}'>",
+            )
+            + "</td></tr>"
+            for c in connections
+        )
+        body = (
+            "<table><tr><th>Person</th><th>API</th><th>Scopes</th><th>Since</th><th></th></tr>"
+            f"{rows}</table>"
+        )
+    return f"""<div class=pagehead><h1>People</h1></div>
+<p class=lede>Who has signed in to an API that acts as the person. Disconnecting drops their
+sign-in here (and revokes it at the provider when the entry says where); their next request
+asks them to sign in again.</p>{body}"""
+
+
+def _me_page(librarian: Librarian, identity: str | None, connections: list[Any], token: str) -> str:
+    if identity is None:
+        body = (
+            "<p class=empty>Your sign-ins are shown when the pages run behind your sign-in "
+            "proxy, which tells librarian who you are.</p>"
+        )
+    elif librarian.consents.store is None:
+        body = "<p class=empty>Listing sign-ins needs a database.</p>"
+    elif not connections:
+        body = "<p class=empty>You have not signed in to any API through librarian.</p>"
+    else:
+        rows = "".join(
+            f"<tr><td><a href='/apis/{e(c.api)}'>{e(c.api)}</a></td>"
+            f"<td>{e(' '.join(c.scopes))}</td><td>{_when(c.connected_at)}</td><td>"
+            + _form(
+                "/me/disconnect",
+                token,
+                "Disconnect",
+                "deny small",
+                f"<input type=hidden name=api value='{e(c.api)}'>",
+            )
+            + "</td></tr>"
+            for c in connections
+        )
+        body = f"<table><tr><th>API</th><th>Scopes</th><th>Since</th><th></th></tr>{rows}</table>"
+    who = f" <span class=muted>{e(identity)}</span>" if identity else ""
+    return f"""<div class=pagehead><h1>Your sign-ins</h1>{who}</div>
+<p class=lede>APIs where agents act as you, with the access you granted. Disconnect to stop
+that; the next request for you asks you to sign in again.</p>{body}"""
 
 
 def _method_text(approval: WriteApproval) -> str:
@@ -257,7 +422,14 @@ def _expiry(grant: Grant) -> str:
     return ", ".join(parts) or "no limit"
 
 
-def _detail(librarian: Librarian, entry: ApiEntry, token: str, query: str = "") -> str:
+def _detail(
+    librarian: Librarian,
+    entry: ApiEntry,
+    token: str,
+    query: str = "",
+    connections: list[Any] | None = None,
+) -> str:
+    connections = connections or []
     source_url = f": <code>{e(entry.source.url)}</code>" if entry.source.url else ""
     updated = e(entry.updated_at.isoformat(timespec="minutes")) if entry.updated_at else ""
     rows = [
@@ -289,14 +461,53 @@ def _detail(librarian: Librarian, entry: ApiEntry, token: str, query: str = "") 
                 f"(<a href='{e(review.review_url)}'>the pull request</a>)",
             )
         )
+    rows = [r for r in rows if r[0] != "Status"]  # the header shows it
     details = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows)
-    notes = f"<h2>Notes</h2><pre>{e(entry.notes)}</pre>" if entry.notes else ""
-    return f"""<p><a href='/'>All APIs</a></p>
-<h1>{e(entry.name)}</h1>
-<p class=lede>{e(entry.description or entry.id)}</p>
+    notes = f"<h2 id=notes>Notes</h2><pre>{e(entry.notes)}</pre>" if entry.notes else ""
+    people = ""
+    if entry.per_person:
+        rows_html = "".join(
+            f"<tr><td>{e(c.principal)}</td><td>{e(' '.join(c.scopes))}</td>"
+            f"<td>{_when(c.connected_at)}</td><td>"
+            + _form(
+                f"/apis/{entry.id}/disconnect",
+                token,
+                "Disconnect",
+                "deny small",
+                f"<input type=hidden name=principal value='{e(c.principal)}'>",
+            )
+            + "</td></tr>"
+            for c in connections
+        )
+        if librarian.consents.store is None:
+            listing = "<p class=empty>Listing who is signed in needs a database.</p>"
+        elif connections:
+            listing = (
+                "<table><tr><th>Person</th><th>Scopes</th><th>Since</th><th></th></tr>"
+                f"{rows_html}</table>"
+            )
+        else:
+            listing = (
+                "<p class=empty>Nobody has signed in yet. The first request for a person "
+                "sends them a link.</p>"
+            )
+        people = f"<h2 id=people>Signed-in people</h2>{listing}"
+    cards, danger = _actions(librarian, entry, token)
+    links = ["<a href='#operations'>Operations</a>"]
+    if entry.per_person:
+        links.append("<a href='#people'>People</a>")
+    if entry.notes:
+        links.append("<a href='#notes'>Notes</a>")
+    links.append("<a href='#actions'>Actions</a>")
+    return f"""<p class=crumbs><a href='/apis'>APIs</a> / {e(entry.id)}</p>
+<div class=pagehead><h1>{e(entry.name)}</h1>{_tag(entry.status)}
+<span class=muted>{e(entry.id)}</span></div>
+<p class=lede>{e(entry.description or entry.host)}</p>
 <div class=card><dl>{details}</dl></div>
-<h2>Operations</h2>{_operations(librarian, entry, token, query)}{notes}
-<h2>Actions</h2>{_actions(librarian, entry, token)}"""
+<nav class=subnav aria-label='On this page'>{"".join(links)}</nav>
+<h2 id=operations>Operations</h2>{_operations(librarian, entry, token, query)}
+{people}{notes}
+<h2 id=actions>Actions</h2><div class=grid2>{cards}</div>{danger}"""
 
 
 GROUP_THRESHOLD = 25  # above this many operations, group them
@@ -385,7 +596,7 @@ def _operations(librarian: Librarian, entry: ApiEntry, token: str, query: str) -
     return "".join(parts)
 
 
-def _actions(librarian: Librarian, entry: ApiEntry, token: str) -> str:
+def _actions(librarian: Librarian, entry: ApiEntry, token: str) -> tuple[str, str]:
     base = f"/apis/{entry.id}"
     cards: list[str] = []
     if entry.source.kind in ("openapi", "docs"):
@@ -433,9 +644,15 @@ def _actions(librarian: Librarian, entry: ApiEntry, token: str) -> str:
             "<button class=quiet>Set authentication</button></form></div>"
         )
     if entry.status is EntryStatus.BLOCKED:
-        cards.append("<p class=muted>Unblock this API to re-learn it.</p>")
+        cards.append(
+            "<div class=card><h2>Re-learn</h2><p class=muted>Unblock this API to re-learn it."
+            "</p></div>"
+        )
     else:
-        cards.append("<p class=muted>Verified entries change through the registry repo.</p>")
+        cards.append(
+            "<div class=card><h2>Re-learn</h2><p class=muted>Verified entries change through "
+            "the registry repo.</p></div>"
+        )
     zone: list[str] = []
     if entry.status is EntryStatus.BLOCKED:
         zone.append(
@@ -460,10 +677,25 @@ def _actions(librarian: Librarian, entry: ApiEntry, token: str) -> str:
             "needs it teaches it again.</p>"
             + _form(f"{base}/forget", token, "Forget this API", "deny")
         )
-    return "".join(cards) + "<div class=zone><h2>Danger</h2>" + "".join(zone) + "</div>"
+    if entry.per_person:
+        cards.append(
+            "<div class=card><h2>Sign-ins</h2><p class=muted>Each person signs in themselves. "
+            "Check that every sign-in still works (each is renewed now; broken ones are dropped "
+            "and the person is asked again).</p>"
+            + _form(f"{base}/check-signins", token, "Check all sign-ins now", "quiet")
+            + "</div>"
+        )
+        zone.append(
+            "<p class=muted>Disconnect everyone: after rotating the OAuth client secret or "
+            "changing scopes. Each person signs in again on their next request.</p>"
+            + _form(f"{base}/disconnect-all", token, "Disconnect everyone", "deny")
+        )
+    return "".join(cards), "<div class=zone><h2>Danger</h2>" + "".join(zone) + "</div>"
 
 
 def _auth(entry: ApiEntry) -> str:
+    if isinstance(entry.auth, OAuth2UserAuth):
+        return f"each person signs in themselves (OAuth, scopes: {e(' '.join(entry.auth.scopes))})"
     if not entry.secret_ref:
         return "none (no authentication)"
     kind = e(entry.auth.type)
@@ -532,12 +764,83 @@ def console_routes(librarian: Librarian) -> list[Route]:
         identity, denied = await guard(request)
         if denied is not None or identity is None:
             return denied or notice("bad", "Error", "Something went wrong.", 400)
-        credentials = await _pending_credentials(librarian)
+        pending = await _pending(librarian)
+        people = len(await librarian.consents.connections()) if librarian.consents.store else None
+        body = _dashboard(librarian, pending, people)
+        return page("librarian", body, kind="console", active="overview")
+
+    async def apis(request: Request) -> Response:
+        identity, denied = await guard(request)
+        if denied is not None or identity is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
         query = request.query_params.get("q", "").strip()[:100]
-        body = _overview(
-            librarian, credentials, librarian.approvals.pending(), token_for(identity), query
+        return page("APIs", _apis_page(librarian, query), kind="console", active="apis")
+
+    async def waiting(request: Request) -> Response:
+        identity, denied = await guard(request)
+        if denied is not None or identity is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        body = _waiting_page(librarian, await _pending(librarian))
+        return page("Waiting on a person", body, kind="console", active="waiting")
+
+    async def grants(request: Request) -> Response:
+        identity, denied = await guard(request)
+        if denied is not None or identity is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        include = request.query_params.get("all") == "1"
+        body = _grants_page(librarian, token_for(identity), include)
+        return page("Grants", body, kind="console", active="grants")
+
+    async def people(request: Request) -> Response:
+        identity, denied = await guard(request)
+        if denied is not None or identity is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        connections = await librarian.consents.connections()
+        body = _people_page(librarian, token_for(identity), connections)
+        return page("People", body, kind="console", active="people")
+
+    def person(request: Request) -> str | None:
+        """The signed-in person, from the proxy (None when the console is open)."""
+        settings = librarian.settings.approvers
+        if settings.mode != "trusted_header":
+            return None
+        return request.headers.get(settings.user_header, "").strip() or None
+
+    async def me(request: Request) -> Response:
+        identity, denied = await guard(request)
+        if denied is not None or identity is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        who = person(request)
+        connections = await librarian.consents.connections_of(who) if who else []
+        body = _me_page(librarian, who, connections, token_for(identity))
+        return page("Your sign-ins", body, kind="console", active="")
+
+    async def me_disconnect(request: Request) -> Response:
+        identity, denied = await guard(request)
+        if denied is not None or identity is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        who = person(request)
+        if who is None:
+            return notice("bad", "Not signed in", "No identity from the proxy.", 403)
+        form: Any = await request.form()
+        api_id = str(form.get("api", "")).strip()
+        entry = librarian.registry.get(api_id)
+        auth = entry.auth if entry is not None and isinstance(entry.auth, OAuth2UserAuth) else None
+        await librarian.consents.forget_tokens(api_id, who, auth)
+        await librarian.audit.record(
+            AuditEvent(
+                event="person_disconnected",
+                caller="console",
+                principal=who,
+                api=api_id,
+                detail=who,
+            )
         )
-        return page("librarian", body, kind="console")
+        return notice(
+            "ok",
+            "Disconnected",
+            f"Your sign-in to {e(api_id)} was dropped. <a href='/me'>Back</a>.",
+        )
 
     async def api(request: Request) -> Response:
         identity, denied = await guard(request)
@@ -547,8 +850,9 @@ def console_routes(librarian: Librarian) -> list[Route]:
         if entry is None:
             return notice("note", "Unknown API", "No API has that id.", 404)
         query = request.query_params.get("q", "").strip()[:100]
-        body = _detail(librarian, entry, token_for(identity), query)
-        return page(entry.name, body, kind="console")
+        connections = await librarian.consents.connections(entry.id) if entry.per_person else []
+        body = _detail(librarian, entry, token_for(identity), query, connections)
+        return page(entry.name, body, kind="console", active="apis")
 
     def back(api_id: str) -> str:
         return f" <a href='/apis/{e(api_id)}'>Back to the API</a>."
@@ -671,6 +975,83 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 f"{op_id} decided",
                 f"{applied}{review}{back(api_id)}",
             )
+        if action in ("disconnect-all", "check-signins"):
+            entry = librarian.registry.get(api_id)
+            auth = entry.auth if entry is not None else None
+            if entry is None or not isinstance(auth, OAuth2UserAuth):
+                return notice("bad", "Not a per-person API", f"Nothing to do.{back(api_id)}", 400)
+            connections = await librarian.consents.connections(api_id)
+            if action == "disconnect-all":
+                for c in connections:
+                    await librarian.consents.forget_tokens(api_id, c.principal, auth)
+                await librarian.audit.record(
+                    AuditEvent(
+                        event="people_disconnected",
+                        caller="console",
+                        principal=identity,
+                        api=api_id,
+                        detail=f"{len(connections)} sign-ins",
+                    )
+                )
+                return notice(
+                    "ok",
+                    "Everyone disconnected",
+                    f"{_n(len(connections), 'sign-in')} dropped; each person signs in again "
+                    f"on their next request.{back(api_id)}",
+                )
+            results = [
+                (c.principal, await librarian.consents.refresh_now(entry, auth, c.principal))
+                for c in connections
+            ]
+            broken = [(who, why) for who, why in results if why]
+            await librarian.audit.record(
+                AuditEvent(
+                    event="signins_checked",
+                    caller="console",
+                    principal=identity,
+                    api=api_id,
+                    detail=f"{len(results) - len(broken)} ok, {len(broken)} dropped",
+                )
+            )
+            lines = "".join(
+                f"<li><span class=bad>{e(who)}</span>: {e(why or '')} (dropped)</li>"
+                for who, why in broken
+            )
+            return notice(
+                "ok" if not broken else "note",
+                "Sign-ins checked",
+                f"{len(results) - len(broken)} still work."
+                + (f" Dropped: <ul>{lines}</ul>" if broken else "")
+                + back(api_id),
+            )
+        if action == "disconnect":
+            form = await request.form()
+            principal = str(form.get("principal", "")).strip()
+            if not principal:
+                return notice(
+                    "bad", "No person given", f"Nothing to disconnect.{back(api_id)}", 400
+                )
+            entry = librarian.registry.get(api_id)
+            auth = (
+                entry.auth if entry is not None and isinstance(entry.auth, OAuth2UserAuth) else None
+            )
+            await librarian.consents.forget_tokens(api_id, principal, auth)
+            await librarian.audit.record(
+                AuditEvent(
+                    event="person_disconnected",
+                    caller="console",
+                    principal=identity,
+                    api=api_id,
+                    detail=principal,
+                )
+            )
+            return notice(
+                "ok",
+                "Disconnected",
+                f"{e(principal)}'s sign-in to {e(api_id)} was dropped; their next request "
+                f"asks them to sign in again. Revoke it at the provider too if needed."
+                f"{back(api_id)}",
+            )
         if action == "clear":
             entry = librarian.registry.get(api_id)
             op = entry.operation(request.path_params["op_id"]) if entry else None
@@ -699,6 +1080,12 @@ def console_routes(librarian: Librarian) -> list[Route]:
 
     return [
         Route("/", overview, methods=["GET"]),
+        Route("/apis", apis, methods=["GET"]),
+        Route("/waiting", waiting, methods=["GET"]),
+        Route("/grants", grants, methods=["GET"]),
+        Route("/people", people, methods=["GET"]),
+        Route("/me", me, methods=["GET"]),
+        Route("/me/disconnect", me_disconnect, methods=["POST"]),
         Route("/apis/{api_id}", api, methods=["GET"]),
         Route("/grants/{grant_id}/{action}", act, methods=["POST"]),
         Route("/apis/{api_id}/ops/{op_id}/{action}", act, methods=["POST"]),
@@ -844,4 +1231,115 @@ def review_routes(librarian: Librarian) -> list[Route]:
     return [
         Route("/reviews/{review_id}", show, methods=["GET"]),
         Route("/reviews/{review_id}", submit, methods=["POST"]),
+    ]
+
+
+# -- the sign-in pages: a person connects their own account to an API -------------------
+
+
+def _consent_body(request: ConsentRequest, token: str, go: str) -> str:
+    """`go` is the provider's authorization URL: a plain link, because the pages' CSP
+    (form-action 'self') would block a form submission that redirects there."""
+    scopes = "".join(f"<li><code>{e(s)}</code></li>" for s in request.scopes) or "<li>none</li>"
+    return f"""<h1>Sign in to {e(request.api_name)}</h1>
+<p class=lede>Your agent <b>{e(request.agent)}</b> needs {e(request.api_name)} as
+<b>{e(request.principal)}</b>. Sign in there once and librarian keeps your sign-in; every request
+your agents make for you carries your own access, and only what you can see is shared. Agents
+never see your token.</p>
+<div class=card><dl><dt>Site</dt><dd>{e(request.host)}</dd><dt>Access asked</dt>
+<dd><ul>{scopes}</ul></dd><dt>Waiting</dt><dd>{request.waiting} request(s)</dd></dl>
+<p><a class=btn href='{e(go)}'>Sign in to {e(request.api_name)}</a></p>
+<p class=muted>You will be sent to {e(request.host)}'s own sign-in page and back here.</p></div>
+<div class=zone><h2>Not now</h2><p class=muted>Your agent is told you did not sign in.</p>
+<form method=post><input type=hidden name=t value='{e(token)}'><input type=hidden name=action
+value=deny><button class=deny>Don't sign in</button></form></div>"""
+
+
+def consent_routes(librarian: Librarian) -> list[Route]:
+    async def authorized(
+        request: Request, token: str
+    ) -> tuple[ConsentRequest | None, Response | None]:
+        consent = await librarian.consents.load(request.path_params["consent_id"])
+        if consent is None or not librarian.consents.check_token(consent, token):
+            return None, expired()
+        settings = librarian.settings.approvers
+        if settings.mode == "trusted_header":
+            # Only the person themselves may connect their account.
+            who = request.headers.get(settings.user_header, "").strip().lower()
+            if not who:
+                return None, notice("bad", "Not signed in", "No identity from the proxy.", 403)
+            if who != consent.principal.lower():
+                return None, notice(
+                    "bad",
+                    "This sign-in is for someone else",
+                    f"It was sent to {e(consent.principal)}; you are {e(who)}.",
+                    403,
+                )
+        return consent, None
+
+    def provider_url(consent: ConsentRequest) -> str | None:
+        entry = librarian.registry.get(consent.api)
+        auth = entry.auth if entry is not None else None
+        if not isinstance(auth, OAuth2UserAuth):
+            auth = entry.write_auth if entry is not None else None
+        if entry is None or not isinstance(auth, OAuth2UserAuth):
+            return None
+        return authorize_url(
+            auth,
+            librarian.consents.redirect_uri,
+            librarian.consents.state_for(consent),
+            consent.code_verifier,
+        )
+
+    async def show(request: Request) -> Response:
+        token = request.query_params.get("t", "")
+        consent, denied = await authorized(request, token)
+        if denied is not None or consent is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        go = provider_url(consent)
+        if go is None:
+            return notice("bad", "Not available", "This API no longer uses sign-in.", 404)
+        body = _consent_body(consent, token, go)
+        return page(f"Sign in to {consent.api_name}", body, kind="sign-in")
+
+    async def submit(request: Request) -> Response:
+        form: Any = await request.form()
+        token = str(form.get("t", ""))
+        consent, denied = await authorized(request, token)
+        if denied is not None or consent is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        if str(form.get("action", "")) == "deny":
+            await librarian.consents.deny(consent)
+            return notice("note", "Not signed in", "Your agent was told.")
+        return notice("bad", "Unknown action", "No such action.", 400)
+
+    async def callback(request: Request) -> Response:
+        state = request.query_params.get("state", "")
+        consent_id, _, token = state.partition(".")
+        consent = await librarian.consents.load(consent_id) if consent_id else None
+        if consent is None or not librarian.consents.check_token(consent, token):
+            return expired()
+        error = request.query_params.get("error")
+        if error:
+            await librarian.consents.deny(consent, f"the provider said: {error}")
+            return notice("bad", "Not signed in", f"{e(consent.api_name)} said: {e(error)}.")
+        code = request.query_params.get("code", "")
+        entry = librarian.registry.get(consent.api)
+        if not code or entry is None:
+            return notice("bad", "Not signed in", "No code came back from the provider.", 400)
+        try:
+            await librarian.consents.complete(consent, entry, code)
+        except OAuthError as exc:
+            return notice("bad", "Sign-in failed", e(str(exc)), 502)
+        return notice(
+            "ok",
+            f"Signed in to {consent.api_name}",
+            "Your agent carries on; librarian keeps your sign-in and never shows it to agents. "
+            "You can close this page.",
+        )
+
+    return [
+        Route("/connect/{consent_id}", show, methods=["GET"]),
+        Route("/connect/{consent_id}", submit, methods=["POST"]),
+        Route("/oauth/callback", callback, methods=["GET"]),
     ]

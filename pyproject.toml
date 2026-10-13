@@ -49,7 +49,7 @@ otel = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/kultar/librarian"
+Homepage = "https://librarian-agent.com"
 Repository = "https://github.com/kultar/librarian"
 Issues = "https://github.com/kultar/librarian/issues"
 Security = "https://github.com/kultar/librarian/security/policy"

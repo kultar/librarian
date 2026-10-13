@@ -232,10 +232,12 @@ async def test_revoke_grant_and_clear_suspension(
     )
     c = console(librarian)
     t = token(librarian)
-    assert "/grants/g1/revoke" in c.get("/").text
+    assert "/grants/g1/revoke" in c.get("/grants").text
+    assert "1" in c.get("/").text and "standing grants" in c.get("/").text  # the tile
     assert c.post("/grants/g1/revoke", data={"t": t}).status_code == 200
     assert librarian.approvals._grants["g1"].revoked  # pyright: ignore[reportPrivateUsage]
-    assert "/grants/g1/revoke" not in c.get("/").text
+    assert "/grants/g1/revoke" not in c.get("/grants").text
+    assert "revoked" in c.get("/grants?all=1").text
     assert c.post("/grants/nope/revoke", data={"t": t}).status_code == 400
     tracker = librarian.registry.get("tracker")
     assert tracker is not None
@@ -283,7 +285,9 @@ async def test_large_apis_are_grouped_searchable_and_flag_attention(librarian: L
     assert "0 matches" in none
     small = c.get("/apis/tracker").text
     assert "<details" not in small and "name=q" not in small  # few operations: one table
-    assert "Big API" in c.get("/?q=big").text and "Issue Tracker" not in c.get("/?q=big").text
+    listing = c.get("/apis?q=big").text
+    assert "Big API" in listing and "Issue Tracker" not in listing
+    assert "No API matches" in c.get("/apis?q=zzz").text
 
 
 class DecisionPublisher:
@@ -385,3 +389,33 @@ async def test_needs_review_operations_are_decided_in_the_console(
     mystery = tracker.operation("mystery")
     assert mystery is not None and mystery.access is Access.UNKNOWN  # unchanged until merged
     assert pub.proposed == [("tracker", "Issue Tracker: mystery is read")]
+
+
+async def test_console_pages_have_navigation_and_scoping(librarian: Librarian) -> None:
+    librarian.settings.approvers.console = "open"
+    c = console(librarian)
+    home = c.get("/").text
+    for href, label in (
+        ("/apis", "APIs"),
+        ("/waiting", "Waiting"),
+        ("/grants", "Grants"),
+        ("/people", "People"),
+    ):
+        assert f"href='{href}'" in home and f">{label}</a>" in home
+    assert "class=active>Overview" in home and "<a class=tile href='/apis'>" in home
+    assert "Recently changed APIs" in home and "Your sign-ins" in home
+    apis = c.get("/apis").text
+    assert "class=active>APIs" in apis and "3 entries" in apis and "Issue Tracker" in apis
+    waiting = c.get("/waiting").text
+    assert "class=active>Waiting" in waiting and "Nothing is waiting on a person" in waiting
+    people = c.get("/people").text
+    assert "class=active>People" in people and "needs a database" in people
+    me = c.get("/me").text
+    assert "Your sign-ins" in me and "sign-in proxy" in me  # open console: nobody is identified
+    detail = c.get("/apis/tracker").text
+    assert (
+        "class=crumbs" in detail and "href='#operations'" in detail and "href='#actions'" in detail
+    )
+    assert "class=grid2" in detail and "Danger" in detail
+    for path in ("/apis", "/waiting", "/grants", "/people", "/me"):
+        themed(c.get(path))

@@ -61,6 +61,12 @@ section>.wrap>h2+p{max-width:64ch}
 .ledger h3{margin:0 0 .25em}
 .ledger p{margin:0}
 
+/* screenshots */
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:28px 32px;margin-top:24px}
+.shots figure{margin:0}
+.shots img{width:100%;height:auto;border:1px solid var(--line);border-radius:var(--radius);background:#fff}
+.shots figcaption{color:var(--muted);font-size:.93rem;margin-top:8px}
+
 /* why it's safe: a two-column definition list, no cards */
 .rules{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px 40px;margin:24px 0 0}
 .rules div{padding:14px 0;border-top:1px solid var(--line)}
