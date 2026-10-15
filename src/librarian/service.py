@@ -46,8 +46,10 @@ from librarian.docs import (
     entry_from_knowledge,
     extract_from_docs,
     extract_from_knowledge,
+    extract_write_guidance,
 )
 from librarian.drift import Change, diff, proposed_update, review_body, worst
+from librarian.enablement import EnableState, EnableWriteBroker, EnableWriteRequest
 from librarian.executor import CredentialMissing, Executor, PolicyDenied
 from librarian.finddocs import (
     SearchDidNotRun,
@@ -79,9 +81,12 @@ from librarian.recipes import learn as learn_recipe
 from librarian.registry.models import (
     Access,
     ApiEntry,
+    AuthSpec,
+    BearerAuth,
     CredentialGuidance,
     EntryStatus,
     NoAuth,
+    OAuth2UserAuth,
     Operation,
     ReadBasis,
 )
@@ -142,6 +147,21 @@ class CredentialPending(LibrarianError):
 
 class WriteRefused(LibrarianError):
     """The write was denied, expired, or could not be approved."""
+
+
+class WriteNotEnabled(WriteRefused):
+    """The operation is not enabled for writes (or the API has no write credential);
+    the approvers have been asked to enable it. Retry once they have."""
+
+    def __init__(self, request: EnableWriteRequest) -> None:
+        missing = (
+            "is not enabled for writes" if request.needs_enabling else "has no write credential yet"
+        )
+        super().__init__(
+            f"{request.api_name}: {request.operation} {missing}; approvers have been asked "
+            f"to enable it (request {request.id}). Retry once they have."
+        )
+        self.request = request
 
 
 @dataclass
@@ -283,6 +303,15 @@ class Librarian:
         )
         self.broker.validator = self._validate_credential
         self.broker.after_fulfilled = self._discover_quietly
+        self.enablement = EnableWriteBroker(
+            self.notifier,
+            self.audit,
+            public_url=settings.public_url,
+            signing_key=pysecrets.token_bytes(32),
+            default_channel=settings.notifier.slack.channel,
+            default_approver_group=settings.notifier.slack.approver_group,
+            store=self.state,
+        )
         self.approvals = ApprovalBroker(
             self.notifier,
             self.audit,
@@ -389,7 +418,9 @@ class Librarian:
         self.approvals.set_signing_key(key)
         self.reviews.set_signing_key(key)
         self.consents.set_signing_key(key)
+        self.enablement.set_signing_key(key)
         await self.reviews.restore()
+        await self.enablement.restore()
 
     async def _signing_key(self) -> bytes:
         ref = self.settings.signing_key_ref
@@ -624,6 +655,10 @@ class Librarian:
             await self.registry.refresh_stored()  # learned on another replica?
         decision = self.policy.check_write(request, caller)
         if not decision.allowed or decision.entry is None or decision.operation is None:
+            if decision.askable and decision.entry is not None and decision.operation is not None:
+                raise await self._ask_to_enable(
+                    decision.entry, decision.operation, request, caller, decision.reason
+                )
             await self.audit.record(
                 AuditEvent(
                     event="write_denied",
@@ -1001,6 +1036,188 @@ class Librarian:
         except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
             log.warning("could not carry %s into a review: %s", entry.id, exc)
             return None
+
+    # -- enabling writes --------------------------------------------------------
+
+    async def _ask_to_enable(
+        self,
+        entry: ApiEntry,
+        op: Operation,
+        request: WriteRequest,
+        caller: Caller,
+        reason: str,
+    ) -> Exception:
+        """A write the policy refused because nobody has enabled it yet: ask the
+        approvers (once per operation) instead of denying silently. Returns the error
+        to raise: the request, or the refusal when approvers declined recently."""
+        declined = self.enablement.declined_for(entry.id, op.id)
+        if declined is not None:
+            until = declined.expires_at.date().isoformat()
+            await self.audit.record(
+                AuditEvent(
+                    event="write_denied",
+                    caller=caller.agent,
+                    principal=caller.principal,
+                    api=entry.id,
+                    operation=op.id,
+                    detail=f"{reason}; approvers declined to enable it until {until}",
+                )
+            )
+            telemetry.write_requests.add(1, {"librarian.api": entry.id, "outcome": "denied"})
+            return PolicyDenied(
+                f"operation {op.id!r} is not enabled for writes: approvers declined to enable "
+                f"it ({declined.note or 'no note'}); it can be asked again after {until}"
+            )
+        who = caller.agent + (f" (for {caller.principal})" if caller.principal else "")
+        asked = await self.enablement.open(entry, op, who=who, reason=request.reason)
+        await self.audit.record(
+            AuditEvent(
+                event="enable_write_requested",
+                caller=caller.agent,
+                principal=caller.principal,
+                api=entry.id,
+                operation=op.id,
+                detail=reason,
+                extra={"request": asked.id, "asks": asked.asks},
+            )
+        )
+        telemetry.write_requests.add(1, {"librarian.api": entry.id, "outcome": "asked"})
+        return WriteNotEnabled(asked)
+
+    async def enable_writes(
+        self, request_id: str, by: str, key: str = "dedicated"
+    ) -> tuple[EnableWriteRequest, str | None]:
+        """An approver enables the operation an agent asked to write: the change goes
+        into the entry's review proposal (approve or deny, as always). When the entry has
+        no write credential, `key` says where it comes from: `dedicated` asks for a new
+        `<api>/write` credential through the secure page; `read` uses the read key for
+        writes too. Returns the request and the proposal's link."""
+        request = await self.enablement.load(request_id)
+        if request is None or request.state is not EnableState.PENDING:
+            raise LookupError("this request is no longer pending")
+        entry = self.registry.get(request.api)
+        op = entry.operation(request.operation) if entry is not None else None
+        if entry is None or op is None:
+            await self.enablement.decide(
+                request.id, EnableState.EXPIRED, by, "the operation is no longer in the registry"
+            )
+            raise LibrarianError(f"{request.api!r} no longer has operation {request.operation!r}")
+        asked_by = ", ".join(request.requested_by) or by
+        lines = [f"{by} enabled writes for `{op.id}` ({op.method} {op.path}), asked by {asked_by}."]
+        if request.reasons:
+            lines.append("Reason given: " + " / ".join(request.reasons))
+        operations = [
+            op.model_copy(update={"access": Access.WRITE, "writable": True}) if o.id == op.id else o
+            for o in entry.operations
+        ]
+        update: dict[str, Any] = {"operations": operations}
+        key_request: CredentialRequest | None = None
+        if entry.write_auth is None:
+            write_auth: AuthSpec
+            if isinstance(entry.auth, OAuth2UserAuth):
+                write_auth = entry.auth
+                lines.append("Writes use each person's own sign-in, like reads.")
+            elif key == "read" and entry.secret_ref is not None:
+                write_auth = entry.auth
+                lines.append(
+                    f"Writes use the read credential `{entry.secret_ref}` too (chosen by {by})."
+                )
+            else:
+                write_auth = _write_auth_like(entry.auth, f"{entry.id}/write")
+                guidance = await self._write_guidance(entry, [op])
+                key_request = await self.broker.open_write(
+                    entry,
+                    write_auth,
+                    by=by,
+                    reason=f"writes enabled for {op.id}",
+                    scopes=guidance.scopes,
+                    create_url=guidance.create_url,
+                    instructions=guidance.instructions,
+                )
+                lines.append(
+                    f"Writes use a dedicated credential `{entry.id}/write`; "
+                    f"{by} was asked to add it."
+                )
+            update["write_auth"] = write_auth
+        note = "\n" + " ".join(lines)
+        updated = entry.model_copy(update={**update, "notes": (entry.notes + note)[:8000]})
+        if entry.status is EntryStatus.PROVISIONAL:
+            await self.registry.save(updated)
+        link = await self._propose(
+            updated, f"{entry.name}: enable writes for {op.id}", " ".join(lines)
+        )
+        if entry.status is EntryStatus.PROVISIONAL:
+            outcome = "applied now"
+        elif link is not None:
+            outcome = "proposed for review"
+        else:
+            outcome = "no review could be opened (no registry publisher); the entry is unchanged"
+        if key_request is not None:
+            outcome += "; a write credential was asked for"
+        decided = await self.enablement.decide(
+            request.id,
+            EnableState.ENABLED,
+            by,
+            outcome,
+            review_url=link,
+            key_request=key_request.id if key_request else None,
+        )
+        return decided, link
+
+    async def enable_operation(
+        self, api_id: str, op_id: str, by: str, key: str = "dedicated"
+    ) -> tuple[EnableWriteRequest, str | None]:
+        """Enable writes for an operation from the console, without waiting for an agent
+        to ask. Joins the pending request for it when there is one."""
+        entry = self.registry.get(api_id)
+        op = entry.operation(op_id) if entry is not None else None
+        if entry is None or op is None:
+            raise LibrarianError(f"unknown operation {op_id!r} on {api_id!r}")
+        if op.access is Access.READ:
+            raise LibrarianError(f"{op_id!r} is a read operation")
+        if op.writable and entry.write_auth is not None:
+            raise LibrarianError(f"{op_id!r} is already enabled for writes")
+        request = self.enablement.pending_for(api_id, op_id)
+        if request is None:
+            request = await self.enablement.open(
+                entry, op, who=by, reason="enabled from the console", notify=False
+            )
+        return await self.enable_writes(request.id, by, key)
+
+    async def decline_writes(self, request_id: str, by: str, note: str = "") -> EnableWriteRequest:
+        """An approver declines: the operation stays refused and the same agents are
+        not asked about it again for a while."""
+        return await self.enablement.decide(
+            request_id, EnableState.DECLINED, by, note.strip()[:500] or "declined by approver"
+        )
+
+    async def _write_guidance(self, entry: ApiEntry, ops: list[Operation]) -> CredentialGuidance:
+        """What the person adding the write key should create: the least permission for
+        these operations, from the model when one is configured."""
+        listed = [
+            f"{op.method} {op.path}" + (f": {op.summary[:120]}" if op.summary else "") for op in ops
+        ]
+        fallback = CredentialGuidance(
+            create_url=entry.credential.create_url,
+            instructions=(
+                "Create a credential that may only " + "; ".join(listed[:5]) + ". Nothing more."
+            )[:4000],
+        )
+        if self.extractor is None:
+            return fallback
+        try:
+            extracted = await extract_write_guidance(
+                self.extractor, base_url=entry.base_url, api_name=entry.name, operations=listed
+            )
+        except Exception as exc:  # the model is a convenience here, never a blocker
+            log.warning("write credential guidance for %s failed: %s", entry.id, exc)
+            return fallback
+        url = extracted.credential_url
+        return CredentialGuidance(
+            create_url=url[:500] if url and url.startswith("https://") else fallback.create_url,
+            scopes=[s[:100] for s in extracted.scopes[:20]],
+            instructions=(extracted.credential_instructions or fallback.instructions)[:4000],
+        )
 
     async def set_operation_access(
         self, api_id: str, op_id: str, choice: str, by: str
@@ -1679,13 +1896,18 @@ class Librarian:
         if resolved.state is not RequestState.FULFILLED:
             raise CredentialUnavailable(resolved)
 
-    async def _validate_credential(self, entry: ApiEntry) -> str | None:
+    async def _validate_credential(self, entry: ApiEntry, request: CredentialRequest) -> str | None:
         op_id = entry.credential.validation_operation
         if op_id is None:
             return None
+        auth: AuthSpec | None = None
+        if request.purpose == "write":
+            # The write key is tested with the same read; it is not the entry's own
+            # credential, so the call is sent with the key's shape explicitly.
+            auth = _write_auth_like(entry.auth, request.secret_ref)
         try:
             result = await self.executor.execute(
-                CallRequest(api=entry.id, operation=op_id), SYSTEM_CALLER
+                CallRequest(api=entry.id, operation=op_id), SYSTEM_CALLER, auth=auth
             )
         except CredentialMissing as exc:
             return exc.reason
@@ -1696,6 +1918,14 @@ class Librarian:
         if not result.ok:
             return f"validation call returned HTTP {result.status_code}"
         return None
+
+
+def _write_auth_like(auth: AuthSpec, secret_ref: str) -> AuthSpec:
+    """The write credential's shape: the read authentication with another secret. An
+    API that needs no key for reads is assumed to take a bearer token for writes."""
+    if isinstance(auth, NoAuth | OAuth2UserAuth):
+        return BearerAuth(secret_ref=secret_ref)
+    return auth.model_copy(update={"secret_ref": secret_ref})
 
 
 def _default_secrets(settings: Settings) -> SecretStore:

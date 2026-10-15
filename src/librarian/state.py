@@ -166,16 +166,17 @@ class StateStore:
             data = result.scalar_one_or_none()
         return None if data is None else CredentialRequest.model_validate_json(data)
 
-    async def pending_for(self, api: str) -> CredentialRequest | None:
+    async def pending_for(self, api: str, purpose: str = "read") -> CredentialRequest | None:
         async with self.engine.connect() as conn:
-            result = await conn.execute(
-                select(credential_requests.c.data)
-                .where(credential_requests.c.api == api)
-                .where(credential_requests.c.state == RequestState.PENDING.value)
-                .limit(1)
-            )
-            data = result.scalar_one_or_none()
-        return None if data is None else CredentialRequest.model_validate_json(data)
+            rows = (
+                await conn.execute(
+                    select(credential_requests.c.data)
+                    .where(credential_requests.c.api == api)
+                    .where(credential_requests.c.state == RequestState.PENDING.value)
+                )
+            ).scalars()
+            requests = [CredentialRequest.model_validate_json(row) for row in rows]
+        return next((r for r in requests if r.purpose == purpose), None)
 
     async def list_requests(self, state: RequestState | None = None) -> list[CredentialRequest]:
         query = select(credential_requests.c.data)

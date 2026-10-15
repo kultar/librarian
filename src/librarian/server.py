@@ -61,7 +61,7 @@ from librarian import __version__, telemetry
 from librarian.approvals import WriteApproval
 from librarian.calls import Caller, CallRequest, WriteRequest
 from librarian.config import PrincipalSettings
-from librarian.console import consent_routes, console_routes, review_routes
+from librarian.console import consent_routes, console_routes, enable_routes, review_routes
 from librarian.credentials import CredentialRequest
 from librarian.executor import PolicyDenied
 from librarian.mcp_server import build_mcp
@@ -124,7 +124,9 @@ def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) 
                 "Change data through an API, subject to human approval (or a standing grant). "
                 'Send {"skill":"write","api":"jira","operation":"addComment","args":{...},'
                 '"body":{...},"reason":"why","idempotency_key":"optional"}. The task waits in '
-                "AUTH_REQUIRED until an approver decides; poll or subscribe for the result."
+                "AUTH_REQUIRED until an approver decides; poll or subscribe for the result. "
+                "If nobody has enabled that operation for writes yet, the task is rejected "
+                "with a message saying the approvers were asked to enable it; retry later."
             ),
             tags=["api", "write", "approval"],
         )
@@ -529,6 +531,7 @@ def create_pages_app(librarian: Librarian) -> Starlette:
             *console_routes(librarian),
             *review_routes(librarian),
             *consent_routes(librarian),
+            *enable_routes(librarian),
             *asset_routes(),
             Route("/healthz", healthz, methods=["GET"]),
         ]
@@ -607,6 +610,7 @@ def create_app(
             *console_routes(librarian),
             *review_routes(librarian),
             *consent_routes(librarian),
+            *enable_routes(librarian),
             *asset_routes(),
         ]
 
@@ -693,6 +697,7 @@ async def _sweep_forever(librarian: Librarian) -> None:
         if ticks % 4 == 0:
             try:
                 await librarian.broker.sweep()
+                await librarian.enablement.sweep()
             except Exception:
                 log.exception("credential sweep failed")
             try:

@@ -91,7 +91,7 @@ border-radius:6px;background:var(--ink);color:#fff;vertical-align:middle;margin-
 label{display:block;margin-top:10px}
 input,select{font:inherit;color:inherit;padding:9px 11px;border-radius:8px;
 border:1px solid var(--line);background:var(--paper);width:100%;margin-top:6px}
-input[type=checkbox]{width:auto;margin:0 6px 0 0;vertical-align:middle}
+input[type=checkbox],input[type=radio]{width:auto;margin:0 6px 0 0;vertical-align:middle}
 input[type=number]{width:7em;display:inline-block}
 :focus-visible{outline:2px solid var(--brass);outline-offset:2px}
 button{font:inherit;font-weight:500;cursor:pointer;padding:10px 16px;border-radius:8px;
@@ -275,22 +275,26 @@ def _approver(request: Request, settings: ApproverSettings) -> tuple[str | None,
 
 def _form(request_obj: CredentialRequest, token: str, names: list[str], error: str | None) -> str:
     e = html.escape
+    for_writes = request_obj.purpose == "write"
     rows = [
         ("Host", e(request_obj.host)),
         ("Stored as", f"<code>{e(request_obj.secret_ref)}</code> ({e(request_obj.auth_type)})"),
-        ("Waiting", f"{request_obj.waiting} request(s)"),
     ]
+    if not for_writes:
+        rows.append(("Waiting", f"{request_obj.waiting} request(s)"))
     if request_obj.scopes:
-        rows.append(("Needs (read-only)", e(", ".join(request_obj.scopes))))
+        needs = "Needs (writes)" if for_writes else "Needs (read-only)"
+        rows.append((needs, e(", ".join(request_obj.scopes))))
     if request_obj.reason != "missing":
         rows.append(("Why", e(request_obj.reason)))
     details = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows)
     asked_by = e(", ".join(request_obj.requested_by)) or "an agent"
     create = ""
     if request_obj.create_url:
+        what = "Create a key that can write" if for_writes else "Create a read-only key"
         create = (
             f'<p>1. <a href="{e(request_obj.create_url)}" target=_blank rel="noopener noreferrer">'
-            "Create a read-only key</a> (opens the provider's page).</p><p>2. Paste it below.</p>"
+            f"{what}</a> (opens the provider's page).</p><p>2. Paste it below.</p>"
         )
     hint = (
         "<p class=muted>Basic auth: paste <code>username:password</code> "
@@ -317,9 +321,30 @@ def _form(request_obj: CredentialRequest, token: str, names: list[str], error: s
         else ""
     )
     err = f"<p class=err>{e(error)}</p>" if error else ""
-    return f"""<h1>{e(request_obj.api_name)} needs a key</h1>
-<p class=lede>Asked by {asked_by}. The key goes straight to the secret store; the waiting
-requests resume on their own.</p>{err}
+    if for_writes:
+        title = f"{e(request_obj.api_name)} needs a write credential"
+        lede = (
+            f"{asked_by} enabled writes for it. The credential goes straight to the secret "
+            "store; only approved writes use it, never reads."
+        )
+        advice = "Give it the least permission the enabled writes need."
+        deny = (
+            "No write credential is added; the operation stays unusable for writes until "
+            "someone adds one. Reads are not affected."
+        )
+    else:
+        title = f"{e(request_obj.api_name)} needs a key"
+        lede = (
+            f"Asked by {asked_by}. The key goes straight to the secret store; the waiting "
+            "requests resume on their own."
+        )
+        advice = "Prefer a dedicated read-only account."
+        deny = (
+            "Waiting agents are told access was denied and the API is blocked until "
+            "someone re-enables it."
+        )
+    return f"""<h1>{title}</h1>
+<p class=lede>{lede}</p>{err}
 <div class=card><dl>{details}</dl></div>
 <div class=card><h2>Add a key</h2>{instructions}{create}{hint}
 <form method=post autocomplete=off><input type=hidden name=t value="{e(token)}">
@@ -327,11 +352,9 @@ requests resume on their own.</p>{err}
 <input type=password name=value required placeholder="Paste the key" autocomplete=off
 aria-label="Key">
 {writes}<button>Save and test</button></form>
-<p class=muted>It is never shown again, logged, or shared with any agent.
-Prefer a dedicated read-only account.</p></div>
+<p class=muted>It is never shown again, logged, or shared with any agent. {advice}</p></div>
 {existing}
-<div class=zone><h2>Deny</h2><p class=muted>Waiting agents are told access was denied and the API
-is blocked until someone re-enables it.</p>
+<div class=zone><h2>Deny</h2><p class=muted>{deny}</p>
 <form method=post><input type=hidden name=t value="{e(token)}">
 <input type=hidden name=action value=deny><button class=deny>Deny access</button></form></div>"""
 
@@ -345,7 +368,7 @@ def credential_routes(broker: CredentialBroker, approvers: ApproverSettings) -> 
         _, problem = _approver(request, approvers)
         if problem:
             return _not_allowed(problem)
-        names = await broker.offerable_secrets()
+        names = await broker.offerable_secrets() if req.purpose == "read" else []
         return _page(f"Access needed: {req.api_name}", _form(req, token, names, None))
 
     async def submit(request: Request) -> Response:
@@ -370,6 +393,8 @@ def credential_routes(broker: CredentialBroker, approvers: ApproverSettings) -> 
                 )
             elif action == "deny":
                 await broker.deny(req.id, approver)
+                if req.purpose == "write":
+                    return _notice("bad", "Write credential denied", "Nothing was added.")
                 return _notice("bad", "Access denied", "Waiting agents were told.")
             else:
                 error = "Unknown action."
@@ -378,9 +403,15 @@ def credential_routes(broker: CredentialBroker, approvers: ApproverSettings) -> 
                 "note", "This request was already handled", "Someone else got there first.", 409
             )
         if error:
-            names = await broker.offerable_secrets()
+            names = await broker.offerable_secrets() if req.purpose == "read" else []
             return _page(f"Access needed: {req.api_name}", _form(req, token, names, error), 400)
         note = html.escape(req.resolution_note or "")
+        if req.purpose == "write":
+            return _notice(
+                "ok",
+                f"{req.api_name} write credential added",
+                f"{note} Approved writes use it once the enabled operations are merged.".strip(),
+            )
         return _notice(
             "ok",
             f"{req.api_name} connected",

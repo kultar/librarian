@@ -17,6 +17,10 @@ The caller's `apis` / `write_apis` patterns don't include that API.
 **"operation ... is not a read" / "is not enabled for writes"**
 Reads only run operations classified as reads (GET, or reviewed). Writes need a verified entry,
 `writable: true` on the operation, a `write_auth` credential, and the caller's `write_apis`.
+When the entry is verified and only the enabling or the write credential is missing, the agent
+gets `write_not_enabled` instead and the approvers are asked: the card (Slack) and the console's
+waiting list lead to a page with Enable or Decline. "approvers declined to enable it" means
+someone declined within the last week; the console's API page can still enable it.
 
 **"operation ... is suspended until reviewed"**
 librarian held it back: it was learned from docs or model knowledge and kept failing, or the API

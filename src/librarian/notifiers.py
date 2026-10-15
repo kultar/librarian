@@ -112,6 +112,24 @@ class WebhookNotifier(Notifier):
     async def review_closed(self, review: Any) -> None:
         await self._post_write("review.closed", {"review": review.model_dump(mode="json")})
 
+    async def enable_opened(self, request: Any, link: str) -> None:
+        await self._post_write(
+            "enable_write.opened",
+            {"request": request.model_dump(mode="json", exclude={"notifier_ref"}), "link": link},
+        )
+
+    async def enable_updated(self, request: Any) -> None:
+        await self._post_write(
+            "enable_write.updated",
+            {"request": request.model_dump(mode="json", exclude={"notifier_ref"})},
+        )
+
+    async def enable_closed(self, request: Any) -> None:
+        await self._post_write(
+            "enable_write.closed",
+            {"request": request.model_dump(mode="json", exclude={"notifier_ref"})},
+        )
+
     async def consent_opened(self, request: Any, link: str) -> None:
         data = request.model_dump(mode="json", exclude={"code_verifier"})
         await self._post_write("consent.opened", {"request": data, "link": link})
@@ -169,7 +187,7 @@ class SlackNotifier(Notifier):
             "chat.postMessage",
             {
                 "channel": channel,
-                "text": f"Access needed: {request.api_name} (read-only)",
+                "text": access_text(request),
                 "blocks": card_blocks(request, link),
             },
         )
@@ -185,7 +203,7 @@ class SlackNotifier(Notifier):
             {
                 "channel": ref["channel"],
                 "ts": ref["ts"],
-                "text": f"Access needed: {request.api_name} (read-only)",
+                "text": access_text(request),
                 "blocks": card_blocks(request, self._links.get(request.id)),
             },
         )
@@ -356,6 +374,56 @@ class SlackNotifier(Notifier):
             },
         )
 
+    async def enable_opened(self, request: Any, link: str) -> None:
+        self._links[request.id] = link
+        data = await self._call(
+            "chat.postMessage",
+            {
+                "channel": request.channel or self.default_channel,
+                "text": enable_text(request),
+                "blocks": enable_blocks(request, link),
+            },
+        )
+        if data.get("ok"):
+            request.notifier_ref = {"channel": str(data["channel"]), "ts": str(data["ts"])}
+
+    async def enable_updated(self, request: Any) -> None:
+        ref = request.notifier_ref
+        if not ref:
+            return
+        await self._call(
+            "chat.update",
+            {
+                "channel": ref["channel"],
+                "ts": ref["ts"],
+                "text": enable_text(request),
+                "blocks": enable_blocks(request, self._links.get(request.id)),
+            },
+        )
+
+    async def enable_closed(self, request: Any) -> None:
+        ref = request.notifier_ref
+        self._links.pop(request.id, None)
+        if not ref:
+            return
+        await self._call(
+            "chat.update",
+            {
+                "channel": ref["channel"],
+                "ts": ref["ts"],
+                "text": enable_outcome_text(request),
+                "blocks": enable_blocks(request, None),
+            },
+        )
+        await self._call(
+            "chat.postMessage",
+            {
+                "channel": ref["channel"],
+                "thread_ts": ref["ts"],
+                "text": enable_outcome_text(request),
+            },
+        )
+
     async def consent_opened(self, request: Any, link: str) -> None:
         """A direct message to the person; the channel (with a mention) when Slack does
         not know their address."""
@@ -388,6 +456,63 @@ class SlackNotifier(Notifier):
 
 
 CONSENT_MINUTES = 30
+
+
+def enable_text(request: Any) -> str:
+    who = ", ".join(request.requested_by[:3]) or "an agent"
+    return f"{who} wants to write to {request.api_name}: {request.operation}"
+
+
+def enable_outcome_text(request: Any) -> str:
+    icon = {
+        "enabled": ":white_check_mark:",
+        "declined": ":no_entry:",
+        "expired": ":hourglass:",
+    }.get(str(request.state), ":pencil2:")
+    who = f" by {request.decided_by}" if request.decided_by else ""
+    note = f" · {request.note}" if request.note else ""
+    return f"{icon} {request.api_name}: writes for {request.operation} {request.state}{who}{note}"
+
+
+def enable_blocks(request: Any, link: str | None) -> list[dict[str, Any]]:
+    """Block Kit card for a write an agent wants that nobody has enabled yet."""
+    pending = str(request.state) == "pending"
+    title = f":pencil2: {enable_text(request)}" if pending else enable_outcome_text(request)
+    operation = f"`{request.method} {request.path}`"
+    if request.summary:
+        operation += f"\n{request.summary}"
+    fields = [
+        f"*Operation:*\n{operation}",
+        f"*Asked by:*\n{', '.join(request.requested_by[:5])}",
+        "*Why:*\n" + ("; ".join(request.reasons[:3]) or "no reason given"),
+        f"*Asked:*\n{request.asks} time(s)",
+    ]
+    if request.needs_credential:
+        fields.append("*Write credential:*\nnone yet; enabling asks for one")
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
+        {"type": "section", "fields": [{"type": "mrkdwn", "text": f} for f in fields[:10]]},
+    ]
+    if pending and link:
+        group = mention(request.approver_group)
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (f"{group} " if group else "")
+                    + "Enable carries it into the entry's review (every write still needs "
+                    "approval or a grant); decline keeps it refused and quiet for a week.",
+                },
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Decide"},
+                    "url": link,
+                    "style": "primary",
+                },
+            }
+        )
+    return blocks
 
 
 def review_outcome_text(review: Any) -> str:
@@ -596,13 +721,17 @@ def resolution_reply(request: CredentialRequest) -> str:
     return resolution_text(request)
 
 
+def access_text(request: CredentialRequest) -> str:
+    kind = "write credential" if request.purpose == "write" else "read-only"
+    return f"Access needed: {request.api_name} ({kind})"
+
+
 def card_blocks(request: CredentialRequest, link: str | None) -> list[dict[str, Any]]:
     """Block Kit card for a credential request."""
     pending = request.state is RequestState.PENDING
+    kind = "write credential" if request.purpose == "write" else "read-only"
     title = (
-        f":key: {request.api_name} access needed (read-only)"
-        if pending
-        else resolution_text(request)
+        f":key: {request.api_name} access needed ({kind})" if pending else resolution_text(request)
     )
     fields = [
         f"*Site:*\n{request.host}",
@@ -633,8 +762,12 @@ def card_blocks(request: CredentialRequest, link: str | None) -> list[dict[str, 
                 "text": {
                     "type": "mrkdwn",
                     "text": (f"{group} " if group else "")
-                    + "Add a key, pick an existing secret, or deny. The key never goes"
-                    " through Slack.",
+                    + (
+                        "Add the write credential, or deny. It never goes through Slack."
+                        if request.purpose == "write"
+                        else "Add a key, pick an existing secret, or deny. The key never goes"
+                        " through Slack."
+                    ),
                 },
                 "accessory": {
                     "type": "button",

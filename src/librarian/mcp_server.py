@@ -8,7 +8,9 @@ keys, optional X-Principal-Token), and the same policy engine decides every call
 MCP tool calls should return promptly, so nothing here waits on a human:
 - a missing credential returns `credential_pending` (approvers are notified);
 - a write that needs approval returns `pending_approval`; the librarian runs it
-  once approved, and `write_status` reports the outcome.
+  once approved, and `write_status` reports the outcome;
+- a write on an operation nobody has enabled yet returns `write_not_enabled`
+  (approvers are asked to enable it; retry later).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from librarian.service import (
     CredentialPending,
     Librarian,
     LibrarianError,
+    WriteNotEnabled,
     WriteOutcome,
 )
 
@@ -153,7 +156,9 @@ def build_mcp(librarian: Librarian) -> MCPServer:
     ) -> dict[str, Any]:
         """Request a change (e.g. add a comment). Runs at once under a standing grant;
         otherwise returns `pending_approval` and a human decides. Give a clear `reason`:
-        the approver sees it. Use `idempotency_key` to make retries safe."""
+        the approver sees it. Use `idempotency_key` to make retries safe. If the
+        operation is not enabled for writes yet, returns `write_not_enabled`: the
+        approvers were asked to enable it; retry later."""
         try:
             request = WriteRequest(
                 api=api,
@@ -164,6 +169,12 @@ def build_mcp(librarian: Librarian) -> MCPServer:
                 idempotency_key=idempotency_key,
             )
             outcome = await librarian.request_write(request, _caller(ctx))
+        except WriteNotEnabled as asked:
+            return {
+                "status": "write_not_enabled",
+                "enable_request": asked.request.id,
+                "message": str(asked),
+            }
         except ValidationError as exc:
             raise ToolError(f"invalid request: {exc.errors()[0]['msg']}") from exc
         except PolicyDenied as exc:

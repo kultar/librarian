@@ -114,7 +114,11 @@ class Executor:
     async def aclose(self) -> None:
         await self.client.aclose()
 
-    async def execute(self, request: CallRequest, caller: Caller) -> CallResult:
+    async def execute(
+        self, request: CallRequest, caller: Caller, *, auth: AuthSpec | None = None
+    ) -> CallResult:
+        """Run one read. `auth` sends the call with another shared credential than the
+        entry's (used to test a freshly added write key with a read operation)."""
         attributes: dict[str, str] = {
             "librarian.api": request.api,
             "librarian.operation": request.operation,
@@ -125,7 +129,7 @@ class Executor:
         ) as span:
             started = time.monotonic()
             try:
-                result = await self._execute(request, caller)
+                result = await self._execute(request, caller, auth)
             except PolicyDenied as exc:
                 telemetry.denials.add(1, {"librarian.api": request.api})
                 span.set_attribute("librarian.denied", exc.reason)
@@ -141,7 +145,9 @@ class Executor:
             telemetry.call_duration.record((time.monotonic() - started) * 1000, attributes)
             return result
 
-    async def _execute(self, request: CallRequest, caller: Caller) -> CallResult:
+    async def _execute(
+        self, request: CallRequest, caller: Caller, auth: AuthSpec | None = None
+    ) -> CallResult:
         if self.policy.registry.get(request.api) is None:
             await self.policy.registry.refresh_stored()  # learned on another replica?
         decision = self.policy.check(request, caller)
@@ -172,11 +178,15 @@ class Executor:
                 )
             )
             raise PolicyDenied(limited)
-        secret = await self._resolve_secret(entry, caller)
+        secret = (
+            await self._resolve_secret(entry, caller)
+            if auth is None
+            else await self._shared_secret(entry, auth)
+        )
         started = time.monotonic()
         url, headers, query = _build_request(entry, op, request.args)
-        secret_query = _auth_query(entry, secret)
-        _apply_auth_headers(entry, secret, headers)
+        secret_query = _auth_query(entry, secret, auth)
+        _apply_auth_headers(entry, secret, headers, auth)
 
         pages: list[Any] = []
         total_bytes = 0
@@ -280,6 +290,8 @@ class Executor:
                 extra={"pages": page_count, "truncated": truncated},
             )
         )
+        if status_code == 401 and auth is not None:
+            raise CredentialMissing(entry, reason="rejected with HTTP 401")
         if status_code == 401 and isinstance(entry.auth, OAuth2UserAuth):
             # The person's token no longer works: drop it and ask them to sign in again.
             if self.consents is not None and caller.principal:
@@ -416,6 +428,17 @@ class Executor:
                 credential_ref=ref,
             ),
         )
+
+    async def _shared_secret(self, entry: ApiEntry, auth: AuthSpec) -> str | None:
+        """The secret behind a given shared-key authentication (not the entry's own)."""
+        if isinstance(auth, NoAuth | OAuth2UserAuth):
+            return None
+        if is_reserved_secret(auth.secret_ref):
+            raise PolicyDenied(f"API {entry.id!r} references an internal secret")
+        value = await self.secrets.get(auth.secret_ref)
+        if value is None:
+            raise CredentialMissing(entry, reason=f"credential {auth.secret_ref!r} is missing")
+        return value
 
     async def _resolve_secret(self, entry: ApiEntry, caller: Caller) -> str | None:
         if isinstance(entry.auth, OAuth2UserAuth):

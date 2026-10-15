@@ -365,7 +365,7 @@ Secret called `librarian-env`.
 
 ```yaml
 image:
-  tag: "0.15.0"
+  tag: "0.16.0"
 
 replicaCount: 2                          # needs steps 4 and 5; see "Replicas" below
 persistence:
@@ -434,7 +434,7 @@ The chart is published with every release as an OCI artifact, with the same vers
 image (`image.tag` above):
 
 ```bash
-helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.15.0 \
+helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.16.0 \
   -n librarian -f values.yaml
 ```
 
@@ -493,7 +493,8 @@ Rate limits are shared: with Postgres, `rate_limit_per_minute` is one limit acro
 - **Upgrades**: bump `image.tag`, then `helm upgrade librarian oci://ghcr.io/kultar/charts/librarian
   --version <same> -n librarian -f values.yaml`.
   State is in Postgres and Secrets Manager; the registry is in git.
-- **Turning things on later**: writes per agent (`write_apis`), standing grants
+- **Turning things on later**: writes per agent (`write_apis`; the operations themselves are
+  enabled from the Slack card or the console when an agent first asks), standing grants
   (`config.writes.grants`), verified sign-in for agents' users (`config.principals`), internal
   APIs within the domains you list (`config.internal_hosts`). See [`examples/librarian.yaml`](../examples/librarian.yaml)
   for every option.

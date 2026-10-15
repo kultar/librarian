@@ -24,6 +24,7 @@ from librarian.audit import AuditEvent
 from librarian.calls import Caller
 from librarian.config import ApproverSettings
 from librarian.credentials import CredentialRequest, RequestState
+from librarian.enablement import EnableWriteRequest
 from librarian.oauth import ConsentRequest, OAuthError, authorize_url
 from librarian.opsearch import rank, tokens
 from librarian.registry.models import Access, ApiEntry, EntryStatus, OAuth2UserAuth, Operation
@@ -139,14 +140,14 @@ def _search_form(action: str, query: str, placeholder: str) -> str:
     )
 
 
-async def _pending(
-    librarian: Librarian,
-) -> tuple[list[CredentialRequest], list[WriteApproval], list[ReviewRequest], list[ConsentRequest]]:
+async def _pending(librarian: Librarian) -> Pending:
+    await librarian.enablement.refresh()
     return (
         await _pending_credentials(librarian),
         librarian.approvals.pending(),
         librarian.reviews.pending(),
         librarian.consents.pending(),
+        librarian.enablement.pending(),
     )
 
 
@@ -156,9 +157,18 @@ def _waiting_rows(
     approvals: list[WriteApproval],
     reviews: list[ReviewRequest],
     consents: list[ConsentRequest],
+    enables: list[EnableWriteRequest],
     limit: int | None = None,
 ) -> str:
     rows: list[str] = []
+    for en in enables:
+        rows.append(
+            f"<tr><td>Enable writes on <b>{e(en.api_name)}</b>: {e(en.method)} "
+            f"<code>{e(en.operation)}</code></td>"
+            f"<td>{e(', '.join(en.requested_by) or 'an agent')}</td>"
+            f"<td>{_n(en.asks, 'ask')}, {_when(en.created_at)}</td>"
+            f"<td><a href='{e(librarian.enablement.link(en))}'>Decide</a></td></tr>"
+        )
     for r in reviews:
         rows.append(
             f"<tr><td>Review <b>{e(r.api_name)}</b>: {e(r.summary)}</td>"
@@ -217,7 +227,11 @@ API_TABLE_HEAD = (
 )
 
 Pending = tuple[
-    list[CredentialRequest], list[WriteApproval], list[ReviewRequest], list[ConsentRequest]
+    list[CredentialRequest],
+    list[WriteApproval],
+    list[ReviewRequest],
+    list[ConsentRequest],
+    list[EnableWriteRequest],
 ]
 
 
@@ -243,6 +257,13 @@ EVENT_LABELS = {
     "grant_revoked": "Grant revoked",
     "review_approved": "Approved",
     "review_denied": "Review denied",
+    "enable_write_requested": "Write enable asked",
+    "enable_write_enabled": "Writes enabled",
+    "enable_write_declined": "Writes declined",
+    "enable_write_expired": "Write enable lapsed",
+    "writes_enabled": "Write key allowed",
+    "operation_access_set": "Operation decided",
+    "auth_set": "Authentication set",
     "person_disconnected": "Signed out",
     "signins_checked": "Sign-ins checked",
 }
@@ -375,10 +396,10 @@ def _dashboard(
     summary: dict[str, Any] | None = None,
     recent_events: list[AuditEvent] | None = None,
 ) -> str:
-    credentials, approvals, reviews, consents = pending
+    credentials, approvals, reviews, consents, enables = pending
     entries = librarian.registry.all()
     grants = [g for g in librarian.approvals.grants() if g.usable(datetime.now(UTC))]
-    waiting = len(credentials) + len(approvals) + len(reviews) + len(consents)
+    waiting = len(credentials) + len(approvals) + len(reviews) + len(consents) + len(enables)
     attention = sum(1 for x in entries if _flags(librarian, x))
     tiles: list[tuple[str, str, str, str]] = [
         (
@@ -421,10 +442,11 @@ def _dashboard(
             f"<h2>Recent activity</h2>{_activity_rows(recent_events)}"
             "<p class=more><a href='/activity'>All activity</a></p>"
         )
+    waiting_rows = _waiting_rows(librarian, credentials, approvals, reviews, consents, enables, 8)
     return f"""<div class=pagehead><h1>Overview</h1></div>
 <p class=lede>What librarian knows, and what waits on a person.</p>
 <div class=tiles>{tiles_html}</div>
-<h2>Waiting on a person</h2>{_waiting_rows(librarian, credentials, approvals, reviews, consents, 8)}
+<h2>Waiting on a person</h2>{waiting_rows}
 {activity}
 <h2>Recently changed APIs</h2>{errors}{apis}"""
 
@@ -454,11 +476,11 @@ def _apis_page(librarian: Librarian, query: str) -> str:
 
 
 def _waiting_page(librarian: Librarian, pending: Pending) -> str:
-    credentials, approvals, reviews, consents = pending
+    credentials, approvals, reviews, consents, enables = pending
     return f"""<div class=pagehead><h1>Waiting on a person</h1></div>
 <p class=lede>Keys to add, writes to decide, learned APIs to review, and people who still have
 to sign in. The links are the same one-time links the notifications carry.</p>
-{_waiting_rows(librarian, credentials, approvals, reviews, consents)}"""
+{_waiting_rows(librarian, credentials, approvals, reviews, consents, enables)}"""
 
 
 def _grants_page(librarian: Librarian, token: str, include_inactive: bool) -> str:
@@ -612,6 +634,18 @@ def _detail(
                 "Waiting",
                 f"a key, asked {_when(pending.created_at)}: "
                 f"<a href='{e(librarian.broker.link(pending))}'>Review</a>",
+            )
+        )
+    asks = [r for r in librarian.enablement.pending() if r.api == entry.id]
+    if asks:
+        rows.append(
+            (
+                "Wanted writes",
+                "; ".join(
+                    f"<code>{e(r.operation)}</code> by {e(', '.join(r.requested_by))}: "
+                    f"<a href='{e(librarian.enablement.link(r))}'>Decide</a>"
+                    for r in asks
+                ),
             )
         )
     review = librarian.reviews.pending_for(entry.id)
@@ -904,6 +938,16 @@ def _op_flags(librarian: Librarian, entry: ApiEntry, op: Operation, token: str) 
             f"<select name=choice aria-label='Decide {e(op.id)}'>{options}</select>"
             "<button class='quiet small'>Decide</button></form>"
         )
+    if op.access is not Access.READ and token and not (op.writable and entry.write_auth):
+        asked = librarian.enablement.pending_for(entry.id, op.id)
+        label = "Enable writes" if not op.writable else "Add a write credential"
+        if asked is not None:
+            flags.append(
+                f"<a href='{e(librarian.enablement.link(asked))}'>"
+                f"{e(', '.join(asked.requested_by))} wants to write: decide</a>"
+            )
+        elif op.access is Access.WRITE or op.writable:
+            flags.append(_form(f"/apis/{entry.id}/ops/{op.id}/enable", token, label, "quiet small"))
     why = o.suspended(entry, op)
     if why:
         clear = _form(f"/apis/{entry.id}/ops/{op.id}/clear", token, "Clear", "quiet small")
@@ -1166,6 +1210,19 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 f"{op_id} decided",
                 f"{applied}{review}{back(api_id)}",
             )
+        if action == "enable":
+            form = await request.form()
+            op_id = request.path_params["op_id"]
+            key = str(form.get("key", "dedicated"))
+            try:
+                done, link = await librarian.enable_operation(api_id, op_id, identity, key)
+            except LookupError:
+                return notice("note", "Already decided", "Someone else got there first.", 409)
+            return notice(
+                "ok",
+                f"Writes enabled for {op_id}",
+                _enabled_text(librarian, done, link) + back(api_id),
+            )
         if action in ("disconnect-all", "check-signins"):
             entry = librarian.registry.get(api_id)
             auth = entry.auth if entry is not None else None
@@ -1423,6 +1480,133 @@ def review_routes(librarian: Librarian) -> list[Route]:
     return [
         Route("/reviews/{review_id}", show, methods=["GET"]),
         Route("/reviews/{review_id}", submit, methods=["POST"]),
+    ]
+
+
+# -- the enable-writes page: an agent wants a write nobody has enabled yet -----------------
+
+
+def _enabled_text(librarian: Librarian, done: EnableWriteRequest, link: str | None) -> str:
+    text = e((done.note or "enabled").capitalize()) + "."
+    if link:
+        text += f" Review: <a href='{e(link)}'>{e(link)}</a>."
+    if done.key_request:
+        key = librarian.broker.get(done.key_request)
+        if key is not None:
+            text += f" <a href='{e(librarian.broker.link(key))}'>Add the write credential</a>."
+    return text
+
+
+def _enable_body(
+    librarian: Librarian, request: EnableWriteRequest, token: str, error: str | None
+) -> str:
+    entry = librarian.registry.get(request.api)
+    op = entry.operation(request.operation) if entry is not None else None
+    operation = f"{e(request.method)} <code>{e(request.path)}</code>"
+    if request.summary:
+        operation += f"<br><span class=muted>{e(request.summary)}</span>"
+    rows = [
+        ("Site", e(request.host)),
+        ("Operation", f"<code>{e(request.operation)}</code>: {operation}"),
+        ("Asked by", e(", ".join(request.requested_by) or "an agent")),
+        ("Asked", f"{_n(request.asks, 'time')}, first {_when(request.created_at)}"),
+    ]
+    if request.reasons:
+        rows.append(("Why", "<br>".join(e(r) for r in request.reasons)))
+    key_choice = ""
+    if entry is None:
+        credential = "<span class=bad>the API is no longer in the registry</span>"
+    elif entry.per_person:
+        credential = "each person's own sign-in, like reads"
+    elif entry.write_secret_ref:
+        credential = f"<code>{e(entry.write_secret_ref)}</code>, already configured"
+    else:
+        credential = "<b>none yet</b>; choose below"
+        read_key = (
+            f"<label><input type=radio name=key value=read> Use the read credential "
+            f"<code>{e(entry.secret_ref)}</code> for writes too.</label>"
+            if entry.secret_ref
+            else ""
+        )
+        key_choice = (
+            "<h3>Write credential</h3><p class=choice><label><input type=radio name=key "
+            f"value=dedicated checked> Ask for a dedicated write credential <code>{e(entry.id)}"
+            "/write</code> (recommended): a key page follows, saying the least permission these "
+            f"writes need.</label>{read_key}</p>"
+        )
+    rows.append(("Write credential", credential))
+    if op is not None and op.writable:
+        rows.append(("Already enabled", "yes; only the credential is missing"))
+    details = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows)
+    err = f"<p class=err>{e(error)}</p>" if error else ""
+    hidden = f"<input type=hidden name=t value='{e(token)}'>"
+    who = e(request.requested_by[0] if request.requested_by else "An agent")
+    return f"""<h1>{who} wants to write to {e(request.api_name)}</h1>
+<p class=lede>Enabling carries <code>{e(request.operation)}</code> into the entry's review
+proposal (approve or deny, as always); every write still needs a person's approval or a grant.
+Declining keeps it refused and quiet for a week.</p>{err}
+<div class=card><dl>{details}</dl></div>
+<form method=post>{hidden}<input type=hidden name=action value=enable>
+<div class=card><h2>Enable</h2>{key_choice}
+<button>Enable writes for {e(request.operation)}</button></div></form>
+<div class=zone><h2>Decline</h2><p class=muted>The agents are told no, and this operation is not
+asked about again for a week.</p>
+<form method=post>{hidden}<input type=hidden name=action value=decline>
+<input name=note placeholder="Why (optional, shown to the agents)" maxlength=500
+aria-label="Reason"> <button class=deny>Decline</button></form></div>"""
+
+
+def enable_routes(librarian: Librarian) -> list[Route]:
+    async def authorized(
+        request: Request, token: str
+    ) -> tuple[EnableWriteRequest | None, str | None, Response | None]:
+        asked = await librarian.enablement.load(request.path_params["request_id"])
+        if asked is None or not librarian.enablement.check_token(asked, token):
+            return None, None, expired()
+        identity, problem = approver_identity(request, librarian.settings.approvers)
+        if problem or identity is None:
+            return None, None, notice("bad", "Not allowed", e(problem or ""), 403)
+        return asked, identity, None
+
+    async def show(request: Request) -> Response:
+        token = request.query_params.get("t", "")
+        asked, _, denied = await authorized(request, token)
+        if denied is not None or asked is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        body = _enable_body(librarian, asked, token, None)
+        return page(f"Enable writes: {asked.api_name}", body, kind="review")
+
+    async def submit(request: Request) -> Response:
+        form: Any = await request.form()
+        token = str(form.get("t", ""))
+        asked, identity, denied = await authorized(request, token)
+        if denied is not None or asked is None or identity is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        action = str(form.get("action", ""))
+        try:
+            if action == "decline":
+                done = await librarian.decline_writes(asked.id, identity, str(form.get("note", "")))
+                return notice(
+                    "bad", "Declined", f"{e(done.note or 'declined')}. The agents are told."
+                )
+            if action == "enable":
+                key = str(form.get("key", "dedicated"))
+                done, link = await librarian.enable_writes(asked.id, identity, key)
+                return notice(
+                    "ok",
+                    f"Writes enabled for {done.operation}",
+                    _enabled_text(librarian, done, link),
+                )
+        except LookupError:
+            return notice("note", "Already decided", "Someone else got there first.", 409)
+        except (LibrarianError, RegistryError) as exc:
+            body = _enable_body(librarian, asked, token, str(exc))
+            return page(f"Enable writes: {asked.api_name}", body, 400, kind="review")
+        return notice("bad", "Unknown action", "No such action.", 400)
+
+    return [
+        Route("/enable/{request_id}", show, methods=["GET"]),
+        Route("/enable/{request_id}", submit, methods=["POST"]),
     ]
 
 

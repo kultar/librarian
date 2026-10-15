@@ -187,6 +187,27 @@ async def test_write_returns_pending_then_runs_after_approval(
     assert len(sent) == 1 and sent[0].headers["authorization"] == "Bearer write-key"
 
 
+async def test_write_to_a_not_enabled_operation_asks_the_approvers(
+    connect: Connect, librarian: Librarian
+) -> None:
+    async with connect() as session:
+        result = data(
+            await session.call_tool(
+                "write",
+                {
+                    "api": "tracker",
+                    "operation": "renameProject",
+                    "args": {"p": "PAY"},
+                    "reason": "the team was renamed",
+                },
+            )
+        )
+    asked = librarian.enablement.pending()
+    assert len(asked) == 1 and asked[0].reasons == ["the team was renamed"]
+    assert result["status"] == "write_not_enabled" and result["enable_request"] == asked[0].id
+    assert "approvers have been asked" in result["message"]
+
+
 async def test_write_status_is_private_to_the_requesting_agent(
     connect: Connect, librarian: Librarian, secrets_store: FileSecretStore
 ) -> None:

@@ -17,14 +17,21 @@ import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
 from librarian import telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import Caller
-from librarian.registry.models import ApiEntry, EntryStatus, NoAuth, is_reserved_secret
+from librarian.registry.models import (
+    ApiEntry,
+    AuthSpec,
+    EntryStatus,
+    NoAuth,
+    OAuth2UserAuth,
+    is_reserved_secret,
+)
 from librarian.registry.store import Registry
 from librarian.secrets import SecretStore
 
@@ -45,7 +52,10 @@ class CredentialRequest(BaseModel):
     host: str
     secret_ref: str
     auth_type: str
-    reason: str  # "missing" or "rejected with HTTP 401"
+    # read: the shared read-only key. write: a dedicated write credential, asked for when
+    # an approver enables writes on an entry that has none.
+    purpose: Literal["read", "write"] = "read"
+    reason: str  # "missing", "rejected with HTTP 401", or why writes were enabled
     scopes: list[str] = Field(default_factory=list[str])
     create_url: str | None = None
     instructions: str = ""
@@ -182,6 +192,36 @@ class Notifier:
             "review of %s %s by %s: %s", review.api, review.state, review.decided_by, review.note
         )
 
+    async def enable_opened(self, request: Any, link: str) -> None:
+        """An agent asked for a write that is not enabled; approvers decide at `link`."""
+        log.warning(
+            "%s wants to write %s.%s (%s); enable or decline at %s",
+            ", ".join(request.requested_by),
+            request.api,
+            request.operation,
+            "; ".join(request.reasons) or "no reason given",
+            link,
+        )
+
+    async def enable_updated(self, request: Any) -> None:
+        log.info(
+            "enable-write request %s for %s.%s asked %d times",
+            request.id,
+            request.api,
+            request.operation,
+            request.asks,
+        )
+
+    async def enable_closed(self, request: Any) -> None:
+        log.info(
+            "enable writes for %s.%s: %s by %s (%s)",
+            request.api,
+            request.operation,
+            request.state,
+            request.decided_by,
+            request.note,
+        )
+
 
 class RequestStore(Protocol):
     """Durable storage for requests (see `librarian.state.StateStore`)."""
@@ -189,13 +229,13 @@ class RequestStore(Protocol):
     async def save_request(self, request: CredentialRequest) -> None: ...
     async def update_request_if_pending(self, request: CredentialRequest) -> bool: ...
     async def get_request(self, request_id: str) -> CredentialRequest | None: ...
-    async def pending_for(self, api: str) -> CredentialRequest | None: ...
+    async def pending_for(self, api: str, purpose: str = "read") -> CredentialRequest | None: ...
     async def list_requests(self, state: RequestState | None = None) -> list[CredentialRequest]: ...
 
 
 POLL_SECONDS = 2.0
 
-Validator = Callable[[ApiEntry], Awaitable[str | None]]
+Validator = Callable[[ApiEntry, CredentialRequest], Awaitable[str | None]]
 """Checks a freshly provided credential; returns an error message or None."""
 
 
@@ -273,12 +313,12 @@ class CredentialBroker:
 
     # -- opening and waiting -------------------------------------------------
 
-    def pending_for(self, api_id: str) -> CredentialRequest | None:
+    def pending_for(self, api_id: str, purpose: str = "read") -> CredentialRequest | None:
         return next(
             (
                 r
                 for r in self._requests.values()
-                if r.api == api_id and r.state is RequestState.PENDING
+                if r.api == api_id and r.purpose == purpose and r.state is RequestState.PENDING
             ),
             None,
         )
@@ -340,6 +380,65 @@ class CredentialBroker:
             await self._save_notifier_ref(request)
         else:
             await self.notifier.updated(request)
+        return request
+
+    async def open_write(
+        self,
+        entry: ApiEntry,
+        auth: AuthSpec,
+        *,
+        by: str,
+        reason: str,
+        scopes: list[str],
+        create_url: str | None,
+        instructions: str,
+    ) -> CredentialRequest:
+        """Ask for a dedicated write credential (an approver enabled writes on an entry
+        that has none). `auth` is the write credential's shape; its secret is pasted on
+        the secure page like any key. One open request per API."""
+        if isinstance(auth, NoAuth | OAuth2UserAuth):
+            raise ValueError("a write credential request needs a shared-key authentication")
+        async with self._lock:
+            existing = self.pending_for(entry.id, "write")
+            if existing is None and self.store is not None:
+                stored = await self.store.pending_for(entry.id, "write")
+                existing = self._remember(stored) if stored is not None else None
+            if existing is not None:
+                if by not in existing.requested_by:
+                    existing.requested_by.append(by)
+                await self._persist(existing)
+                await self.notifier.updated(existing)
+                return existing
+            request = CredentialRequest(
+                api=entry.id,
+                api_name=entry.name,
+                host=entry.host,
+                secret_ref=auth.secret_ref,
+                auth_type=auth.type,
+                purpose="write",
+                reason=reason,
+                scopes=scopes,
+                create_url=create_url,
+                instructions=instructions,
+                requested_by=[by],
+                expires_at=datetime.now(UTC) + self.expire_after,
+                channel=entry.owners.channel or self.default_channel,
+                approver_group=entry.owners.approver_group or self.default_approver_group,
+            )
+            self._remember(request)
+            await self._persist(request)
+        telemetry.credential_requests.add(1, {"librarian.api": entry.id, "state": "pending"})
+        await self.audit.record(
+            AuditEvent(
+                event="credential_request",
+                caller="console",
+                principal=by,
+                api=entry.id,
+                detail=f"write credential {auth.secret_ref}: {reason}",
+            )
+        )
+        await self.notifier.opened(request, self.link(request))
+        await self._save_notifier_ref(request)
         return request
 
     async def _save_notifier_ref(self, request: CredentialRequest) -> None:
@@ -449,6 +548,8 @@ class CredentialBroker:
     ) -> str | None:
         """Point the API at an existing secret, validate it, and resolve."""
         request = await self._require_pending(request_id)
+        if request.purpose == "write":
+            return "A write credential is added by pasting it."
         if is_reserved_secret(existing_ref) or existing_ref not in await self.offerable_secrets():
             return f"No secret named {existing_ref!r} exists."
         entry = self.registry.get(request.api)
@@ -472,6 +573,12 @@ class CredentialBroker:
 
     async def deny(self, request_id: str, approver: str) -> None:
         request = await self._require_pending(request_id)
+        if request.purpose == "write":
+            # Only the write credential is refused; reads carry on as before.
+            await self._close(
+                request, RequestState.DENIED, approver, "write credential denied by approver"
+            )
+            return
         await self.registry.set_status(request.api, EntryStatus.BLOCKED)
         await self._close(request, RequestState.DENIED, approver, "access denied by approver")
 
@@ -480,7 +587,7 @@ class CredentialBroker:
     ) -> str | None:
         entry = self.registry.get(request.api)
         if entry is not None and self.validator is not None:
-            problem = await self.validator(entry)
+            problem = await self.validator(entry, request)
             if problem is not None:
                 return f"The credential was saved but did not work: {problem}"
         validated = (
@@ -494,7 +601,7 @@ class CredentialBroker:
             approver,
             f"{note}; " + ("tested OK" if validated else "not tested (no validation operation)"),
         )
-        if self.after_fulfilled is not None:
+        if self.after_fulfilled is not None and request.purpose == "read":
             task = asyncio.create_task(self.after_fulfilled(request.api))
             self._background.add(task)
             task.add_done_callback(self._background.discard)

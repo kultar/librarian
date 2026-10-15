@@ -295,6 +295,28 @@ async def extract_from_knowledge(
     return output
 
 
+WRITE_CREDENTIAL_INSTRUCTIONS = """\
+You know well-known HTTP APIs. A person is about to create a credential for the API named
+below that will be used ONLY for the write operations listed, each approved by a human.
+Say where they create it (credential_url), the minimal scopes or permissions those write
+operations need and nothing more (scopes), and one sentence of instructions
+(credential_instructions), preferring fine-grained tokens limited to the resources
+involved. Leave operations empty; set auth to what the API uses.
+"""
+
+
+async def extract_write_guidance(
+    extractor: Agent[None, Any], *, base_url: str, api_name: str, operations: list[str]
+) -> ExtractedApi:
+    """Credential guidance for a write key: the least permission for these operations
+    (`operations` are lines like "POST /repos/{owner}/{repo}/issues: Create an issue")."""
+    listed = "\n".join(f"- {line}" for line in operations[:20])
+    prompt = f"API: {api_name}\nBase URL: {base_url}\nWrite operations:\n{listed}"
+    result = await extractor.run(prompt, instructions=WRITE_CREDENTIAL_INSTRUCTIONS)
+    output: ExtractedApi = result.output
+    return output
+
+
 @dataclass
 class Learned:
     entry: ApiEntry

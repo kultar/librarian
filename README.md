@@ -20,7 +20,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.15)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
+> Status: **alpha (v0.16)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
 ## Why
 
@@ -69,7 +69,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.15.0
+docker pull ghcr.io/kultar/librarian:0.16.0
 ```
 
 ### What happens on a request
@@ -84,6 +84,8 @@ docker pull ghcr.io/kultar/librarian:0.15.0
    behind the agent gets the link instead, signs in to the provider once, and every later
    request for them carries their own token.
 4. Writes wait for a person's approval every time, unless a narrow, expiring grant covers them.
+   A write nobody has enabled yet is not refused silently: approvers are asked to enable it,
+   from Slack or the console.
 
 Nothing is set up per API in advance: the registry fills itself as agents need things.
 
@@ -394,11 +396,24 @@ without sign-in on a laptop, `off` disables it.
 
 Reads are the default; writes are opt-in at every level:
 
-1. A reviewer marks the operation `writable: true` on a **verified** entry and sets a separate
-   write credential (`write_auth`). The approver adding a key can also tick *"allow approved
-   writes with this key"*.
+1. An approver enables the operation on a **verified** entry (it lands in the entry's review
+   as `writable: true`) and the entry has a separate write credential (`write_auth`). The
+   approver adding a read key can also tick *"allow approved writes with this key"*.
 2. The agent is allowed to request writes on that API (`write_apis` in its caller config).
 3. Each write is **approved by a human** for that exact request, or matches a **grant**.
+
+**Writes nobody has enabled yet.** When an agent asks to write through an operation that is not
+enabled, or on an API with no write credential, the refusal is not silent. librarian opens one
+*enable-write request* per operation (shared by every agent and replica that asks), tells the
+approvers (a Slack card, and the console's waiting list) and answers the agent with
+`write_not_enabled` (MCP) or a rejection saying approvers were asked (A2A). An approver follows
+the link and **enables** or **declines**. Enable carries the change into the entry's review
+proposal, for the usual approve or deny; if the API has no write credential, the approver chooses
+a dedicated `<api>/write` credential (asked for through the secure key page, with the least
+permission those writes need, inferred by the model when one is configured) or reuses the read
+key. Decline keeps the operation refused and quiet for a week. The console's API page also offers
+*Enable writes* on any write operation that is not enabled, without waiting for an agent to ask.
+Nobody edits YAML.
 
 The approval card (Slack) shows the operation, arguments and full body. On the approval page the
 approver can **approve once**, **approve and allow similar writes** (a grant for that agent and
@@ -540,6 +555,10 @@ uv run pytest
   in the database too, with an Activity page in the console: the last seven days in numbers
   (reads, writes, denials, requests answered without a model), the busiest APIs, recent
   events per API
+- **v0.16**: writes nobody has enabled yet become requests: the agent is told approvers were
+  asked, approvers get a Slack card and a console to-do with Enable or Decline, Enable lands in
+  the entry's review and asks for a dedicated write credential when there is none, declines
+  stay quiet for a week, and the console enables any write operation on demand
 
 ### Next
 

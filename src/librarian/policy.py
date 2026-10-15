@@ -32,10 +32,21 @@ class Decision:
     reason: str
     entry: ApiEntry | None = None
     operation: Operation | None = None
+    # A refused write that approvers could enable (the operation is not writable, or the
+    # entry has no write credential): the service turns it into a request instead of a
+    # bare denial.
+    askable: bool = False
 
     @classmethod
-    def deny(cls, reason: str) -> Decision:
-        return cls(False, reason)
+    def deny(
+        cls,
+        reason: str,
+        *,
+        askable: bool = False,
+        entry: ApiEntry | None = None,
+        operation: Operation | None = None,
+    ) -> Decision:
+        return cls(False, reason, entry, operation, askable)
 
 
 class RateLimiter:
@@ -184,13 +195,23 @@ class PolicyEngine:
         op = entry.operation(request.operation)
         if op is None:
             return Decision.deny(f"unknown operation {request.operation!r} on {entry.id!r}")
-        if op.access is not Access.WRITE or not op.writable:
-            return Decision.deny(f"operation {op.id!r} is not enabled for writes")
+        if not op.writable:
+            return Decision.deny(
+                f"operation {op.id!r} is not enabled for writes",
+                askable=op.access is not Access.READ,
+                entry=entry,
+                operation=op,
+            )
         suspended = self.observations.suspended(entry, op)
         if suspended:
             return Decision.deny(f"operation {op.id!r} is suspended until reviewed: {suspended}")
         if entry.write_auth is None:
-            return Decision.deny(f"API {entry.id!r} has no write credential configured")
+            return Decision.deny(
+                f"API {entry.id!r} has no write credential configured",
+                askable=True,
+                entry=entry,
+                operation=op,
+            )
         if request.body is not None and not op.accepts_body:
             return Decision.deny(f"operation {op.id!r} does not accept a request body")
         problem = _check_args(op, request.args)
