@@ -38,7 +38,7 @@
 <div class="wrap hero">
   <div>
     <h1>One librarian for every API your agents&nbsp;use.</h1>
-    <p class="lede">Agents ask librarian for data instead of carrying their own API keys. It learns an API the first time one is needed, asks a person for the key once, serves reads within policy, and holds every write until a person approves it.</p>
+    <p class="lede">Agents ask librarian for data instead of carrying their own API keys. It learns an API the first time one is needed, asks a person for the key once, serves reads within policy, and holds every write for a person's approval unless an approver decided in advance.</p>
     <div class="install"><pre><code>pip install librarian-a2a
 docker pull ghcr.io/kultar/librarian:0.18.0</code></pre></div>
     <div class="actions">
@@ -95,7 +95,7 @@ docker pull ghcr.io/kultar/librarian:0.18.0</code></pre></div>
       <li><div><h3>An agent asks for data from an API librarian doesn't know yet</h3><p>Over A2A or MCP, through a gateway such as LiteLLM or directly. The agent names the API and what it wants; it never names a host, so it can't point librarian anywhere else.</p></div></li>
       <li><div><h3>librarian learns the API</h3><p>From its OpenAPI spec, else its documentation (found by itself if needed, with every extracted operation quote-checked against the page), else the model's own knowledge. Reads work at once; a pull request is opened on your registry repo so a person can review the entry.</p></div></li>
       <li><div><h3>If the API needs a key, a person is asked once</h3><p>The agent's task waits and approvers get a Slack card. Someone follows the one-time link, signs in and pastes the key. It goes straight to your secret store, never through Slack, an agent or a model, and the task carries on by itself. When the API needs the person's own sign-in instead, the person behind the agent gets the link, signs in to the provider once, and every later request for them carries their own token.</p></div></li>
-      <li><div><h3>Writes wait for a person's approval, every time</h3><p>The approval page shows exactly what will be sent: method, path, arguments and body. Approve once, or allow similar writes with a narrow, expiring grant. DELETEs can only ever be approved one at a time.</p></div></li>
+      <li><div><h3>Writes wait for a person's approval</h3><p>The approval page shows exactly what will be sent: method, path, arguments and body. Approve once, allow similar writes with a narrow, expiring grant, or decide once that an operation's writes are approved automatically, up to a daily cap and with one click back. DELETEs can only ever be approved one at a time. A write nobody has enabled yet is not refused silently: approvers get a card, enable the whole flow, and their decision is merged into the registry at once.</p></div></li>
     </ol>
   </div>
 </section>
@@ -106,7 +106,7 @@ docker pull ghcr.io/kultar/librarian:0.18.0</code></pre></div>
     <p>Three kinds of access, chosen per API, and none of them ever in an agent's hands.</p>
     <dl class="rules">
       <div><dt>A shared read-only key</dt><dd>Added once by an approver on a one-time page, straight into your secret store. Every agent's reads use it, within policy. Agents, logs and the model only see a reference like <code>jira/readonly</code>.</dd></div>
-      <div><dt>A separate write credential</dt><dd>Reviewed into the entry, and used only after a person approves that exact write, or a narrow, expiring grant covers it. DELETE is never granted.</dd></div>
+      <div><dt>A separate write credential</dt><dd>Reviewed into the entry, and used only after a person approves that exact write, a narrow, expiring grant covers it, or an approver chose automatic approval for that operation, capped per day. DELETE is never granted or automatic.</dd></div>
       <div><dt>The person's own sign-in</dt><dd>For APIs where what you see depends on who you are: librarian is the OAuth client, each person signs in once in their browser, and every request their agents make for them carries their own token, so the API enforces their access. Tokens are stored per person, refreshed by librarian, never shown to agents, and a request for one person can never go out with another's token. People see and drop their own sign-ins in the console.</dd></div>
     </dl>
   </div>
@@ -120,6 +120,7 @@ docker pull ghcr.io/kultar/librarian:0.18.0</code></pre></div>
       <figure><img src="assets/screens/console-overview.png" alt="The console overview with tiles and the waiting list" loading="lazy"><figcaption>The console: what librarian knows, and what waits on a person.</figcaption></figure>
       <figure><img src="assets/screens/console-api.png" alt="An API page with search, needs-attention operations and groups by tag" loading="lazy"><figcaption>A large API: search, the operations needing a decision first, then groups by tag.</figcaption></figure>
       <figure><img src="assets/screens/console-activity.png" alt="The Activity page: seven-day numbers, the busiest APIs and recent events" loading="lazy"><figcaption>Activity: what agents did through librarian, and what it cost.</figcaption></figure>
+      <figure><img src="assets/screens/enable-flow.png" alt="The enable page for a write flow: operations with ticks, the approval choice, the write credential choice" loading="lazy"><figcaption>An agent wanted a write nobody had enabled: enable the whole flow, choose how writes are approved and where the write credential comes from.</figcaption></figure>
       <figure><img src="assets/screens/review.png" alt="The review page for a learned API" loading="lazy"><figcaption>Approving a learned API from the Slack card: decide the open operations, then merge as the App.</figcaption></figure>
       <figure><img src="assets/screens/approve-write.png" alt="A write approval page" loading="lazy"><figcaption>Approving one write: method, path, arguments and body, nothing hidden.</figcaption></figure>
     </div>
@@ -131,7 +132,7 @@ docker pull ghcr.io/kultar/librarian:0.18.0</code></pre></div>
     <h2>What your agents save</h2>
     <p>librarian removes the overhead around an API call: tool bloat, rediscovery, oversized payloads, and the keys every agent would otherwise carry. It does not shrink an agent's own reasoning, and says so.</p>
     <dl class="rules">
-      <div><dt>Six tools instead of hundreds</dt><dd>An agent with direct access carries an API's tool definitions in its context on every request; GitHub's spec alone has 644 operations. Through librarian an agent sees six tools and asks for the handful it needs.</dd></div>
+      <div><dt>Six tools instead of hundreds</dt><dd>An agent with direct access carries an API's tool definitions in its context on every request; GitHub's spec alone has 1,242 operations. Through librarian an agent sees six tools and asks for the handful it needs.</dd></div>
       <div><dt>Learning is paid once</dt><dd>Reading documentation, searching for it and extracting operations is the expensive model work. It runs once per API, with a model you choose for it, then serves every agent.</dd></div>
       <div><dt>Most calls use no model at all</dt><dd>Running a known operation is plain code: policy check, HTTP call, provenance. A plain-language request costs one planner call, and a successful plan becomes a recipe replayed without the model.</dd></div>
       <div><dt>Smaller answers</dt><dd>Field selection and a response-size cap return what the agent asked for, not a whole payload into its context. Pagination is handled on librarian's side.</dd></div>
@@ -198,14 +199,14 @@ mcp_servers:
 <section id="skills">
   <div class="wrap">
     <h2>What agents can ask for</h2>
-    <p>The same five skills over A2A and as MCP tools. Only <code>fetch</code> uses a model; everything else is plain code.</p>
+    <p>The same five skills over A2A and as MCP tools (plus <code>write_status</code> and <code>enable_status</code> over MCP, where nothing waits on a person). Only <code>fetch</code> uses a model; everything else is plain code.</p>
     <table>
       <thead><tr><th>Skill</th><th>What it does</th></tr></thead>
       <tbody>
         <tr><td><code>capabilities</code></td><td>Which APIs and read operations this agent may use.</td></tr>
         <tr><td><code>execute</code></td><td>Run one read operation, with optional field selection and pagination.</td></tr>
         <tr><td><code>onboard</code></td><td>Teach librarian an API: a spec URL, a docs URL, or just a base URL.</td></tr>
-        <tr><td><code>write</code></td><td>Change data, after a person approves it or a grant covers it.</td></tr>
+        <tr><td><code>write</code></td><td>Change data, after a person approves it, a grant covers it, or an approver chose automatic approval for that operation. If nobody has enabled the operation yet, approvers are asked.</td></tr>
         <tr><td><code>fetch</code></td><td>Plain language ("open bugs assigned to the payments team"), planned by a model and executed by the policy engine.</td></tr>
       </tbody>
     </table>
@@ -248,6 +249,7 @@ mcp_servers:
         <li>Automatic approval per operation with a daily cap and a one-click way back, and a Change control on every operation in the console</li>
       </ul></div>
       <div><h3>Next</h3><ul>
+        <li>Console actions that answer at once, with the proposal, model guidance and Slack updates finishing in the background</li>
         <li>Verifying the SearXNG and Brave documentation search, and Google and Microsoft sign-in, live</li>
       </ul></div>
       <div><h3>Later</h3><ul>

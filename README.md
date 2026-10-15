@@ -40,9 +40,9 @@ credential out.
 
 ### What your agents save
 
-- **Six tools instead of hundreds.** An agent with direct access to an API carries that API's
-  tool definitions in its context on every request (GitHub's spec has 644 operations). Through
-  librarian an agent sees six tools and asks `capabilities` for the handful it needs.
+- **Seven tools instead of hundreds.** An agent with direct access to an API carries that API's
+  tool definitions in its context on every request (GitHub's spec has 1,242 operations). Through
+  librarian an agent sees seven tools and asks `capabilities` for the handful it needs.
 - **Learning is paid once.** Reading an API's documentation, searching for it and extracting its
   operations is the expensive model work. It runs once per API, with a model of your choice
   (`learning.model`), then serves every agent.
@@ -83,9 +83,10 @@ docker pull ghcr.io/kultar/librarian:0.18.0
    carries on by itself. If the API needs the *person's own* sign-in (OAuth), the person
    behind the agent gets the link instead, signs in to the provider once, and every later
    request for them carries their own token.
-4. Writes wait for a person's approval every time, unless a narrow, expiring grant covers them.
+4. Writes wait for a person's approval every time, unless a narrow, expiring grant covers them
+   or an approver chose automatic approval for that operation (capped per day, never DELETE).
    A write nobody has enabled yet is not refused silently: approvers are asked to enable it,
-   from Slack or the console.
+   from Slack or the console, and their decision is merged into the registry at once.
 
 Nothing is set up per API in advance: the registry fills itself as agents need things.
 
@@ -100,8 +101,10 @@ Nothing is set up per API in advance: the registry fills itself as agents need t
 | `fetch` | Plain language: *"open bugs assigned to the payments team"* (only when a model is configured) | Yes |
 
 The same skills are available as **MCP tools** at `/mcp` (Streamable HTTP, same caller keys):
-`capabilities`, `execute`, `fetch`, `write`, `write_status`, `onboard`. MCP calls never wait on a
-human: writes return `pending_approval` and librarian finishes them once approved. librarian
+`capabilities`, `execute`, `fetch`, `write`, `write_status`, `enable_status`, `onboard`. MCP calls
+never wait on a human: writes return `pending_approval` and librarian finishes them once
+approved, or `write_not_enabled` when nobody has enabled that operation yet (approvers are
+asked; `enable_status` says where the request stands). librarian
 works behind the **LiteLLM** gateway as both an MCP server and an A2A agent
 ([docs/integrations.md](docs/integrations.md#litellm-agent-gateway)).
 
@@ -158,6 +161,12 @@ Postgres (`database_url: postgresql+asyncpg://...`, the `postgres` extra; in the
 through the others at once, and pods need no volume. Set `replicas` (the Helm chart does) and
 librarian refuses to start with per-replica state. Rate limits are counted in the database
 too, so every replica enforces the same limit together.
+
+**Writes and plain-language requests.** `fetch_timeout_seconds` (100) stops a plain-language
+request and returns what it has, marked partial, before the caller's own timeout;
+`max_calls_per_fetch` (8) caps its API calls. `publish.merge_console_decisions` (true) merges a
+decision made in the console or on an enable page as the App at once; off, a person merges on
+GitHub.
 
 **Caller authentication.** List agents and the secret holding each one's key:
 
@@ -363,6 +372,11 @@ No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 <em>Activity: what agents did, and what it cost.</em>
 </p>
 
+<p align="center">
+<img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/enable-flow.png" alt="The enable page for a write flow: the five operations an agent asked for with ticks, the approval choice (each write, or automatic with a daily cap), the write credential choice, Enable, and Decline" width="760"><br>
+<em>An agent wanted a write nobody had enabled: the approver enables the whole flow, chooses how writes are approved and where the write credential comes from.</em>
+</p>
+
 <table align="center"><tr>
 <td><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/review.png" alt="The review page for a learned API: the proposal, operations that need a decision, approve and merge, or deny" width="380"></td>
 <td><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/approve-write.png" alt="A write approval page: method, path, arguments and body, approve once, allow similar, or deny" width="300"></td>
@@ -375,7 +389,7 @@ No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 
 The pages listener's root (`/`) is a console for the people who run librarian, with pages for
 the overview, the APIs (status, host, operations and where they were learned from), what is
-waiting on a person (keys to add, writes to approve, proposals to review, sign-ins), the
+waiting on a person (keys to add, writes to approve or enable, proposals to review, sign-ins), the
 standing grants, the people signed in to per-person APIs, each person's own sign-ins, and
 **activity**: what agents did in the last seven days (reads, writes, denials, plain-language
 requests answered from a recipe versus by the model, bytes fetched), the busiest APIs, and the
@@ -384,9 +398,13 @@ recent events for the whole deployment or one API. Activity needs the database; 
 *references* only, never values. From there a signed-in approver can **revoke a grant**,
 **block** or **unblock** an API, **forget** a learned one (its open review is closed as the App, and whatever waited on a
 person for it is cancelled), **invalidate a credential** (the next call asks for a fresh key), **re-learn** a provisional API from a documentation or spec URL you
-give it, **choose its authentication** when the spec and the model couldn't tell, **decide operations
-that need review** (read, write or exclude; carried into the open review), **re-check**
-its source, and **clear a suspension**. Large APIs are shown by group (the spec's tags), with the
+give it, **choose its authentication** when the spec and the model couldn't tell, **change any
+operation's decision** (read, write approved each time, write approved automatically with a daily
+cap, or exclude; enabling writes asks for a write credential when the entry has none),
+**allow slashes** in path arguments that are file paths or refs, **re-apply** enabled writes a
+proposal lost, **re-check** its source, and **clear a suspension**. A decision on a verified
+entry lands in the entry's proposal and is merged as the App at once; the live entry follows
+when the registry syncs. Large APIs are shown by group (the spec's tags), with the
 operations that need attention first and a search box. Every action is recorded in the
 audit log with who did it. The console follows the approval pages' sign-in
 (`approvers.mode: trusted_header` behind your auth proxy); `approvers.console: open` serves it
@@ -603,6 +621,8 @@ uv run pytest
 
 ### Next
 
+- Console actions answer at once; the proposal, the model's credential guidance and the Slack
+  updates finish in the background, with the outcome shown on the API page
 - Verify the SearXNG and Brave documentation-search providers and the Google and Microsoft
   sign-in providers live
 
