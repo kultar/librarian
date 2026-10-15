@@ -6,7 +6,7 @@ page is the chart reference.
 
 ```bash
 # from the published chart (same version as the image; every release pushes it)
-helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.17.0 \
+helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.17.1 \
   -n librarian --create-namespace --set publicUrl=https://librarian.example.com
 # or from a checkout
 helm install librarian ./deploy/helm/librarian -n librarian --create-namespace \
@@ -40,6 +40,7 @@ people ──HTTPS──► │ oauth2-proxy :4180 ──► 127.0.0.1:8081     
 | Reviewed registry | `registry.gitSync.enabled=true`, `registry.gitSync.repo`, `.path` |
 | The console at the pages host's root | on by default for signed-in approvers (`config.approvers.console`: `signed_in`, `open`, `off`) |
 | Registry repo access (GitHub App) | `githubApp.enabled=true`, `githubApp.appId`, `githubApp.installationId`, `githubApp.secretName` (see below) |
+| Probes | `probes.startup` (default: 10 s period, 60 failures, so a large registry can finish parsing before liveness applies), `probes.readiness`, `probes.liveness`; each takes Kubernetes probe fields |
 | Caller keys | `config.callers` + caller keys as `LIBRARIAN_SECRET_LIBRARIAN_CALLERS_<AGENT>` via `envFrom` |
 | Secrets in AWS | `config.secrets_backend: aws`, `serviceAccount.annotations` (IRSA role) |
 | Several replicas | `replicaCount>1`, `persistence.enabled=false`, Postgres (`LIBRARIAN_DATABASE_URL`), `config.secrets_backend: aws` |

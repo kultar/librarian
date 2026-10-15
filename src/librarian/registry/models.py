@@ -109,7 +109,8 @@ class Parameter(StrictModel):
     description: str = Field(default="", max_length=2000)
     # Path parameters only: the value may contain "/" (a file path, a git ref). Its
     # segments are still checked: none empty, "." or "..", and no leading or trailing "/".
-    allow_slash: bool = False
+    # Omitted from dumps when false, so entries written here still load on older versions.
+    allow_slash: bool = Field(default=False, exclude_if=lambda value: value is False)
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 

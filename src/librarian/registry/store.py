@@ -110,6 +110,7 @@ class Registry:
 
     def load(self) -> None:
         errors: dict[str, str] = {}
+        log.info("loading the registry from %s", self.directory)
         entries = self._load_dir(self.directory, errors, "")
         if self.overlay is not None:
             for api_id, local in self._load_dir(self.overlay, errors, "overlay/").items():
@@ -283,8 +284,15 @@ def _score(terms: set[str], entry: ApiEntry) -> float:
     return score
 
 
+def load_yaml(text: str) -> Any:
+    """Parse YAML safely with libyaml when the wheel has it: PyYAML's pure-Python
+    parser takes seconds per megabyte, and a large API's entry is a megabyte."""
+    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    return yaml.load(text, Loader=loader)  # noqa: S506 - a safe loader either way
+
+
 def load_entry(path: Path) -> ApiEntry:
-    data: Any = yaml.safe_load(path.read_text("utf-8"))
+    data: Any = load_yaml(path.read_text("utf-8"))
     if not isinstance(data, dict):
         raise RegistryError(f"{path.name}: expected a mapping at the top level")
     entry = ApiEntry.model_validate(data)

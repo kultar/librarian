@@ -69,7 +69,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.17.0
+docker pull ghcr.io/kultar/librarian:0.17.1
 ```
 
 ### What happens on a request
@@ -573,6 +573,10 @@ uv run pytest
   for a whole flow (`also_needs`) with ticks on the page, `enable_status` for agents, a
   wall-clock budget for plain-language requests (`fetch_timeout_seconds`, partial results
   instead of outliving the caller) and a hard cap on the planner's calls
+- **v0.17.1**: startup with a large registry: registry files are parsed with libyaml (5x
+  faster; a 1 MB GitHub entry took seconds on a throttled core and the liveness probe killed
+  the pod), the chart adds a startup probe and `probes` overrides, and `allow_slash` is
+  omitted when false so entries written by 0.17 still load on 0.16 replicas
 
 ### Next
 

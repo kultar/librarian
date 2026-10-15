@@ -20,7 +20,7 @@ import httpx
 import yaml
 
 from librarian.registry.models import Access, ApiEntry, EntryStatus
-from librarian.registry.store import dump_entry
+from librarian.registry.store import dump_entry, load_yaml
 
 log = logging.getLogger(__name__)
 
@@ -254,7 +254,7 @@ def as_approved(entry: ApiEntry) -> ApiEntry:
 def _is_verified(content: dict[str, Any]) -> bool:
     try:
         text = base64.b64decode(str(content.get("content", ""))).decode("utf-8")
-        data: Any = yaml.safe_load(text)
+        data: Any = load_yaml(text)
     except (ValueError, yaml.YAMLError):
         return False
     return isinstance(data, dict) and cast(dict[str, Any], data).get("status") == "verified"

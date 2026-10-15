@@ -138,6 +138,15 @@ securityContext:
   readOnlyRootFilesystem: true
   capabilities:
     drop: [ALL]
+# Startup parses the whole registry before the server binds; a large API's entry
+# (GitHub: 1,242 operations, 1 MB) takes seconds, more on a throttled core. The startup
+# probe allows up to 10 minutes before liveness applies. Each key takes Kubernetes
+# probe fields; set `startup: null` to drop the startup probe.
+probes:
+  startup: {periodSeconds: 10, failureThreshold: 60}
+  readiness: {periodSeconds: 10}
+  liveness: {periodSeconds: 20, failureThreshold: 3}
+
 resources:
   requests:
     cpu: 100m

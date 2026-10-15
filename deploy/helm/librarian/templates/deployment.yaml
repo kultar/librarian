@@ -101,13 +101,17 @@ spec:
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- with .Values.probes.startup }}
+          startupProbe:
+            httpGet: {path: /healthz, port: a2a}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           readinessProbe:
             httpGet: {path: /healthz, port: a2a}
-            periodSeconds: 10
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
           livenessProbe:
             httpGet: {path: /healthz, port: a2a}
-            initialDelaySeconds: 15
-            periodSeconds: 20
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:

@@ -206,3 +206,14 @@ async def test_console_allows_slashes_in_path_like_parameters(
         CallRequest(api="files2", operation="getRef", args={"repo": "r", "ref": "heads/main"}), A
     )
     assert decision.allowed, decision.reason
+
+
+def test_allow_slash_is_omitted_when_false_so_older_replicas_still_load_entries() -> None:
+    from librarian.registry.store import dump_entry, load_yaml
+
+    entry = ApiEntry.model_validate(FILES)
+    text = dump_entry(entry)
+    assert text.count("allow_slash") == 1 and "allow_slash: true" in text
+    assert "allow_slash" not in entry.operation("getRef").model_dump_json()  # type: ignore[union-attr]
+    again = ApiEntry.model_validate(load_yaml(text))
+    assert again == entry
