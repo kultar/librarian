@@ -793,9 +793,20 @@ class Librarian:
                         detail=f"auto-approved ({used} of {op.auto_limit_per_day} today)",
                     )
                 )
-                await self.notifier.auto_write_used(
-                    notice, used, op.auto_limit_per_day, self.auto_link(entry.id, op.id)
-                )
+                link = self.auto_link(entry.id, op.id)
+                if self.settings.writes.announce_auto:
+                    await self.notifier.auto_write_used(notice, used, op.auto_limit_per_day, link)
+                else:
+                    log.info(
+                        "auto-approved write by %s: %s.%s (%d of %d today); require approval "
+                        "again at %s",
+                        caller.agent,
+                        entry.id,
+                        op.id,
+                        used,
+                        op.auto_limit_per_day,
+                        link,
+                    )
                 return WriteOutcome(result, "auto")
             await self.audit.record(
                 AuditEvent(

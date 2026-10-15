@@ -69,7 +69,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.18.0
+docker pull ghcr.io/kultar/librarian:0.18.1
 ```
 
 ### What happens on a request
@@ -445,8 +445,10 @@ date). Nobody edits YAML.
 from then on a write to that operation runs right after the policy checks, with no card, up to a
 daily cap (default 100; then a person is asked again). It is recorded on the operation
 (`approval: auto`, `auto_limit_per_day`), goes through the same proposal and merge, is audited as
-`write_auto`, and every such write is posted to the channel as an FYI with a *Require approval
-again* link: one click puts per-write approval back. DELETE operations are never approved
+`write_auto` (the console's Activity page lists them) and logged; `writes.announce_auto: true`
+also posts each one to the channel as an FYI with a *Require approval again* link (off by
+default: it gets noisy). The same link is on the console's API page, where the *Change* control
+puts per-write approval back. DELETE operations are never approved
 automatically, the write rate limit still applies, and a suspended operation is refused as
 always. The *Change* control also flips any decided operation: read, write, automatic or exclude.
 
@@ -615,9 +617,12 @@ uv run pytest
   page is merged as the App at once (`publish.merge_console_decisions`, default on); the
   console's API page offers *Re-apply and merge* for enabled writes a proposal lost
 - **v0.18**: automatic approval per operation, chosen when writes are enabled or later in the
-  console: writes run without a person up to a daily cap, each one posted as an FYI with a
-  one-click *Require approval again*; never for DELETE. Every operation on the console's API
-  page gets a *Change* control (read, write, automatic, exclude) instead of only undecided ones
+  console: writes run without a person up to a daily cap, each one audited and, if you turn it
+  on, posted as an FYI with a one-click *Require approval again*; never for DELETE. Every
+  operation on the console's API page gets a *Change* control (read, write, automatic, exclude)
+  instead of only undecided ones
+- **v0.18.1**: the per-write FYI is off by default (`writes.announce_auto`); automatic writes
+  are always in the audit log and the server log
 
 ### Next
 

@@ -75,13 +75,16 @@ async def test_automatic_writes_run_without_a_person_and_are_announced(
     assert librarian.approvals.pending() == []  # no card, nothing to decide
     sent = [r for r in router.requests if r.method == "POST"]
     assert len(sent) == 1 and sent[0].headers["authorization"] == "Bearer write-key"
-    kind, (notice, used, cap, link) = notifier.write_events[-1]
-    assert kind == "auto" and used == 1 and cap == 100
-    assert isinstance(notice, WriteApproval) and notice.agent == "notes-bot"
-    assert link.startswith("https://librarian.example.test/auto/tracker/addComment?t=")
+    assert notifier.write_events == []  # off by default: the audit log has it, the channel not
     events = [ev.event for ev in audit.events]
     assert events[-2:] == ["write", "write_auto"]
     assert audit.events[-1].detail == "auto-approved (1 of 100 today)"
+    librarian.settings.writes.announce_auto = True
+    await librarian.write(comment(reason="ack"), KIM)
+    kind, (notice, used, cap, link) = notifier.write_events[-1]
+    assert kind == "auto" and used == 2 and cap == 100
+    assert isinstance(notice, WriteApproval) and notice.agent == "notes-bot"
+    assert link.startswith("https://librarian.example.test/auto/tracker/addComment?t=")
     # the same policy checks still apply: a caller that may not write is refused
     with pytest.raises(PolicyDenied, match="may not write"):
         await librarian.write(comment(), KIM.model_copy(update={"write_apis": ()}))
@@ -111,6 +114,7 @@ async def test_the_fyi_link_puts_approval_back_with_one_click(
     librarian: Librarian, notifier: RecordingNotifier
 ) -> None:
     await make_auto(librarian)
+    librarian.settings.writes.announce_auto = True
     pub = HeadPublisher()
     librarian.publisher = pub
     await librarian.write(comment(), KIM)

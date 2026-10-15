@@ -142,6 +142,10 @@ class WriteSettings(BaseModel):
     approval_expire_hours: float = 24
     rate_limit_per_minute: int = 10
     grants: list[GrantSettings] = Field(default_factory=list[GrantSettings])
+    # Post every automatically approved write to the channel (with the one-click way
+    # back). Off by default: it gets noisy fast. Each one is always in the audit log
+    # (`write_auto`) and the server log, and the console's Activity page shows them.
+    announce_auto: bool = False
 
 
 class SearchSettings(BaseModel):

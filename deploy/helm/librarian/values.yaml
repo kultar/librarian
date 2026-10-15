@@ -28,6 +28,7 @@ config:
     type: log
   writes:
     approvers: requester_or_group
+    # announce_auto: true   # post each automatically approved write to the channel (noisy)
   callers: []
 
 # Extra environment, e.g. secrets as LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN,

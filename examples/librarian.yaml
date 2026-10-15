@@ -68,6 +68,7 @@ writes:
   approvers: requester_or_group        # requester | group | requester_or_group
   approval_expire_hours: 24
   rate_limit_per_minute: 10
+  announce_auto: false                 # post each automatically approved write to Slack (noisy)
   grants: []
 #    - agent: triage-bot
 #      api: jira

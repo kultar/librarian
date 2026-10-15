@@ -20,7 +20,7 @@ agents:
       name: librarian
       description: Central API librarian (reads within policy, writes with human approval)
       url: http://librarian:8080/
-      version: 0.18.0
+      version: 0.18.1
       protocolVersion: "1.0"
       capabilities: {streaming: true}
       defaultInputModes: [application/json, text/plain]
