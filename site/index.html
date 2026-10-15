@@ -132,7 +132,7 @@ docker pull ghcr.io/kultar/librarian:0.18.0</code></pre></div>
     <h2>What your agents save</h2>
     <p>librarian removes the overhead around an API call: tool bloat, rediscovery, oversized payloads, and the keys every agent would otherwise carry. It does not shrink an agent's own reasoning, and says so.</p>
     <dl class="rules">
-      <div><dt>Six tools instead of hundreds</dt><dd>An agent with direct access carries an API's tool definitions in its context on every request; GitHub's spec alone has 1,242 operations. Through librarian an agent sees six tools and asks for the handful it needs.</dd></div>
+      <div><dt>Seven tools instead of hundreds</dt><dd>An agent with direct access carries an API's tool definitions in its context on every request; GitHub's spec alone has 1,242 operations. Through librarian an agent sees seven tools and asks for the handful it needs.</dd></div>
       <div><dt>Learning is paid once</dt><dd>Reading documentation, searching for it and extracting operations is the expensive model work. It runs once per API, with a model you choose for it, then serves every agent.</dd></div>
       <div><dt>Most calls use no model at all</dt><dd>Running a known operation is plain code: policy check, HTTP call, provenance. A plain-language request costs one planner call, and a successful plan becomes a recipe replayed without the model.</dd></div>
       <div><dt>Smaller answers</dt><dd>Field selection and a response-size cap return what the agent asked for, not a whole payload into its context. Pagination is handled on librarian's side.</dd></div>
