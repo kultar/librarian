@@ -9,7 +9,9 @@ results (with provenance) are returned to the caller separately.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -66,6 +68,9 @@ class PlannerDeps:
     # Writes the model suggested. Never executed by the planner: the calling agent
     # decides whether to submit them via the `write` skill (which needs approval).
     proposed_writes: list[WriteRequest] = field(default_factory=list[WriteRequest])
+    # Hard cap on distinct API calls in one fetch; past it, call_api answers with a
+    # notice and the model has to answer from what it has.
+    max_calls: int = 8
 
 
 @dataclass
@@ -75,6 +80,8 @@ class FetchOutcome:
     proposed_writes: list[WriteRequest] = field(default_factory=list[WriteRequest])
     requests: list[CallRequest] = field(default_factory=list[CallRequest])
     recipe: str | None = None  # set when answered from a saved recipe (no LLM)
+    # The time budget ran out before the model answered: `results` are what it had.
+    partial: bool = False
 
 
 OutputMode = Literal["tool", "native", "prompted"]
@@ -165,6 +172,7 @@ def build_agent(
                             "required": p.required,
                             "type": p.type,
                             "description": p.description[:150],
+                            **({"may_contain_slashes": True} if p.allow_slash else {}),
                         }
                         for p in op.parameters
                     ],
@@ -208,6 +216,14 @@ def build_agent(
         key = request.model_dump_json()
         result = ctx.deps.cache.get(key)
         if result is None:
+            if len(ctx.deps.results) >= ctx.deps.max_calls:
+                return json.dumps(
+                    {
+                        "status": "budget",
+                        "error": f"the budget of {ctx.deps.max_calls} calls for this request "
+                        "is used up; no more calls will run. Answer now with what you have.",
+                    }
+                )
             try:
                 result = await ctx.deps.executor.execute(request, ctx.deps.caller)
             except PolicyDenied as exc:
@@ -271,14 +287,43 @@ class Planner:
         self.max_calls = max_calls
 
     async def fetch(
-        self, intent: str, registry: Registry, executor: Executor, caller: Caller
+        self,
+        intent: str,
+        registry: Registry,
+        executor: Executor,
+        caller: Caller,
+        budget_seconds: float | None = None,
     ) -> FetchOutcome:
-        deps = PlannerDeps(registry=registry, executor=executor, caller=caller)
-        result = await self.agent.run(
-            intent,
-            deps=deps,
-            usage_limits=UsageLimits(request_limit=self.max_calls + 4),
+        """Plan and run the calls for `intent`. With a `budget_seconds`, a fetch that
+        outlives it stops and returns what it has, marked partial, rather than running
+        past the caller's own deadline."""
+        deps = PlannerDeps(
+            registry=registry, executor=executor, caller=caller, max_calls=self.max_calls
         )
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(budget_seconds):
+                result = await self.agent.run(
+                    intent,
+                    deps=deps,
+                    usage_limits=UsageLimits(request_limit=self.max_calls + 4),
+                )
+        except TimeoutError:
+            elapsed = int(time.monotonic() - started)
+            count = len(deps.results)
+            return FetchOutcome(
+                answer=FetchAnswer(
+                    summary=(
+                        f"Stopped after {count} call(s) and {elapsed} s without a final "
+                        "answer; the results so far are attached."
+                    ),
+                    unresolved="the time budget ran out before the planner answered",
+                ),
+                results=deps.results,
+                proposed_writes=deps.proposed_writes,
+                requests=deps.requests,
+                partial=True,
+            )
         return FetchOutcome(
             answer=result.output,
             results=deps.results,

@@ -88,7 +88,11 @@ async def test_refused_write_asks_the_approvers_once(
     link = notifier.enables[0][2]
     assert link is not None and link.startswith("https://librarian.example.test/enable/")
     assert [ev.event for ev in audit.events].count("enable_write_requested") == 2
-    assert audit.events[-1].extra == {"request": asked.id, "asks": 2}
+    assert audit.events[-1].extra == {
+        "request": asked.id,
+        "asks": 2,
+        "operations": ["renameProject"],
+    }
     # declining tells the next asker no, without asking the approvers again
     done = await librarian.decline_writes(asked.id, "sam@x.test", "not for agents")
     assert done.state is EnableState.DECLINED and done.note == "not for agents"
@@ -367,3 +371,105 @@ async def test_webhook_events_for_enable_requests() -> None:
     assert received[0]["link"] == "https://lib.test/enable/x?t=1"
     assert received[0]["request"]["operation"] == "issues/create-comment"
     assert "notifier_ref" not in received[0]["request"]
+
+
+# -- several operations at once, and where a request stands ------------------------------
+
+
+async def with_flow_operations(librarian: Librarian) -> None:
+    from librarian.registry.models import Access, Operation
+
+    entry = librarian.registry.get("tracker")
+    assert entry is not None
+    extra = [
+        Operation(id="createTree", method="POST", path="/trees", access=Access.WRITE),
+        Operation(id="createCommit", method="POST", path="/commits", access=Access.WRITE),
+    ]
+    await librarian.registry.save(
+        entry.model_copy(update={"operations": [*entry.operations, *extra]})
+    )
+
+
+async def test_one_request_covers_a_whole_flow_and_reports_its_status(
+    librarian: Librarian, notifier: RecordingNotifier
+) -> None:
+    from librarian.service import LibrarianError
+
+    await with_flow_operations(librarian)
+    flow = RENAME.model_copy(
+        update={"also_needs": ["createTree", "createCommit", "getIssue", "nope"]}
+    )
+    with pytest.raises(WriteNotEnabled) as info:
+        await librarian.write(flow, KIM)
+    asked = info.value.request
+    assert asked.operations == ["renameProject", "createTree", "createCommit"]
+    assert "and 2 more on this request" in str(info.value)
+    # another agent asking for one of them joins the same request
+    with pytest.raises(WriteNotEnabled) as again:
+        await librarian.write(
+            WriteRequest(api="tracker", operation="createCommit", reason="same flow"), BOT
+        )
+    assert again.value.request.id == asked.id and asked.asks == 2
+    assert "(+2 more)" in json.dumps(enable_blocks(asked, "https://l/e"))
+    status = await librarian.enable_status(asked.id, KIM)
+    assert status["state"] == "pending" and status["operations"] == asked.operations
+    assert (await librarian.enable_status(asked.id, BOT))["state"] == "pending"
+    with pytest.raises(LibrarianError, match="for this agent"):
+        await librarian.enable_status(asked.id, Caller(agent="stranger"))
+
+    pub = ProposalPublisher()
+    librarian.publisher = pub
+    client = enable_client(librarian)
+    t = librarian.enablement.token_for(asked)
+    page = client.get(f"/enable/{asked.id}?t={t}").text
+    assert "3 operations in this flow" in page and "name=op value='createCommit'" in page
+    assert "Enable writes for 3 operations" in page
+    done = client.post(
+        f"/enable/{asked.id}",
+        data={"t": t, "action": "enable", "op": ["renameProject", "createTree"]},
+    )
+    assert done.status_code == 200 and "Writes enabled for renameProject and 1 more" in done.text
+    proposed, title = pub.entries[-1]
+    assert title == "Issue Tracker: enable writes for renameProject, createTree"
+    assert (
+        proposed.operation("renameProject").writable and proposed.operation("createTree").writable
+    )  # type: ignore[union-attr]
+    assert not proposed.operation("createCommit").writable  # type: ignore[union-attr]
+    assert "Left disabled: `createCommit`" in proposed.notes
+    assert asked.enabled == ["renameProject", "createTree"]
+    status = await librarian.enable_status(asked.id, KIM)
+    assert (
+        status["state"] == "enabled" and "waiting for the review to be merged" in status["message"]
+    )
+    assert (
+        status["review_url"] == "https://github.test/pr/update" and status["live_operations"] == []
+    )
+    # once the proposal is merged (the registry syncs), the request is live
+    await librarian.registry.save(proposed)
+    status = await librarian.enable_status(asked.id, KIM)
+    assert status["state"] == "live" and status["live_operations"] == [
+        "renameProject",
+        "createTree",
+    ]
+    # the operation left disabled can be asked for again, without being declined
+    with pytest.raises(WriteNotEnabled) as third:
+        await librarian.write(
+            WriteRequest(api="tracker", operation="createCommit", reason="now this"), KIM
+        )
+    assert third.value.request.id != asked.id and third.value.request.operations == ["createCommit"]
+
+
+async def test_declined_operations_are_left_out_of_later_flows(librarian: Librarian) -> None:
+    await with_flow_operations(librarian)
+    with pytest.raises(WriteNotEnabled) as info:
+        await librarian.write(
+            WriteRequest(api="tracker", operation="createCommit", reason="x"), KIM
+        )
+    await librarian.decline_writes(info.value.request.id, "sam@x.test", "never commits")
+    status = await librarian.enable_status(info.value.request.id, KIM)
+    assert (
+        status["state"] == "declined" and "never commits" in status["message"] and status["until"]
+    )
+    with pytest.raises(WriteNotEnabled) as again:
+        await librarian.write(RENAME.model_copy(update={"also_needs": ["createCommit"]}), KIM)
+    assert again.value.request.operations == ["renameProject"]  # the declined one is not re-asked

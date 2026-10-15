@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import secrets as pysecrets
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -88,7 +89,9 @@ from librarian.registry.models import (
     NoAuth,
     OAuth2UserAuth,
     Operation,
+    Parameter,
     ReadBasis,
+    looks_like_path,
 )
 from librarian.registry.store import Registry
 from librarian.reviews import ReviewBroker, ReviewRequest, ReviewState
@@ -157,9 +160,10 @@ class WriteNotEnabled(WriteRefused):
         missing = (
             "is not enabled for writes" if request.needs_enabling else "has no write credential yet"
         )
+        more = f" (and {len(request.others)} more on this request)" if request.others else ""
         super().__init__(
-            f"{request.api_name}: {request.operation} {missing}; approvers have been asked "
-            f"to enable it (request {request.id}). Retry once they have."
+            f"{request.api_name}: {request.operation} {missing}{more}; approvers have been "
+            f"asked to enable it (request {request.id}). Retry once they have."
         )
         self.request = request
 
@@ -482,9 +486,16 @@ class Librarian:
             return replayed
         if self.planner is None:
             raise LibrarianError("the fetch skill is disabled: no model is configured")
+        started = time.monotonic()
         for _attempt in range(2):
             try:
-                outcome = await self.planner.fetch(intent, self.registry, self.executor, caller)
+                outcome = await self.planner.fetch(
+                    intent,
+                    self.registry,
+                    self.executor,
+                    caller,
+                    budget_seconds=self.settings.fetch_timeout_seconds,
+                )
             except CredentialMissing as missing:
                 await self._await_credential(missing, caller, on_auth_required)
                 continue
@@ -495,12 +506,28 @@ class Librarian:
                 ) from exc
             except (ContentFilterError, ModelAPIError, UnexpectedModelBehavior) as exc:
                 raise await self._model_failed(exc, caller, "planning") from exc
-            await self._learn_recipe(intent, outcome)
-            await self._audit_fetch(caller, "planner", outcome)
+            if outcome.partial:
+                log.warning(
+                    "fetch for %s stopped after %d calls: the time budget (%s s) ran out",
+                    caller.agent,
+                    len(outcome.results),
+                    self.settings.fetch_timeout_seconds,
+                )
+            else:
+                await self._learn_recipe(intent, outcome)
+            await self._audit_fetch(
+                caller, "planner", outcome, duration_ms=int((time.monotonic() - started) * 1000)
+            )
             return outcome
         raise LibrarianError("credential still not usable after it was provided")
 
-    async def _audit_fetch(self, caller: Caller, how: str, outcome: FetchOutcome) -> None:
+    async def _audit_fetch(
+        self,
+        caller: Caller,
+        how: str,
+        outcome: FetchOutcome,
+        duration_ms: int | None = None,
+    ) -> None:
         """One event per plain-language request, saying whether a model was involved."""
         await self.audit.record(
             AuditEvent(
@@ -508,7 +535,12 @@ class Librarian:
                 caller=caller.agent,
                 principal=caller.principal,
                 detail=how,
-                extra={"calls": len(outcome.results), "recipe": outcome.recipe},
+                duration_ms=duration_ms,
+                extra={
+                    "calls": len(outcome.results),
+                    "recipe": outcome.recipe,
+                    "partial": outcome.partial,
+                },
             )
         )
 
@@ -1069,7 +1101,19 @@ class Librarian:
                 f"it ({declined.note or 'no note'}); it can be asked again after {until}"
             )
         who = caller.agent + (f" (for {caller.principal})" if caller.principal else "")
-        asked = await self.enablement.open(entry, op, who=who, reason=request.reason)
+        ops = [op]
+        for other in request.also_needs:
+            extra = entry.operation(other)
+            if (
+                extra is not None
+                and extra.id != op.id
+                and extra not in ops
+                and extra.access is not Access.READ
+                and (not extra.writable or entry.write_auth is None)
+                and self.enablement.declined_for(entry.id, extra.id) is None
+            ):
+                ops.append(extra)
+        asked = await self.enablement.open(entry, ops, who=who, reason=request.reason)
         await self.audit.record(
             AuditEvent(
                 event="enable_write_requested",
@@ -1078,39 +1122,59 @@ class Librarian:
                 api=entry.id,
                 operation=op.id,
                 detail=reason,
-                extra={"request": asked.id, "asks": asked.asks},
+                extra={"request": asked.id, "asks": asked.asks, "operations": asked.operations},
             )
         )
         telemetry.write_requests.add(1, {"librarian.api": entry.id, "outcome": "asked"})
         return WriteNotEnabled(asked)
 
     async def enable_writes(
-        self, request_id: str, by: str, key: str = "dedicated"
+        self,
+        request_id: str,
+        by: str,
+        key: str = "dedicated",
+        operations: list[str] | None = None,
     ) -> tuple[EnableWriteRequest, str | None]:
-        """An approver enables the operation an agent asked to write: the change goes
-        into the entry's review proposal (approve or deny, as always). When the entry has
-        no write credential, `key` says where it comes from: `dedicated` asks for a new
-        `<api>/write` credential through the secure page; `read` uses the read key for
-        writes too. Returns the request and the proposal's link."""
+        """An approver enables the operations an agent asked to write: the change goes
+        into the entry's review proposal (approve or deny, as always). `operations`
+        narrows it to some of the request's operations; the rest stay disabled. When the
+        entry has no write credential, `key` says where it comes from: `dedicated` asks
+        for a new `<api>/write` credential through the secure page; `read` uses the read
+        key for writes too. Returns the request and the proposal's link."""
         request = await self.enablement.load(request_id)
         if request is None or request.state is not EnableState.PENDING:
             raise LookupError("this request is no longer pending")
         entry = self.registry.get(request.api)
-        op = entry.operation(request.operation) if entry is not None else None
-        if entry is None or op is None:
-            await self.enablement.decide(
-                request.id, EnableState.EXPIRED, by, "the operation is no longer in the registry"
-            )
-            raise LibrarianError(f"{request.api!r} no longer has operation {request.operation!r}")
+        chosen = [
+            op
+            for name in request.operations
+            if (operations is None or name in operations)
+            and entry is not None
+            and (op := entry.operation(name)) is not None
+        ]
+        if entry is None or not chosen:
+            if entry is None or not any(entry.operation(o) for o in request.operations):
+                await self.enablement.decide(
+                    request.id, EnableState.EXPIRED, by, "the operations are no longer there"
+                )
+                raise LibrarianError(f"{request.api!r} no longer has these operations")
+            raise LibrarianError("tick at least one operation to enable")
         asked_by = ", ".join(request.requested_by) or by
-        lines = [f"{by} enabled writes for `{op.id}` ({op.method} {op.path}), asked by {asked_by}."]
+        listed = ", ".join(f"`{op.id}` ({op.method} {op.path})" for op in chosen)
+        lines = [f"{by} enabled writes for {listed}, asked by {asked_by}."]
+        chosen_ids = {op.id for op in chosen}
+        left = [o for o in request.operations if o not in chosen_ids]
+        if left:
+            lines.append("Left disabled: " + ", ".join(f"`{o}`" for o in left) + ".")
         if request.reasons:
             lines.append("Reason given: " + " / ".join(request.reasons))
-        operations = [
-            op.model_copy(update={"access": Access.WRITE, "writable": True}) if o.id == op.id else o
+        changed = [
+            o.model_copy(update={"access": Access.WRITE, "writable": True})
+            if o.id in chosen_ids
+            else o
             for o in entry.operations
         ]
-        update: dict[str, Any] = {"operations": operations}
+        update: dict[str, Any] = {"operations": changed}
         key_request: CredentialRequest | None = None
         if entry.write_auth is None:
             write_auth: AuthSpec
@@ -1124,12 +1188,12 @@ class Librarian:
                 )
             else:
                 write_auth = _write_auth_like(entry.auth, f"{entry.id}/write")
-                guidance = await self._write_guidance(entry, [op])
+                guidance = await self._write_guidance(entry, chosen)
                 key_request = await self.broker.open_write(
                     entry,
                     write_auth,
                     by=by,
-                    reason=f"writes enabled for {op.id}",
+                    reason="writes enabled for " + ", ".join(o.id for o in chosen),
                     scopes=guidance.scopes,
                     create_url=guidance.create_url,
                     instructions=guidance.instructions,
@@ -1143,8 +1207,11 @@ class Librarian:
         updated = entry.model_copy(update={**update, "notes": (entry.notes + note)[:8000]})
         if entry.status is EntryStatus.PROVISIONAL:
             await self.registry.save(updated)
+        named = ", ".join(o.id for o in chosen[:3]) + (
+            f" and {len(chosen) - 3} more" if len(chosen) > 3 else ""
+        )
         link = await self._propose(
-            updated, f"{entry.name}: enable writes for {op.id}", " ".join(lines)
+            updated, f"{entry.name}: enable writes for {named}", " ".join(lines)
         )
         if entry.status is EntryStatus.PROVISIONAL:
             outcome = "applied now"
@@ -1161,6 +1228,7 @@ class Librarian:
             outcome,
             review_url=link,
             key_request=key_request.id if key_request else None,
+            enabled=[o.id for o in chosen],
         )
         return decided, link
 
@@ -1180,9 +1248,67 @@ class Librarian:
         request = self.enablement.pending_for(api_id, op_id)
         if request is None:
             request = await self.enablement.open(
-                entry, op, who=by, reason="enabled from the console", notify=False
+                entry, [op], who=by, reason="enabled from the console", notify=False, join=False
             )
         return await self.enable_writes(request.id, by, key)
+
+    async def enable_status(self, request_id: str, caller: Caller) -> dict[str, Any]:
+        """Where an enable-write request stands, for the agent that asked: pending,
+        enabled (waiting for the review to merge, and maybe for the write credential),
+        live (in effect: writes go through normal approval), declined until a date, or
+        expired."""
+        request = await self.enablement.load(request_id)
+        mine = request is not None and any(
+            who == caller.agent or who.startswith(f"{caller.agent} (")
+            for who in request.requested_by
+        )
+        if request is None or not mine:
+            raise LibrarianError(f"no enable request {request_id!r} for this agent")
+        entry = self.registry.get(request.api)
+        live = [
+            name
+            for name in request.operations
+            if entry is not None
+            and entry.write_auth is not None
+            and (op := entry.operation(name)) is not None
+            and op.writable
+        ]
+        status: dict[str, Any] = {
+            "enable_request": request.id,
+            "api": request.api,
+            "operations": request.operations,
+            "live_operations": live,
+            "decided_by": request.decided_by,
+            "note": request.note,
+            "review_url": request.review_url,
+        }
+        if request.state is EnableState.PENDING:
+            status["state"] = "pending"
+            status["message"] = "approvers have been asked; retry once it is enabled"
+        elif request.state is EnableState.ENABLED:
+            if set(live) >= set(request.enabled or request.operations):
+                status["state"] = "live"
+                status["message"] = "enabled and in effect; writes go through normal approval"
+            else:
+                waits = ["the review to be merged"]
+                key = self.broker.get(request.key_request) if request.key_request else None
+                if key is not None and key.state is RequestState.PENDING:
+                    waits.append("the write credential to be added")
+                status["state"] = "enabled"
+                status["message"] = f"enabled by {request.decided_by}; waiting for " + " and ".join(
+                    waits
+                )
+        elif request.state is EnableState.DECLINED:
+            status["state"] = "declined"
+            status["until"] = request.expires_at.isoformat()
+            status["message"] = (
+                f"declined by {request.decided_by}: {request.note}; "
+                f"it can be asked again after {request.expires_at.date().isoformat()}"
+            )
+        else:
+            status["state"] = "expired"
+            status["message"] = "nobody decided in time; asking again opens a new request"
+        return status
 
     async def decline_writes(self, request_id: str, by: str, note: str = "") -> EnableWriteRequest:
         """An approver declines: the operation stays refused and the same agents are
@@ -1218,6 +1344,64 @@ class Librarian:
             scopes=[s[:100] for s in extracted.scopes[:20]],
             instructions=(extracted.credential_instructions or fallback.instructions)[:4000],
         )
+
+    def slash_candidates(self, entry: ApiEntry) -> list[tuple[Operation, Parameter]]:
+        """Path parameters that look like file paths or refs but do not allow "/" yet."""
+        return [
+            (op, p)
+            for op in entry.operations
+            for p in op.path_params
+            if not p.allow_slash and looks_like_path(p.name, p.description)
+        ]
+
+    async def allow_slashes(self, api_id: str, by: str) -> tuple[ApiEntry, str | None, list[str]]:
+        """A person allows "/" in the path parameters that look like paths or refs (the
+        console). Provisional entries change at once; verified ones get a proposal.
+        Returns the entry, the review link and the `operation.parameter` names changed."""
+        entry = self.registry.get(api_id)
+        if entry is None:
+            raise LibrarianError(f"unknown API {api_id!r}")
+        candidates = self.slash_candidates(entry)
+        if not candidates:
+            raise LibrarianError("no path parameter looks like a file path or a ref")
+        wanted = {(op.id, p.name) for op, p in candidates}
+        operations = [
+            op.model_copy(
+                update={
+                    "parameters": [
+                        p.model_copy(update={"allow_slash": True})
+                        if (op.id, p.name) in wanted
+                        else p
+                        for p in op.parameters
+                    ]
+                }
+            )
+            for op in entry.operations
+        ]
+        names = [f"{op.id}.{p.name}" for op, p in candidates]
+        note = f"\n{by} allowed '/' in path arguments that are paths or refs: {', '.join(names)}."
+        updated = entry.model_copy(
+            update={"operations": operations, "notes": (entry.notes + note)[:8000]}
+        )
+        if entry.status is EntryStatus.PROVISIONAL:
+            await self.registry.save(updated)
+        link = await self._propose(
+            updated,
+            f"{entry.name}: allow slashes in {len(names)} path argument(s)",
+            f"{by} allowed '/' in path arguments that are file paths or refs (segments are "
+            f"still checked): {', '.join(names)}.",
+        )
+        await self.audit.record(
+            AuditEvent(
+                event="slashes_allowed",
+                caller="console",
+                principal=by,
+                api=api_id,
+                detail=", ".join(names)[:2000],
+                extra={"review_url": link, "applied": entry.status is EntryStatus.PROVISIONAL},
+            )
+        )
+        return updated, link, names
 
     async def set_operation_access(
         self, api_id: str, op_id: str, choice: str, by: str

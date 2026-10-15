@@ -35,6 +35,7 @@ from librarian.registry.models import (
     Parameter,
     ParamLocation,
     SpecSource,
+    looks_like_path,
 )
 
 MAX_SPEC_BYTES = 25_000_000
@@ -328,13 +329,15 @@ def _parameters(spec: Json, raw: list[Any]) -> list[Parameter]:
         if location not in ("path", "query", "header") or not isinstance(name, str) or not name:
             continue
         schema = _resolve(spec, param.get("schema")) or param
+        description = str(param.get("description") or "")[:2000]
         merged[(location, name)] = Parameter.model_validate(
             {
                 "name": name[:128],
                 "in": ParamLocation(location),
                 "required": bool(param.get("required")) or location == "path",
                 "type": str(schema.get("type") or "string"),
-                "description": str(param.get("description") or "")[:2000],
+                "description": description,
+                "allow_slash": location == "path" and looks_like_path(name, description),
             }
         )
     return list(merged.values())

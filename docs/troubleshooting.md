@@ -22,6 +22,15 @@ gets `write_not_enabled` instead and the approvers are asked: the card (Slack) a
 waiting list lead to a page with Enable or Decline. "approvers declined to enable it" means
 someone declined within the last week; the console's API page can still enable it.
 
+**"path argument ... is not a valid path segment"**
+Path arguments are single segments: no `/`, `.` or `..`. A parameter that is a file path or a git
+ref can carry `allow_slash: true` (inferred when the API is learned, or *Allow slashes* on the
+console's API page, which lands in the entry's review); segments are still checked.
+
+**A plain-language request comes back `partial`.**
+The planner hit `fetch_timeout_seconds` (default 100 s) and returned the calls it had made. Narrow
+the request, or raise the budget while keeping it below the caller's own timeout.
+
 **"operation ... is suspended until reviewed"**
 librarian held it back: it was learned from docs or model knowledge and kept failing, or the API
 changed under a reviewed entry. Fix the entry by pull request (or merge the update librarian

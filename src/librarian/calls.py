@@ -114,12 +114,16 @@ class WriteRequest(BaseModel):
     # first result instead of writing again.
     idempotency_key: str | None = Field(default=None, max_length=128)
     reason: str = Field(default="", max_length=2000)  # shown to the approver
+    # Other operations of the same API this flow will need (e.g. the rest of a
+    # create-blob, create-tree, create-commit, create-ref chain). When the write is not
+    # enabled, they go on the same enable request so one approver action unblocks them all.
+    also_needs: list[str] = Field(default_factory=list[str], max_length=20)
 
     def fingerprint(self, caller: Caller) -> str:
         """Identity of exactly this change by this caller (binds approval to request)."""
         import hashlib
 
-        payload = self.model_dump_json(exclude={"reason", "idempotency_key"})
+        payload = self.model_dump_json(exclude={"reason", "idempotency_key", "also_needs"})
         return hashlib.sha256(f"{caller.agent}|{caller.principal}|{payload}".encode()).hexdigest()
 
 

@@ -20,7 +20,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.16)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
+> Status: **alpha (v0.17)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
 ## Why
 
@@ -69,7 +69,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.16.0
+docker pull ghcr.io/kultar/librarian:0.17.0
 ```
 
 ### What happens on a request
@@ -413,7 +413,16 @@ a dedicated `<api>/write` credential (asked for through the secure key page, wit
 permission those writes need, inferred by the model when one is configured) or reuses the read
 key. Decline keeps the operation refused and quiet for a week. The console's API page also offers
 *Enable writes* on any write operation that is not enabled, without waiting for an agent to ask.
-Nobody edits YAML.
+A flow that needs several operations (create a blob, a tree, a commit, a ref) names the rest in
+`also_needs`, so one request and one approver action cover them all; `enable_status` tells the
+agent where the request stands (pending, enabled and waiting for the merge, live, declined until a
+date). Nobody edits YAML.
+
+**Path arguments with slashes.** A path argument may not contain `/` unless the parameter is marked
+`allow_slash: true` (inferred when the API is learned for parameters that are file paths or git
+refs, such as GitHub's `path`, `ref` and `branch`; the proposal shows it). Even then, empty, `.`
+and `..` segments, a leading or trailing slash and encoded slashes are refused. The console's API
+page offers *Allow slashes* for parameters that look like paths, which lands in the entry's review.
 
 The approval card (Slack) shows the operation, arguments and full body. On the approval page the
 approver can **approve once**, **approve and allow similar writes** (a grant for that agent and
@@ -559,6 +568,11 @@ uv run pytest
   asked, approvers get a Slack card and a console to-do with Enable or Decline, Enable lands in
   the entry's review and asks for a dedicated write credential when there is none, declines
   stay quiet for a week, and the console enables any write operation on demand
+- **v0.17**: from the first real write flow: slashes in path arguments that are file paths or
+  refs (`allow_slash`, inferred when learning, allowed from the console), one enable request
+  for a whole flow (`also_needs`) with ticks on the page, `enable_status` for agents, a
+  wall-clock budget for plain-language requests (`fetch_timeout_seconds`, partial results
+  instead of outliving the caller) and a hard cap on the planner's calls
 
 ### Next
 

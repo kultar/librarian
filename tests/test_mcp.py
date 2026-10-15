@@ -199,13 +199,21 @@ async def test_write_to_a_not_enabled_operation_asks_the_approvers(
                     "operation": "renameProject",
                     "args": {"p": "PAY"},
                     "reason": "the team was renamed",
+                    "also_needs": ["nope", "getIssue"],
                 },
             )
         )
-    asked = librarian.enablement.pending()
-    assert len(asked) == 1 and asked[0].reasons == ["the team was renamed"]
-    assert result["status"] == "write_not_enabled" and result["enable_request"] == asked[0].id
-    assert "approvers have been asked" in result["message"]
+        asked = librarian.enablement.pending()
+        assert len(asked) == 1 and asked[0].reasons == ["the team was renamed"]
+        assert result["status"] == "write_not_enabled" and result["enable_request"] == asked[0].id
+        assert result["operations"] == ["renameProject"]
+        assert "approvers have been asked" in result["message"]
+        status = data(await session.call_tool("enable_status", {"enable_request": asked[0].id}))
+        assert status["state"] == "pending" and status["operations"] == ["renameProject"]
+        via_write = data(await session.call_tool("write_status", {"approval": asked[0].id}))
+        assert via_write["state"] == "pending"
+        nope = await session.call_tool("enable_status", {"enable_request": "nope"})
+        assert nope.is_error
 
 
 async def test_write_status_is_private_to_the_requesting_agent(

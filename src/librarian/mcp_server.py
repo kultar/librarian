@@ -10,7 +10,9 @@ MCP tool calls should return promptly, so nothing here waits on a human:
 - a write that needs approval returns `pending_approval`; the librarian runs it
   once approved, and `write_status` reports the outcome;
 - a write on an operation nobody has enabled yet returns `write_not_enabled`
-  (approvers are asked to enable it; retry later).
+  (approvers are asked to enable it; `enable_status` says where it stands);
+- `fetch` stops at its time budget and marks the answer `partial`, with the
+  results it had.
 """
 
 from __future__ import annotations
@@ -138,6 +140,7 @@ def build_mcp(librarian: Librarian) -> MCPServer:
                 "results": [r.model_dump(mode="json") for r in outcome.results],
                 "proposed_writes": [w.model_dump(mode="json") for w in outcome.proposed_writes],
                 "recipe": outcome.recipe,
+                "partial": outcome.partial,
             }
 
     @server.tool(
@@ -153,12 +156,15 @@ def build_mcp(librarian: Librarian) -> MCPServer:
         body: dict[str, Any] | list[Any] | None = None,
         reason: str = "",
         idempotency_key: str | None = None,
+        also_needs: list[str] | None = None,
     ) -> dict[str, Any]:
         """Request a change (e.g. add a comment). Runs at once under a standing grant;
         otherwise returns `pending_approval` and a human decides. Give a clear `reason`:
         the approver sees it. Use `idempotency_key` to make retries safe. If the
         operation is not enabled for writes yet, returns `write_not_enabled`: the
-        approvers were asked to enable it; retry later."""
+        approvers were asked to enable it; check `enable_status` and retry later. Name
+        the other operations of the same API your flow will need in `also_needs`, so one
+        approver action enables them all."""
         try:
             request = WriteRequest(
                 api=api,
@@ -167,12 +173,14 @@ def build_mcp(librarian: Librarian) -> MCPServer:
                 body=body,
                 reason=reason,
                 idempotency_key=idempotency_key,
+                also_needs=also_needs or [],
             )
             outcome = await librarian.request_write(request, _caller(ctx))
         except WriteNotEnabled as asked:
             return {
                 "status": "write_not_enabled",
                 "enable_request": asked.request.id,
+                "operations": asked.request.operations,
                 "message": str(asked),
             }
         except ValidationError as exc:
@@ -184,11 +192,25 @@ def build_mcp(librarian: Librarian) -> MCPServer:
     @server.tool(annotations=read_only)
     async def write_status(ctx: Context, approval: str) -> dict[str, Any]:
         """State of a write you requested: pending, approved, executing, executed (with the
-        result), failed, denied or expired."""
+        result), failed, denied or expired. Given an `enable_request` id instead, answers
+        like `enable_status`."""
         found = await librarian.approvals.load(approval)
         if found is None or found.agent != _caller(ctx).agent:
-            raise ToolError(f"no write approval {approval!r} for this agent")
+            try:
+                return await librarian.enable_status(approval, _caller(ctx))
+            except LibrarianError:
+                raise ToolError(f"no write approval {approval!r} for this agent") from None
         return librarian.write_status(found)
+
+    @server.tool(annotations=read_only)
+    async def enable_status(ctx: Context, enable_request: str) -> dict[str, Any]:
+        """Where a `write_not_enabled` request stands: pending (approvers asked), enabled
+        (waiting for the review to merge, and maybe for a write credential), live (in
+        effect: retry the write), declined until a date, or expired."""
+        try:
+            return await librarian.enable_status(enable_request, _caller(ctx))
+        except LibrarianError as exc:
+            raise ToolError(str(exc)) from exc
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=True))
     async def onboard(

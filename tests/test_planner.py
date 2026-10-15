@@ -191,3 +191,68 @@ def test_gateway_models_default_to_prompted_output(librarian: Librarian) -> None
     lib = Lib(settings)
     assert lib.planner is not None
     assert "Prompted" in type(lib.planner.agent._output_type).__name__  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_call_budget_is_a_hard_cap(
+    librarian: Librarian, router: Router, secrets_store: FileSecretStore
+) -> None:
+    await secrets_store.put("tracker/readonly", "tok")
+    for key in ("ABC-1", "ABC-2"):
+        router.add("GET", f"{BASE}/v1/issues/{key}", lambda r: httpx.Response(200, json={}))
+    model, seen = scripted(
+        [
+            ToolCallPart(
+                "call_api", {"api": "tracker", "operation": "getIssue", "args": {"key": "ABC-1"}}
+            ),
+            ToolCallPart(
+                "call_api", {"api": "tracker", "operation": "getIssue", "args": {"key": "ABC-2"}}
+            ),
+            ToolCallPart(
+                "call_api", {"api": "tracker", "operation": "getIssue", "args": {"key": "ABC-1"}}
+            ),
+        ]
+    )
+    outcome = await Planner(model, max_calls=1).fetch(
+        "ABC-1 and ABC-2?", librarian.registry, librarian.executor, Caller(agent="agent-a")
+    )
+    assert not outcome.partial and len(outcome.results) == 1
+    assert [r.url.path for r in router.requests] == ["/v1/issues/ABC-1"]  # the cap held
+    returns = [r for r in tool_results(seen[-1]) if isinstance(r, ToolReturnPart)]
+    assert "budget of 1 calls" in str(returns[1].content)
+    assert "budget" not in str(returns[2].content)  # a repeated call is served from the cache
+
+
+async def test_fetch_stops_at_the_time_budget_with_what_it_has(
+    librarian: Librarian, router: Router, secrets_store: FileSecretStore
+) -> None:
+    import asyncio
+
+    await secrets_store.put("tracker/readonly", "tok")
+    router.add("GET", f"{BASE}/v1/issues/ABC-1", lambda r: httpx.Response(200, json={"s": 1}))
+    turns = 0
+
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal turns
+        turns += 1
+        if turns == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "call_api",
+                        {"api": "tracker", "operation": "getIssue", "args": {"key": "ABC-1"}},
+                    )
+                ]
+            )
+        await asyncio.sleep(2)  # a slow model turn, past the budget
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"summary": "late"})])
+
+    outcome = await Planner(FunctionModel(respond)).fetch(
+        "ABC-1?",
+        librarian.registry,
+        librarian.executor,
+        Caller(agent="agent-a"),
+        budget_seconds=0.3,
+    )
+    assert outcome.partial and len(outcome.results) == 1
+    assert outcome.answer.summary.startswith("Stopped after 1 call(s)")
+    assert outcome.answer.unresolved and "time budget" in outcome.answer.unresolved

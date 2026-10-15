@@ -241,10 +241,37 @@ def _check_args(op: Operation, args: dict[str, ArgValue]) -> str | None:
             if isinstance(value, list):
                 return f"path argument {name!r} must be a single value"
             text = str(value)
-            if not text or text in (".", "..") or "/" in text:
-                return f"path argument {name!r} is not a valid path segment"
+            if param.allow_slash:
+                problem = path_value_problem(text)
+                if problem:
+                    return f"path argument {name!r} {problem}"
+            elif not text or text in (".", "..") or "/" in text:
+                hint = (
+                    "; this parameter does not allow '/' (an approver can allow slashes in "
+                    "path-like parameters from the console)"
+                    if "/" in text
+                    else ""
+                )
+                return f"path argument {name!r} is not a valid path segment{hint}"
         if param.location is ParamLocation.HEADER and name.lower() in _FORBIDDEN_HEADERS:
             return f"header argument {name!r} is not allowed"
+    return None
+
+
+def path_value_problem(text: str) -> str | None:
+    """Why a multi-segment path value (a file path, a git ref) is unsafe, or None."""
+    if not text:
+        return "is empty"
+    if text.startswith("/"):
+        return "must not start with '/'"
+    if text.endswith("/"):
+        return "must not end with '/'"
+    if "\\" in text:
+        return "contains a backslash"
+    if "%2f" in text.lower():
+        return "contains an encoded slash"
+    if any(segment in ("", ".", "..") for segment in text.split("/")):
+        return "contains an empty, '.' or '..' segment"
     return None
 
 

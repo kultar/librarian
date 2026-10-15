@@ -27,6 +27,9 @@ database_url: sqlite+aiosqlite:///.librarian/librarian.db   # or postgresql+asyn
 # model_api_key: set-via-LIBRARIAN_MODEL_API_KEY
 # model_api: openai                   # gateway API format: openai | anthropic (needed for web search)
 max_calls_per_fetch: 8
+# A plain-language request stops after this many seconds and returns what it has,
+# marked partial. Keep it below your gateway's tool timeout (LiteLLM: 120 s).
+fetch_timeout_seconds: 100
 
 rate_limit_per_minute: 60              # per calling agent, per API
 request_timeout_seconds: 30

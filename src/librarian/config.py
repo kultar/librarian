@@ -285,6 +285,10 @@ class Settings(BaseSettings):
     # filter false positive, an outage). Same gateway settings; just the model name.
     fallback_model: str | None = None
     max_calls_per_fetch: int = 8
+    # Wall-clock budget for one plain-language request (planning and calls). Keep it
+    # below the caller's own timeout (LiteLLM's MCP tool timeout is 120 s): past it,
+    # the fetch returns what it has, marked partial. None = no limit.
+    fetch_timeout_seconds: float | None = 100
     # Save successful plain-language plans as templates and replay them without the LLM.
     recipes_enabled: bool = True
     # How the planner gets structured answers: "tool" (forced output tool), "native"

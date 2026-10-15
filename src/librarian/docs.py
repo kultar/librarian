@@ -50,6 +50,7 @@ from librarian.registry.models import (
     Parameter,
     ParamLocation,
     SpecSource,
+    looks_like_path,
 )
 
 MAX_PAGE_BYTES = 3_000_000
@@ -511,6 +512,8 @@ def _operation(
                 "required": item.required,
                 "type": item.type[:40] or "string",
                 "description": item.description,
+                "allow_slash": item.location == "path"
+                and looks_like_path(item.name, item.description),
             }
         )
     for name in _PARAM.findall(path):

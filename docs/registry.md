@@ -33,6 +33,7 @@ operations:
     access: read                  # read | write | unknown
     parameters:
       - {name: issueIdOrKey, in: path}
+      # - {name: path, in: path, allow_slash: true}   # a file path or git ref may contain "/"
       - {name: fields, in: query, description: Comma-separated fields}
   - id: searchPost
     method: POST

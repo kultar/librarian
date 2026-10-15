@@ -73,17 +73,50 @@ class ParamLocation(StrEnum):
     HEADER = "header"
 
 
+PATH_LIKE_NAMES = frozenset(
+    {"path", "filepath", "file_path", "ref", "git_ref", "branch", "file", "filename"}
+)
+PATH_LIKE_WORDS = (
+    "file path",
+    "path to the file",
+    "path of the file",
+    "path to a file",
+    "directory",
+    "refs/heads",
+    "heads/",
+    "fully qualified ref",
+    "contain slashes",
+    "contains slashes",
+)
+
+
+def looks_like_path(name: str, description: str = "") -> bool:
+    """Whether a path parameter is, by its name or description, a file path or a git
+    ref: a value that legitimately contains "/". Used to infer `allow_slash` when an
+    API is learned; a reviewer sees it in the proposal."""
+    lowered = name.lower()
+    if lowered in PATH_LIKE_NAMES or lowered.endswith("_path"):
+        return True
+    text = description.lower()
+    return any(word in text for word in PATH_LIKE_WORDS)
+
+
 class Parameter(StrictModel):
     name: str = Field(min_length=1, max_length=128)
     location: ParamLocation = Field(alias="in")
     required: bool = False
     type: str = "string"
     description: str = Field(default="", max_length=2000)
+    # Path parameters only: the value may contain "/" (a file path, a git ref). Its
+    # segments are still checked: none empty, "." or "..", and no leading or trailing "/".
+    allow_slash: bool = False
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     @model_validator(mode="after")
     def _path_params_are_required(self) -> Parameter:
+        if self.allow_slash and self.location is not ParamLocation.PATH:
+            raise ValueError(f"parameter {self.name!r}: allow_slash applies to path parameters")
         if self.location is ParamLocation.PATH:
             self.required = True
         return self

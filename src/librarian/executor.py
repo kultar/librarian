@@ -543,7 +543,8 @@ def _build_request(
             continue
         value = args[param.name]
         if param.location is ParamLocation.PATH:
-            path = path.replace("{" + param.name + "}", quote(str(value), safe=""))
+            safe = "/" if param.allow_slash else ""  # policy checked the segments
+            path = path.replace("{" + param.name + "}", quote(str(value), safe=safe))
         elif param.location is ParamLocation.QUERY:
             query[param.name] = value
         else:

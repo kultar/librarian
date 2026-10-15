@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from librarian.audit import AuditEvent, AuditSink
 from librarian.registry.models import ApiEntry, Operation
@@ -39,10 +39,15 @@ class EnableWriteRequest(BaseModel):
     api: str
     api_name: str
     host: str
-    operation: str
+    operation: str  # the first operation asked for
     method: str
     path: str
     summary: str = ""
+    # Every operation on this request (the first one and the rest of its flow); one
+    # approver action enables them all, into one proposal.
+    operations: list[str] = Field(default_factory=list[str])
+    # The operations the approver actually enabled (a subset of `operations`).
+    enabled: list[str] = Field(default_factory=list[str])
     needs_enabling: bool  # the operation is not marked writable
     needs_credential: bool  # the entry has no write credential
     requested_by: list[str] = Field(default_factory=list[str])  # "agent (for principal)"
@@ -61,9 +66,19 @@ class EnableWriteRequest(BaseModel):
     approver_group: str | None = None
     notifier_ref: dict[str, str] = Field(default_factory=dict[str, str])
 
+    @model_validator(mode="after")
+    def _operations_include_the_first(self) -> EnableWriteRequest:
+        if self.operation not in self.operations:
+            self.operations = [self.operation, *self.operations]
+        return self
+
     @property
     def what(self) -> str:
         return f"{self.method} {self.path}"
+
+    @property
+    def others(self) -> list[str]:
+        return [o for o in self.operations if o != self.operation]
 
 
 class EnableNotifier(Protocol):
@@ -151,7 +166,7 @@ class EnableWriteBroker:
             (
                 r
                 for r in self.pending()
-                if r.api == api and (operation is None or r.operation == operation)
+                if r.api == api and (operation is None or operation in r.operations)
             ),
             None,
         )
@@ -165,7 +180,7 @@ class EnableWriteBroker:
                 for r in self._requests.values()
                 if r.state is EnableState.DECLINED
                 and r.api == api
-                and r.operation == operation
+                and operation in r.operations
                 and r.expires_at > now
             ),
             None,
@@ -190,16 +205,22 @@ class EnableWriteBroker:
     async def open(
         self,
         entry: ApiEntry,
-        op: Operation,
+        ops: list[Operation],
         *,
         who: str,
         reason: str,
         notify: bool = True,
+        join: bool = True,
     ) -> EnableWriteRequest:
-        """Open (or join) the request to enable this operation. `who` is the agent (and
-        the person it acts for), or the approver who started it from the console."""
+        """Open (or join) the request to enable these operations of one API. `who` is the
+        agent (and the person it acts for), or the approver who started it from the
+        console. With `join`, an open request for the same API takes the operations in;
+        one approver action then unblocks the whole flow."""
         await self.refresh()
+        op = ops[0]
         existing = self.pending_for(entry.id, op.id)
+        if existing is None and join:
+            existing = self.pending_for(entry.id)
         reason = reason.strip()[:500]
         if existing is not None:
             existing.asks += 1
@@ -207,6 +228,9 @@ class EnableWriteBroker:
                 existing.requested_by.append(who)
             if reason and reason not in existing.reasons and len(existing.reasons) < MAX_REASONS:
                 existing.reasons.append(reason)
+            for extra in ops:
+                if extra.id not in existing.operations and len(existing.operations) < 50:
+                    existing.operations.append(extra.id)
             await self._save(existing)
             if notify:
                 await self.notifier.enable_updated(existing)
@@ -219,6 +243,7 @@ class EnableWriteBroker:
             method=op.method,
             path=op.path,
             summary=op.summary[:200],
+            operations=[o.id for o in ops],
             needs_enabling=not op.writable,
             needs_credential=entry.write_auth is None,
             requested_by=[who],
@@ -243,6 +268,7 @@ class EnableWriteBroker:
         *,
         review_url: str | None = None,
         key_request: str | None = None,
+        enabled: list[str] | None = None,
     ) -> EnableWriteRequest:
         request = await self.load(request_id)
         if request is None or request.state is not EnableState.PENDING:
@@ -252,6 +278,7 @@ class EnableWriteBroker:
         request.note = note
         request.review_url = review_url
         request.key_request = key_request
+        request.enabled = list(enabled or [])
         if state is EnableState.DECLINED:
             request.expires_at = datetime.now(UTC) + self.decline_for
         await self._save(request)

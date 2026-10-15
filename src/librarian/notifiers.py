@@ -460,7 +460,9 @@ CONSENT_MINUTES = 30
 
 def enable_text(request: Any) -> str:
     who = ", ".join(request.requested_by[:3]) or "an agent"
-    return f"{who} wants to write to {request.api_name}: {request.operation}"
+    others = len(request.operations) - 1
+    more = f" (+{others} more)" if others > 0 else ""
+    return f"{who} wants to write to {request.api_name}: {request.operation}{more}"
 
 
 def enable_outcome_text(request: Any) -> str:
@@ -481,8 +483,13 @@ def enable_blocks(request: Any, link: str | None) -> list[dict[str, Any]]:
     operation = f"`{request.method} {request.path}`"
     if request.summary:
         operation += f"\n{request.summary}"
+    others = [o for o in request.operations if o != request.operation]
+    if others:
+        operation += "\nand " + ", ".join(f"`{o}`" for o in others[:10])
+        if len(others) > 10:
+            operation += f" and {len(others) - 10} more"
     fields = [
-        f"*Operation:*\n{operation}",
+        f"*Operation{'s' if others else ''}:*\n{operation}",
         f"*Asked by:*\n{', '.join(request.requested_by[:5])}",
         "*Why:*\n" + ("; ".join(request.reasons[:3]) or "no reason given"),
         f"*Asked:*\n{request.asks} time(s)",

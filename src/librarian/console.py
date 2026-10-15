@@ -162,9 +162,12 @@ def _waiting_rows(
 ) -> str:
     rows: list[str] = []
     for en in enables:
+        more = (
+            f" and {_n(len(en.others), 'more operation', 'more operations')}" if en.others else ""
+        )
         rows.append(
             f"<tr><td>Enable writes on <b>{e(en.api_name)}</b>: {e(en.method)} "
-            f"<code>{e(en.operation)}</code></td>"
+            f"<code>{e(en.operation)}</code>{more}</td>"
             f"<td>{e(', '.join(en.requested_by) or 'an agent')}</td>"
             f"<td>{_n(en.asks, 'ask')}, {_when(en.created_at)}</td>"
             f"<td><a href='{e(librarian.enablement.link(en))}'>Decide</a></td></tr>"
@@ -262,6 +265,7 @@ EVENT_LABELS = {
     "enable_write_declined": "Writes declined",
     "enable_write_expired": "Write enable lapsed",
     "writes_enabled": "Write key allowed",
+    "slashes_allowed": "Slashes allowed",
     "operation_access_set": "Operation decided",
     "auth_set": "Authentication set",
     "person_disconnected": "Signed out",
@@ -642,7 +646,8 @@ def _detail(
             (
                 "Wanted writes",
                 "; ".join(
-                    f"<code>{e(r.operation)}</code> by {e(', '.join(r.requested_by))}: "
+                    ", ".join(f"<code>{e(o)}</code>" for o in r.operations)
+                    + f" by {e(', '.join(r.requested_by))}: "
                     f"<a href='{e(librarian.enablement.link(r))}'>Decide</a>"
                     for r in asks
                 ),
@@ -846,6 +851,17 @@ def _actions(librarian: Librarian, entry: ApiEntry, token: str) -> tuple[str, st
             "<label>Header or query parameter name (API keys only)"
             "<input name=key_name placeholder='X-Api-Key'></label>"
             "<button class=quiet>Set authentication</button></form></div>"
+        )
+    candidates = librarian.slash_candidates(entry)
+    if candidates:
+        names = ", ".join(f"<code>{e(op.id)}.{e(p.name)}</code>" for op, p in candidates[:8])
+        more = f" and {len(candidates) - 8} more" if len(candidates) > 8 else ""
+        cards.append(
+            "<div class=card><h2>Slashes in path arguments</h2><p class=muted>"
+            f"{_n(len(candidates), 'path parameter')} look like file paths or refs, which "
+            f"contain '/': {names}{more}. Allowing it lets agents pass such values; empty, "
+            "'.' and '..' segments stay refused. Verified entries change through review.</p>"
+            f"{_form(f'{base}/slashes', token, 'Allow slashes', 'quiet')}</div>"
         )
     if entry.status is EntryStatus.BLOCKED:
         cards.append(
@@ -1210,6 +1226,19 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 f"{op_id} decided",
                 f"{applied}{review}{back(api_id)}",
             )
+        if action == "slashes":
+            updated, link, names = await librarian.allow_slashes(api_id, identity)
+            review = f" Review: <a href='{e(link)}'>{e(link)}</a>." if link else ""
+            applied = (
+                "Applied now."
+                if updated.status is EntryStatus.PROVISIONAL
+                else "Proposed for review (verified entries change through the registry repo)."
+            )
+            return notice(
+                "ok",
+                "Slashes allowed",
+                f"{e(', '.join(names))}. {applied}{review}{back(api_id)}",
+            )
         if action == "enable":
             form = await request.form()
             op_id = request.path_params["op_id"]
@@ -1505,9 +1534,29 @@ def _enable_body(
     operation = f"{e(request.method)} <code>{e(request.path)}</code>"
     if request.summary:
         operation += f"<br><span class=muted>{e(request.summary)}</span>"
-    rows = [
-        ("Site", e(request.host)),
-        ("Operation", f"<code>{e(request.operation)}</code>: {operation}"),
+    rows = [("Site", e(request.host))]
+    ticks = ""
+    if request.others:
+        items: list[str] = []
+        for name in request.operations:
+            found = entry.operation(name) if entry is not None else None
+            what = (
+                f"{e(found.method)} <code>{e(found.path)}</code>"
+                + (f" <span class=muted>{e(found.summary[:100])}</span>" if found.summary else "")
+                if found is not None
+                else "<span class=bad>no longer in the registry</span>"
+            )
+            items.append(
+                f"<label><input type=checkbox name=op value='{e(name)}' checked> "
+                f"<code>{e(name)}</code>: {what}</label>"
+            )
+        ticks = (
+            f"<h3>{_n(len(request.operations), 'operation')} in this flow</h3>"
+            "<p class=muted>Untick any that should stay disabled.</p>" + "".join(items)
+        )
+    else:
+        rows.append(("Operation", f"<code>{e(request.operation)}</code>: {operation}"))
+    rows += [
         ("Asked by", e(", ".join(request.requested_by) or "an agent")),
         ("Asked", f"{_n(request.asks, 'time')}, first {_when(request.created_at)}"),
     ]
@@ -1541,14 +1590,24 @@ def _enable_body(
     err = f"<p class=err>{e(error)}</p>" if error else ""
     hidden = f"<input type=hidden name=t value='{e(token)}'>"
     who = e(request.requested_by[0] if request.requested_by else "An agent")
+    what = (
+        f"the {_n(len(request.operations), 'operation')} ticked below"
+        if request.others
+        else f"<code>{e(request.operation)}</code>"
+    )
+    button = (
+        f"Enable writes for {_n(len(request.operations), 'operation')}"
+        if request.others
+        else f"Enable writes for {e(request.operation)}"
+    )
     return f"""<h1>{who} wants to write to {e(request.api_name)}</h1>
-<p class=lede>Enabling carries <code>{e(request.operation)}</code> into the entry's review
+<p class=lede>Enabling carries {what} into the entry's review
 proposal (approve or deny, as always); every write still needs a person's approval or a grant.
 Declining keeps it refused and quiet for a week.</p>{err}
 <div class=card><dl>{details}</dl></div>
 <form method=post>{hidden}<input type=hidden name=action value=enable>
-<div class=card><h2>Enable</h2>{key_choice}
-<button>Enable writes for {e(request.operation)}</button></div></form>
+<div class=card><h2>Enable</h2>{ticks}{key_choice}
+<button>{button}</button></div></form>
 <div class=zone><h2>Decline</h2><p class=muted>The agents are told no, and this operation is not
 asked about again for a week.</p>
 <form method=post>{hidden}<input type=hidden name=action value=decline>
@@ -1591,10 +1650,12 @@ def enable_routes(librarian: Librarian) -> list[Route]:
                 )
             if action == "enable":
                 key = str(form.get("key", "dedicated"))
-                done, link = await librarian.enable_writes(asked.id, identity, key)
+                ticked = [str(v) for v in form.getlist("op")] if asked.others else None
+                done, link = await librarian.enable_writes(asked.id, identity, key, ticked)
                 return notice(
                     "ok",
-                    f"Writes enabled for {done.operation}",
+                    f"Writes enabled for {done.enabled[0] if done.enabled else done.operation}"
+                    + (f" and {len(done.enabled) - 1} more" if len(done.enabled) > 1 else ""),
                     _enabled_text(librarian, done, link),
                 )
         except LookupError:

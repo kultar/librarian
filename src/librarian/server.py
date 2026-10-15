@@ -376,6 +376,7 @@ class LibrarianExecutor(AgentExecutor):
                 "results": [r.model_dump(mode="json") for r in outcome.results],
                 "proposed_writes": [w.model_dump(mode="json") for w in outcome.proposed_writes],
                 "recipe": outcome.recipe,
+                "partial": outcome.partial,
             }
         raise LibrarianError(f"unknown skill {skill!r}")
 
