@@ -147,6 +147,9 @@ class RecordingNotifier(Notifier):
     async def grant_used(self, grant: Any, approval_like: Any) -> None:
         self.write_events.append(("grant_used", grant))
 
+    async def auto_write_used(self, approval_like: Any, used: int, cap: int, link: str) -> None:
+        self.write_events.append(("auto", (approval_like, used, cap, link)))
+
     async def review_opened(self, review: Any, link: str) -> None:
         self.reviews.append(("opened", review, link))
 

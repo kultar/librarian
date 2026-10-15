@@ -147,6 +147,23 @@ class WebhookNotifier(Notifier):
             },
         )
 
+    async def auto_write_used(
+        self, approval_like: WriteApproval, used: int, cap: int, link: str
+    ) -> None:
+        await self._post_write(
+            "auto_write.used",
+            {
+                "agent": approval_like.agent,
+                "principal": approval_like.principal,
+                "api": approval_like.api,
+                "operation": approval_like.operation,
+                "used_today": used,
+                "limit_per_day": cap,
+                "request": approval_like.request.model_dump(mode="json"),
+                "link": link,
+            },
+        )
+
 
 class SlackNotifier(Notifier):
     """Posts one card per request and keeps it up to date with `chat.update`."""
@@ -300,6 +317,24 @@ class SlackNotifier(Notifier):
                     f":robot_face: `{grant.agent}` ran `{grant.operation}` on "
                     f"{approval_like.api_name} under a standing grant (use {uses}). Args: "
                     f"`{json.dumps(approval_like.request.args)[:300]}`"
+                ),
+            },
+        )
+
+    async def auto_write_used(
+        self, approval_like: WriteApproval, used: int, cap: int, link: str
+    ) -> None:
+        who = approval_like.agent + (
+            f" for {approval_like.principal}" if approval_like.principal else ""
+        )
+        await self._call(
+            "chat.postMessage",
+            {
+                "channel": approval_like.channel or self.default_channel,
+                "text": (
+                    f":zap: Auto-approved write: {who} ran {approval_like.method} "
+                    f"`{approval_like.operation}` on {approval_like.api_name} "
+                    f"({used} of {cap} today). <{link}|Require approval again>"
                 ),
             },
         )

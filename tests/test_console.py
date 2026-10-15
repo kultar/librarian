@@ -348,7 +348,7 @@ async def test_needs_review_operations_are_decided_in_the_console(
     c = console(librarian)
     t = token(librarian)
     page = c.get("/apis/learned").text
-    assert page.count("/ops/") == 3 and "exclude: agents may not call it" in page
+    assert page.count("Decide</button>") == 3 and "exclude: agents may not call it" in page
     done = c.post("/apis/learned/ops/search/access", data={"t": t, "choice": "read"})
     assert done.status_code == 200 and "Applied now" in done.text and "pr/open" in done.text
     assert (
@@ -367,7 +367,7 @@ async def test_needs_review_operations_are_decided_in_the_console(
     assert "marked `search` as read" in entry.notes
     assert [r[0] for r in pub.refreshed] == ["learned"] * 3 and pub.proposed == []  # one PR
     assert audit.events[-1].event == "operation_access_set" and audit.events[-1].detail == "exclude"
-    assert "/access'" not in c.get("/apis/learned").text  # nothing left to decide
+    assert "Decide</button>" not in c.get("/apis/learned").text  # nothing left to decide
     assert (
         c.post("/apis/learned/ops/search/access", data={"t": t, "choice": "maybe"}).status_code
         == 400

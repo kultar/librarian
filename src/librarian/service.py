@@ -367,6 +367,7 @@ class Librarian:
         self.publisher = publisher if publisher is not None else _default_publisher(settings)
         self.recipes: dict[str, Recipe] = {}
         self._background: set[asyncio.Task[None]] = set()
+        self._auto_uses: dict[tuple[str, str, int], int] = {}  # without a database
         model = planner_model if planner_model is not None else _model_from_settings(settings)
         mode = settings.planner_output
         if mode == "auto":
@@ -762,6 +763,50 @@ class Librarian:
             )
             await self.notifier.grant_used(grant, notice)
             return WriteOutcome(result, "grant", grant_id=grant.id)
+
+        if op.approval == "auto" and op.method != "DELETE":
+            used = await self._auto_count(entry, op)
+            if used <= op.auto_limit_per_day:
+                result = await self.executor.execute_write(entry, op, request, caller)
+                telemetry.write_requests.add(1, {"librarian.api": entry.id, "outcome": "auto"})
+                notice = WriteApproval(
+                    fingerprint=request.fingerprint(caller),
+                    api=entry.id,
+                    api_name=entry.name,
+                    host=entry.host,
+                    operation=op.id,
+                    method=op.method,
+                    path=op.path,
+                    request=request,
+                    agent=caller.agent,
+                    principal=caller.principal,
+                    expires_at=datetime.now(UTC),
+                    channel=entry.owners.channel or self.settings.notifier.slack.channel,
+                )
+                await self.audit.record(
+                    AuditEvent(
+                        event="write_auto",
+                        caller=caller.agent,
+                        principal=caller.principal,
+                        api=entry.id,
+                        operation=op.id,
+                        detail=f"auto-approved ({used} of {op.auto_limit_per_day} today)",
+                    )
+                )
+                await self.notifier.auto_write_used(
+                    notice, used, op.auto_limit_per_day, self.auto_link(entry.id, op.id)
+                )
+                return WriteOutcome(result, "auto")
+            await self.audit.record(
+                AuditEvent(
+                    event="write_auto_capped",
+                    caller=caller.agent,
+                    principal=caller.principal,
+                    api=entry.id,
+                    operation=op.id,
+                    detail=f"{op.auto_limit_per_day} automatic writes today; asking a person",
+                )
+            )
 
         group = entry.owners.approver_group or self.settings.notifier.slack.approver_group
         problem = self.approvals.approval_route(caller.requesters(), group)
@@ -1195,6 +1240,8 @@ class Librarian:
         by: str,
         key: str = "dedicated",
         operations: list[str] | None = None,
+        approval: str = "each",
+        cap: int = 100,
     ) -> tuple[EnableWriteRequest, str | None]:
         """An approver enables the operations an agent asked to write: the change goes
         into the entry's review proposal (approve or deny, as always). `operations`
@@ -1256,8 +1303,21 @@ class Librarian:
                     f"Writes use a dedicated credential `{entry.id}/write`; "
                     f"{by} was asked to add it."
                 )
+        auto_ops: set[str] = set()
+        if approval == "auto":
+            auto_ops = {op.id for op in chosen if op.method != "DELETE"}
+            skipped = [op.id for op in chosen if op.method == "DELETE"]
+            lines.append(
+                f"Writes to {', '.join(f'`{o}`' for o in sorted(auto_ops))} are approved "
+                f"automatically, up to {cap} a day (chosen by {by})."
+                + (
+                    f" DELETE operations always need approval: {', '.join(skipped)}."
+                    if skipped
+                    else ""
+                )
+            )
         note = "\n" + " ".join(lines)
-        change = _enable_change(chosen_ids, write_auth, note)
+        change = _enable_change(chosen_ids, write_auth, note, auto_ops, cap)
         updated = change(entry)
         if entry.status is EntryStatus.PROVISIONAL:
             await self.registry.save(updated)
@@ -1287,7 +1347,13 @@ class Librarian:
         return decided, proposal.link
 
     async def enable_operation(
-        self, api_id: str, op_id: str, by: str, key: str = "dedicated"
+        self,
+        api_id: str,
+        op_id: str,
+        by: str,
+        key: str = "dedicated",
+        approval: str = "each",
+        cap: int = 100,
     ) -> tuple[EnableWriteRequest, str | None]:
         """Enable writes for an operation from the console, without waiting for an agent
         to ask. Joins the pending request for it when there is one."""
@@ -1304,7 +1370,7 @@ class Librarian:
             request = await self.enablement.open(
                 entry, [op], who=by, reason="enabled from the console", notify=False, join=False
             )
-        return await self.enable_writes(request.id, by, key)
+        return await self.enable_writes(request.id, by, key, approval=approval, cap=cap)
 
     async def enable_status(self, request_id: str, caller: Caller) -> dict[str, Any]:
         """Where an enable-write request stands, for the agent that asked: pending,
@@ -1539,27 +1605,60 @@ class Librarian:
         )
         return updated, proposal, names
 
+    async def _auto_count(self, entry: ApiEntry, op: Operation) -> int:
+        """Count one automatic write today for this operation, across replicas."""
+        day = int(time.time() // 86400)
+        if self.state is not None:
+            return await self.state.count_hit(f"auto:{entry.id}:{op.id}"[:200], day)
+        key = (entry.id, op.id, day)
+        self._auto_uses[key] = self._auto_uses.get(key, 0) + 1
+        return self._auto_uses[key]
+
+    def auto_link(self, api_id: str, op_id: str) -> str:
+        """The page where an approver puts per-write approval back with one click."""
+        token = self.approvals.page_token("auto", f"{api_id}/{op_id}")
+        return f"{self.settings.public_url.rstrip('/')}/auto/{api_id}/{op_id}?t={token}"
+
     async def set_operation_access(
-        self, api_id: str, op_id: str, choice: str, by: str
+        self, api_id: str, op_id: str, choice: str, by: str, cap: int | None = None
     ) -> tuple[ApiEntry, Proposal]:
-        """A person decided what an operation with unknown access is: `read` (safe to
-        call), `write` (needs approval each time) or `exclude` (agents may not call it).
-        Provisional entries change at once and the decision is carried into the open
-        review; verified entries get it as a proposal, merged at once by default."""
+        """A person decided what an operation is: `read` (safe to call), `write` (needs
+        approval each time), `auto` (writable, approved automatically up to `cap` a day)
+        or `exclude` (agents may not call it). Provisional entries change at once and the
+        decision is carried into the open review; verified entries get it as a proposal,
+        merged at once by default."""
         entry = self.registry.get(api_id)
         if entry is None:
             raise LibrarianError(f"unknown API {api_id!r}")
-        if entry.operation(op_id) is None:
+        op = entry.operation(op_id)
+        if op is None:
             raise LibrarianError(f"{api_id!r} has no operation {op_id!r}")
         if choice == "read":
-            fields: dict[str, Any] = {"access": Access.READ, "read_basis": ReadBasis.REVIEWED}
+            fields: dict[str, Any] = {
+                "access": Access.READ,
+                "read_basis": ReadBasis.REVIEWED,
+                "writable": False,
+                "approval": "each",
+            }
         elif choice == "write":
-            fields = {"access": Access.WRITE, "writable": True}
+            fields = {"access": Access.WRITE, "writable": True, "approval": "each"}
+        elif choice == "auto":
+            if op.method == "DELETE":
+                raise LibrarianError("DELETE writes are never approved automatically")
+            fields = {"access": Access.WRITE, "writable": True, "approval": "auto"}
+            if cap is not None:
+                fields["auto_limit_per_day"] = max(1, min(cap, 100_000))
         elif choice == "exclude":
-            fields = {"access": Access.WRITE, "writable": False}
+            fields = {"access": Access.WRITE, "writable": False, "approval": "each"}
         else:
-            raise LibrarianError("the choice is read, write or exclude")
-        note = f"\n{by} marked `{op_id}` as {choice} in the console."
+            raise LibrarianError("the choice is read, write, auto or exclude")
+        what = {
+            "read": "read",
+            "write": "write (approved each time)",
+            "auto": f"write, approved automatically (up to {cap or op.auto_limit_per_day}/day)",
+            "exclude": "exclude",
+        }[choice]
+        note = f"\n{by} marked `{op_id}` as {what} in the console."
 
         def change(base: ApiEntry) -> ApiEntry:
             operations = [
@@ -2250,15 +2349,26 @@ class Librarian:
         return None
 
 
-def _enable_change(ops: set[str], write_auth: AuthSpec | None, note: str) -> EntryChange:
+def _enable_change(
+    ops: set[str],
+    write_auth: AuthSpec | None,
+    note: str,
+    auto_ops: set[str] | None = None,
+    cap: int = 100,
+) -> EntryChange:
     """The decision "these operations are writable (and this is the write credential,
-    when the entry has none)" as a function of whatever the proposal already holds."""
+    when the entry has none; and these are approved automatically)" as a function of
+    whatever the proposal already holds."""
+    auto = auto_ops or set()
+
+    def fields(op: Operation) -> dict[str, Any]:
+        update: dict[str, Any] = {"access": Access.WRITE, "writable": True}
+        if op.id in auto and op.method != "DELETE":
+            update |= {"approval": "auto", "auto_limit_per_day": max(1, min(cap, 100_000))}
+        return update
 
     def change(base: ApiEntry) -> ApiEntry:
-        operations = [
-            o.model_copy(update={"access": Access.WRITE, "writable": True}) if o.id in ops else o
-            for o in base.operations
-        ]
+        operations = [o.model_copy(update=fields(o)) if o.id in ops else o for o in base.operations]
         update: dict[str, Any] = {"operations": operations, "notes": (base.notes + note)[:8000]}
         if base.write_auth is None and write_auth is not None:
             update["write_auth"] = write_auth

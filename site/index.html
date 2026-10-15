@@ -40,7 +40,7 @@
     <h1>One librarian for every API your agents&nbsp;use.</h1>
     <p class="lede">Agents ask librarian for data instead of carrying their own API keys. It learns an API the first time one is needed, asks a person for the key once, serves reads within policy, and holds every write until a person approves it.</p>
     <div class="install"><pre><code>pip install librarian-a2a
-docker pull ghcr.io/kultar/librarian:0.17.2</code></pre></div>
+docker pull ghcr.io/kultar/librarian:0.18.0</code></pre></div>
     <div class="actions">
       <a class="btn" href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Try it in ten minutes</a>
       <a class="btn quiet" href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploy it for a team</a>
@@ -175,7 +175,7 @@ docker compose up -d
         <h3>For your team</h3>
         <p>A Helm chart with oauth2-proxy sign-in, git-sync for the registry, Postgres for shared state and AWS Secrets Manager for keys. Two or more replicas, no volumes, nothing exposed to the internet.</p>
 <pre><code>helm install librarian oci://ghcr.io/kultar/charts/librarian \
-  --version 0.17.2 -n librarian -f values.yaml
+  --version 0.18.0 -n librarian -f values.yaml
 helm test librarian -n librarian</code></pre>
         <a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a>
       </div>
@@ -245,6 +245,7 @@ mcp_servers:
         <li>Activity in the console: the last seven days in numbers, the busiest APIs, and recent events per API</li>
         <li>Writes an agent wants but nobody has enabled yet become requests: Enable or Decline from Slack or the console, with a dedicated write credential asked for when there is none</li>
         <li>Whole write flows enabled in one go, slashes in path arguments that are paths or refs, and plain-language requests that answer within a time budget</li>
+        <li>Automatic approval per operation with a daily cap and a one-click way back, and a Change control on every operation in the console</li>
       </ul></div>
       <div><h3>Next</h3><ul>
         <li>Verifying the SearXNG and Brave documentation search, and Google and Microsoft sign-in, live</li>

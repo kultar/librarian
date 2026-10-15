@@ -34,6 +34,8 @@ operations:
     parameters:
       - {name: issueIdOrKey, in: path}
       # - {name: path, in: path, allow_slash: true}   # a file path or git ref may contain "/"
+    # approval: auto            # writes run without a person (never DELETE), up to
+    # auto_limit_per_day: 100   # this many a day; chosen in the console or when enabling
       - {name: fields, in: query, description: Comma-separated fields}
   - id: searchPost
     method: POST

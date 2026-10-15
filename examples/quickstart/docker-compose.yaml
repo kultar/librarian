@@ -1,7 +1,7 @@
 # librarian quick start: librarian + a demo API that needs a key. See docs/getting-started.md.
 services:
   librarian:
-    image: ghcr.io/kultar/librarian:0.17.2
+    image: ghcr.io/kultar/librarian:0.18.0
     ports: ["8080:8080"]
     command: [serve, --config, /config/librarian.yaml]
     environment:

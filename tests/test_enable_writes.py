@@ -218,7 +218,7 @@ async def test_console_enables_an_operation_with_the_read_key(
     c = console(librarian)
     t = token(librarian)
     page = c.get("/apis/tracker").text
-    assert "/ops/renameProject/enable" in page and "Enable writes" in page
+    assert "/ops/renameProject/access" in page and "Change</button>" in page
     assert "/ops/addComment/enable" in page and "Add a write credential" in page
     assert "/ops/getIssue/enable" not in page
     done = c.post("/apis/tracker/ops/renameProject/enable", data={"t": t, "key": "read"})
@@ -257,7 +257,7 @@ async def test_console_lists_wanted_writes_and_the_page_declines(librarian: Libr
     assert "Enable writes on" in c.get("/waiting").text
     detail = c.get("/apis/tracker").text
     assert "Wanted writes" in detail and "wants to write: decide" in detail
-    assert "/ops/renameProject/enable" not in detail  # the request's page decides, not a button
+    assert "/ops/renameProject/access" not in detail  # the request's page decides, not a control
     client = enable_client(librarian)
     t = librarian.enablement.token_for(asked)
     done = client.post(
@@ -267,7 +267,7 @@ async def test_console_lists_wanted_writes_and_the_page_declines(librarian: Libr
     assert client.post(f"/enable/{asked.id}", data={"t": t, "action": "decline"}).status_code == 404
     assert "Enable writes on" not in c.get("/").text
     assert (
-        "/ops/renameProject/enable" in c.get("/apis/tracker").text
+        "/ops/renameProject/access" in c.get("/apis/tracker").text
     )  # a person can still enable it
 
 

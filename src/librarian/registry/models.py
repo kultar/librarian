@@ -186,6 +186,15 @@ class Operation(StrictModel):
     # Writes: a reviewer must opt each write operation in. Even then every call
     # needs human approval (or a matching grant) and a write credential.
     writable: bool = False
+    # `auto`: an approver decided in advance; each write runs without a person, up to
+    # `auto_limit_per_day` a day (then a person is asked again). Never for DELETE. Set
+    # when writes are enabled or later in the console; one click puts approval back.
+    approval: Literal["each", "auto"] = Field(
+        default="each", exclude_if=lambda value: value == "each"
+    )
+    auto_limit_per_day: int = Field(
+        default=100, ge=1, le=100_000, exclude_if=lambda value: value == 100
+    )
     # May an approval of this operation be remembered as a grant? Never for DELETE.
     rememberable: bool | None = None
     origin: Origin = Origin.MANUAL
@@ -247,6 +256,13 @@ class Operation(StrictModel):
             raise ValueError(
                 f"operation {self.id!r}: only access: write operations can be writable"
             )
+        if self.approval == "auto":
+            if not self.writable:
+                raise ValueError(
+                    f"operation {self.id!r}: automatic approval needs a writable operation"
+                )
+            if self.method == "DELETE":
+                raise ValueError(f"operation {self.id!r}: DELETE writes are never auto-approved")
         if self.rememberable is None:
             self.rememberable = self.method != "DELETE"
         elif self.rememberable and self.method == "DELETE":

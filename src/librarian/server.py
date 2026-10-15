@@ -61,7 +61,13 @@ from librarian import __version__, telemetry
 from librarian.approvals import WriteApproval
 from librarian.calls import Caller, CallRequest, WriteRequest
 from librarian.config import PrincipalSettings
-from librarian.console import consent_routes, console_routes, enable_routes, review_routes
+from librarian.console import (
+    auto_routes,
+    consent_routes,
+    console_routes,
+    enable_routes,
+    review_routes,
+)
 from librarian.credentials import CredentialRequest
 from librarian.executor import PolicyDenied
 from librarian.mcp_server import build_mcp
@@ -533,6 +539,7 @@ def create_pages_app(librarian: Librarian) -> Starlette:
             *review_routes(librarian),
             *consent_routes(librarian),
             *enable_routes(librarian),
+            *auto_routes(librarian),
             *asset_routes(),
             Route("/healthz", healthz, methods=["GET"]),
         ]
@@ -612,6 +619,7 @@ def create_app(
             *review_routes(librarian),
             *consent_routes(librarian),
             *enable_routes(librarian),
+            *auto_routes(librarian),
             *asset_routes(),
         ]
 

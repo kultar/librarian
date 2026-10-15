@@ -28,6 +28,9 @@ high-value target. This document lists what we defend against, how, and what is 
   skill can, and only for operations a reviewer marked `writable: true` on a **verified** entry.
   Auto-learned (provisional) entries can never be written to.
 - Writes use a **separate write credential** (`write_auth`); the read path never holds it.
+- **Automatic approval** is per operation, chosen by an approver (recorded in the reviewed
+  entry), capped per day, never for DELETE, still subject to every policy check and the write
+  rate limit, announced on each use, and revocable with one click.
 - Every write needs a human approval for that exact request (bound by a fingerprint of agent,
   principal, operation, arguments and body) or a matching **grant**. Agents cannot approve
   anything; approvals come only from the approval page.

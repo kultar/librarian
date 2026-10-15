@@ -10,6 +10,7 @@ action is written to the audit log with who did it.
 
 from __future__ import annotations
 
+import hmac
 import html
 import json
 from datetime import UTC, datetime, timedelta
@@ -267,6 +268,8 @@ EVENT_LABELS = {
     "writes_enabled": "Write key allowed",
     "slashes_allowed": "Slashes allowed",
     "decisions_reapplied": "Decisions re-applied",
+    "write_auto": "Write (automatic)",
+    "write_auto_capped": "Automatic writes capped",
     "proposal_merge_failed": "Merge refused",
     "operation_access_set": "Operation decided",
     "auth_set": "Authentication set",
@@ -945,6 +948,8 @@ def _auth(entry: ApiEntry) -> str:
 def _access(op: Operation) -> str:
     if op.access is Access.READ:
         return f"read ({e(op.read_basis.value if op.read_basis else 'method')})"
+    if op.writable and op.approval == "auto":
+        return f"<b>write</b> (automatic, up to {op.auto_limit_per_day}/day)"
     if op.writable:
         return "<b>write</b> (enabled)"
     if op.access is Access.WRITE:
@@ -952,34 +957,60 @@ def _access(op: Operation) -> str:
     return "unknown (needs review)"
 
 
+def _current_choice(op: Operation) -> str | None:
+    if op.access is Access.UNKNOWN:
+        return None
+    if op.access is Access.READ:
+        return "read"
+    if not op.writable:
+        return "exclude"
+    return "auto" if op.approval == "auto" else "write"
+
+
 def _op_flags(librarian: Librarian, entry: ApiEntry, op: Operation, token: str) -> str:
     o = librarian.observations
     flags: list[str] = []
-    if op.access is Access.UNKNOWN and token:  # no token: a page with its own decision form
-        options = "".join(
-            f"<option value={v}>{label}</option>"
-            for v, label in (
-                ("read", "read: safe to call"),
-                ("write", "write: needs approval each time"),
-                ("exclude", "exclude: agents may not call it"),
-            )
+    asked = librarian.enablement.pending_for(entry.id, op.id) if token else None
+    if asked is not None:
+        flags.append(
+            f"<a href='{e(librarian.enablement.link(asked))}'>"
+            f"{e(', '.join(asked.requested_by))} wants to write: decide</a>"
         )
+    elif token:  # no token: a page with its own decision form
+        current = _current_choice(op)
+        choices = [
+            ("read", "read: safe to call"),
+            ("write", "write: needs approval each time"),
+        ]
+        if op.method != "DELETE":
+            choices.append(("auto", "write: approved automatically"))
+        choices.append(("exclude", "exclude: agents may not call it"))
+        options = "".join(
+            f"<option value={v}{' selected' if v == current else ''}>{label}</option>"
+            for v, label in choices
+        )
+        cap = (
+            f"<input type=number name=cap value='{op.auto_limit_per_day}' min=1 max=100000 "
+            f"class=cap aria-label='Automatic writes per day' title='Automatic writes per day'>"
+            if op.method != "DELETE" and op.access is not Access.READ
+            else ""
+        )
+        verb = "Decide" if current is None else "Change"
         flags.append(
             f"<form method=post action='/apis/{e(entry.id)}/ops/{e(op.id)}/access' class=inline>"
             f"<input type=hidden name=t value='{e(token)}'>"
-            f"<select name=choice aria-label='Decide {e(op.id)}'>{options}</select>"
-            "<button class='quiet small'>Decide</button></form>"
+            f"<select name=choice aria-label='{verb} {e(op.id)}'>{options}</select>{cap}"
+            f"<button class='quiet small'>{verb}</button></form>"
         )
-    if op.access is not Access.READ and token and not (op.writable and entry.write_auth):
-        asked = librarian.enablement.pending_for(entry.id, op.id)
-        label = "Enable writes" if not op.writable else "Add a write credential"
-        if asked is not None:
+        if op.writable and entry.write_auth is None:
             flags.append(
-                f"<a href='{e(librarian.enablement.link(asked))}'>"
-                f"{e(', '.join(asked.requested_by))} wants to write: decide</a>"
+                _form(
+                    f"/apis/{entry.id}/ops/{op.id}/enable",
+                    token,
+                    "Add a write credential",
+                    "quiet small",
+                )
             )
-        elif op.access is Access.WRITE or op.writable:
-            flags.append(_form(f"/apis/{entry.id}/ops/{op.id}/enable", token, label, "quiet small"))
     why = o.suspended(entry, op)
     if why:
         clear = _form(f"/apis/{entry.id}/ops/{op.id}/clear", token, "Clear", "quiet small")
@@ -1229,8 +1260,32 @@ def console_routes(librarian: Librarian) -> list[Route]:
         if action == "access":
             form = await request.form()
             op_id = request.path_params["op_id"]
+            choice = str(form.get("choice", ""))
+            cap = _int_field(form.get("cap"), 100)
+            entry = librarian.registry.get(api_id)
+            op = entry.operation(op_id) if entry is not None else None
+            if (
+                entry is not None
+                and op is not None
+                and choice in ("write", "auto")
+                and (not op.writable or entry.write_auth is None)
+            ):
+                # Enabling writes: the same path as the enable page, so a missing write
+                # credential is asked for.
+                key = str(form.get("key", "dedicated"))
+                try:
+                    done, link = await librarian.enable_operation(
+                        api_id, op_id, identity, key, approval=choice, cap=cap
+                    )
+                except LookupError:
+                    return notice("note", "Already decided", "Someone else got there first.", 409)
+                return notice(
+                    "ok",
+                    f"Writes enabled for {op_id}",
+                    _enabled_text(librarian, done, link) + back(api_id),
+                )
             updated, proposal = await librarian.set_operation_access(
-                api_id, op_id, str(form.get("choice", "")), identity
+                api_id, op_id, choice, identity, cap
             )
             return notice(
                 "ok",
@@ -1531,6 +1586,13 @@ def review_routes(librarian: Librarian) -> list[Route]:
 # -- the enable-writes page: an agent wants a write nobody has enabled yet -----------------
 
 
+def _int_field(value: Any, default: int) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def _proposal_text(entry: ApiEntry, proposal: Any) -> str:
     """What happened to a console decision, for the notice."""
     if entry.status is EntryStatus.PROVISIONAL:
@@ -1617,6 +1679,14 @@ def _enable_body(
     rows.append(("Write credential", credential))
     if op is not None and op.writable:
         rows.append(("Already enabled", "yes; only the credential is missing"))
+    approval_choice = (
+        "<h3>Approval</h3><p class=choice><label><input type=radio name=approval value=each "
+        "checked> Approve each write (a card every time, or a grant).</label>"
+        "<label><input type=radio name=approval value=auto> Approve writes automatically, up to "
+        "<input type=number name=cap value=100 min=1 max=100000 class=cap aria-label='per day'> "
+        "a day; a person is asked again past that, DELETE operations always need approval, and "
+        "one click puts approval back.</label></p>"
+    )
     details = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows)
     err = f"<p class=err>{e(error)}</p>" if error else ""
     hidden = f"<input type=hidden name=t value='{e(token)}'>"
@@ -1637,7 +1707,7 @@ proposal (approve or deny, as always); every write still needs a person's approv
 Declining keeps it refused and quiet for a week.</p>{err}
 <div class=card><dl>{details}</dl></div>
 <form method=post>{hidden}<input type=hidden name=action value=enable>
-<div class=card><h2>Enable</h2>{ticks}{key_choice}
+<div class=card><h2>Enable</h2>{ticks}{approval_choice}{key_choice}
 <button>{button}</button></div></form>
 <div class=zone><h2>Decline</h2><p class=muted>The agents are told no, and this operation is not
 asked about again for a week.</p>
@@ -1682,7 +1752,15 @@ def enable_routes(librarian: Librarian) -> list[Route]:
             if action == "enable":
                 key = str(form.get("key", "dedicated"))
                 ticked = [str(v) for v in form.getlist("op")] if asked.others else None
-                done, link = await librarian.enable_writes(asked.id, identity, key, ticked)
+                approval = "auto" if str(form.get("approval", "each")) == "auto" else "each"
+                done, link = await librarian.enable_writes(
+                    asked.id,
+                    identity,
+                    key,
+                    ticked,
+                    approval=approval,
+                    cap=_int_field(form.get("cap"), 100),
+                )
                 return notice(
                     "ok",
                     f"Writes enabled for {done.enabled[0] if done.enabled else done.operation}"
@@ -1699,6 +1777,67 @@ def enable_routes(librarian: Librarian) -> list[Route]:
     return [
         Route("/enable/{request_id}", show, methods=["GET"]),
         Route("/enable/{request_id}", submit, methods=["POST"]),
+    ]
+
+
+# -- the "require approval again" page: one click from an FYI ----------------------------
+
+
+def auto_routes(librarian: Librarian) -> list[Route]:
+    def allowed(
+        request: Request, token: str
+    ) -> tuple[Operation | None, ApiEntry | None, str | None, Response | None]:
+        api_id = request.path_params["api_id"]
+        op_id = request.path_params["op_id"]
+        entry = librarian.registry.get(api_id)
+        op = entry.operation(op_id) if entry is not None else None
+        expected = librarian.approvals.page_token("auto", f"{api_id}/{op_id}")
+        if entry is None or op is None or not hmac.compare_digest(expected, token):
+            return None, None, None, expired()
+        identity, problem = approver_identity(request, librarian.settings.approvers)
+        if problem or identity is None:
+            return None, None, None, notice("bad", "Not allowed", e(problem or ""), 403)
+        return op, entry, identity, None
+
+    async def show(request: Request) -> Response:
+        token = request.query_params.get("t", "")
+        op, entry, _, denied = allowed(request, token)
+        if denied is not None or op is None or entry is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        state = (
+            f"approved automatically, up to {op.auto_limit_per_day} a day"
+            if op.writable and op.approval == "auto"
+            else "already approved each time"
+        )
+        body = f"""<h1>Require approval again for {e(op.id)}</h1>
+<p class=lede>{e(op.method)} <code>{e(op.path)}</code> on {e(entry.name)} is {e(state)}.
+Putting approval back means every write to it waits for a person (or a grant) from now on;
+the change lands in the entry's review and is merged.</p>
+<form method=post><input type=hidden name=t value='{e(token)}'>
+<button class=deny>Require approval again</button></form>
+<p class=muted><a href='/apis/{e(entry.id)}'>The API in the console</a></p>"""
+        return page(f"Approval: {op.id}", body, kind="review")
+
+    async def submit(request: Request) -> Response:
+        form: Any = await request.form()
+        op, entry, identity, denied = allowed(request, str(form.get("t", "")))
+        if denied is not None or op is None or entry is None or identity is None:
+            return denied or notice("bad", "Error", "Something went wrong.", 400)
+        try:
+            updated, proposal = await librarian.set_operation_access(
+                entry.id, op.id, "write", identity
+            )
+        except (LibrarianError, RegistryError) as exc:
+            return notice("bad", "Could not do that", e(str(exc)), 400)
+        return notice(
+            "ok",
+            f"{op.id} needs approval again",
+            _proposal_text(updated, proposal) + f" <a href='/apis/{e(entry.id)}'>The API</a>.",
+        )
+
+    return [
+        Route("/auto/{api_id}/{op_id}", show, methods=["GET"]),
+        Route("/auto/{api_id}/{op_id}", submit, methods=["POST"]),
     ]
 
 

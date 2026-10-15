@@ -20,7 +20,7 @@ credential out.
                          └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.17)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
+> Status: **alpha (v0.18)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
 ## Why
 
@@ -69,7 +69,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.17.2
+docker pull ghcr.io/kultar/librarian:0.18.0
 ```
 
 ### What happens on a request
@@ -422,6 +422,16 @@ A flow that needs several operations (create a blob, a tree, a commit, a ref) na
 agent where the request stands (pending, enabled and waiting for the merge, live, declined until a
 date). Nobody edits YAML.
 
+**Automatic approval.** When enabling writes (on the enable page, or with the per-operation
+*Change* control on the console's API page) an approver can choose *approve writes automatically*:
+from then on a write to that operation runs right after the policy checks, with no card, up to a
+daily cap (default 100; then a person is asked again). It is recorded on the operation
+(`approval: auto`, `auto_limit_per_day`), goes through the same proposal and merge, is audited as
+`write_auto`, and every such write is posted to the channel as an FYI with a *Require approval
+again* link: one click puts per-write approval back. DELETE operations are never approved
+automatically, the write rate limit still applies, and a suspended operation is refused as
+always. The *Change* control also flips any decided operation: read, write, automatic or exclude.
+
 **Path arguments with slashes.** A path argument may not contain `/` unless the parameter is marked
 `allow_slash: true` (inferred when the API is learned for parameters that are file paths or git
 refs, such as GitHub's `path`, `ref` and `branch`; the proposal shows it). Even then, empty, `.`
@@ -577,15 +587,19 @@ uv run pytest
   for a whole flow (`also_needs`) with ticks on the page, `enable_status` for agents, a
   wall-clock budget for plain-language requests (`fetch_timeout_seconds`, partial results
   instead of outliving the caller) and a hard cap on the planner's calls
-- **v0.17.2**: startup with a large registry: registry files are parsed with libyaml (5x
+- **v0.17.1**: startup with a large registry: registry files are parsed with libyaml (5x
   faster; a 1 MB GitHub entry took seconds on a throttled core and the liveness probe killed
   the pod), the chart adds a startup probe and `probes` overrides, and `allow_slash` is
   omitted when false so entries written by 0.17 still load on 0.16 replicas
 - **v0.17.2**: a decision on a verified entry is applied on top of what its open proposal
-  already holds, so a second decision no longer overwrites the first (0.17.0 and 0.17.2
+  already holds, so a second decision no longer overwrites the first (0.17.0 and 0.17.1
   rebuilt the file from the live entry); a decision made in the console or on an enable
   page is merged as the App at once (`publish.merge_console_decisions`, default on); the
   console's API page offers *Re-apply and merge* for enabled writes a proposal lost
+- **v0.18**: automatic approval per operation, chosen when writes are enabled or later in the
+  console: writes run without a person up to a daily cap, each one posted as an FYI with a
+  one-click *Require approval again*; never for DELETE. Every operation on the console's API
+  page gets a *Change* control (read, write, automatic, exclude) instead of only undecided ones
 
 ### Next
 

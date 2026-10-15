@@ -92,6 +92,7 @@ label{display:block;margin-top:10px}
 input,select{font:inherit;color:inherit;padding:9px 11px;border-radius:8px;
 border:1px solid var(--line);background:var(--paper);width:100%;margin-top:6px}
 input[type=checkbox],input[type=radio]{width:auto;margin:0 6px 0 0;vertical-align:middle}
+input.cap{width:6em;display:inline-block;padding:4px 8px;margin:0 4px}
 input[type=number]{width:7em;display:inline-block}
 :focus-visible{outline:2px solid var(--brass);outline-offset:2px}
 button{font:inherit;font-weight:500;cursor:pointer;padding:10px 16px;border-radius:8px;

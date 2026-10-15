@@ -117,6 +117,18 @@ class Notifier:
     async def grant_used(self, grant: Any, approval_like: Any) -> None:
         log.info("grant %s used by %s for %s.%s", grant.id, grant.agent, grant.api, grant.operation)
 
+    async def auto_write_used(self, approval_like: Any, used: int, cap: int, link: str) -> None:
+        """A write ran under automatic approval (an FYI; `link` puts approval back)."""
+        log.info(
+            "auto-approved write by %s: %s.%s (%d of %d today); require approval again at %s",
+            approval_like.agent,
+            approval_like.api,
+            approval_like.operation,
+            used,
+            cap,
+            link,
+        )
+
     async def api_changed(
         self,
         api: str,
