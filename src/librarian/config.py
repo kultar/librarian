@@ -88,6 +88,10 @@ class PublishSettings(BaseModel):
     token: SecretStr | None = None  # needs contents:write + pull_requests:write on the repo
     github_app: GitHubAppSettings | None = None  # instead of token (recommended)
     api_url: str = "https://api.github.com"
+    # A decision an approver makes in the console or on an enable page IS the approval:
+    # the proposal it lands in is merged as the App right away (verified entries only;
+    # a learned API's own review still needs its approve step). Off: merge on GitHub.
+    merge_console_decisions: bool = True
 
 
 class IssuerSettings(BaseModel):

@@ -93,6 +93,7 @@ publish:
   # base_branch: main
   # directory: registry
   # token: set-via-LIBRARIAN_PUBLISH__TOKEN
+  # merge_console_decisions: true      # console/enable-page decisions on verified entries merge at once
 
 approvers:
   mode: token                          # token (local) | trusted_header (behind an auth proxy)

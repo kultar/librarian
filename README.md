@@ -69,7 +69,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.17.1
+docker pull ghcr.io/kultar/librarian:0.17.2
 ```
 
 ### What happens on a request
@@ -413,6 +413,10 @@ a dedicated `<api>/write` credential (asked for through the secure key page, wit
 permission those writes need, inferred by the model when one is configured) or reuses the read
 key. Decline keeps the operation refused and quiet for a week. The console's API page also offers
 *Enable writes* on any write operation that is not enabled, without waiting for an agent to ask.
+A decision an approver makes in the console or on an enable page is the approval: on a verified
+entry it lands in the entry's proposal and is merged as the App right away (turn
+`publish.merge_console_decisions` off to merge on GitHub instead); the live entry follows once the
+registry syncs.
 A flow that needs several operations (create a blob, a tree, a commit, a ref) names the rest in
 `also_needs`, so one request and one approver action cover them all; `enable_status` tells the
 agent where the request stands (pending, enabled and waiting for the merge, live, declined until a
@@ -573,10 +577,15 @@ uv run pytest
   for a whole flow (`also_needs`) with ticks on the page, `enable_status` for agents, a
   wall-clock budget for plain-language requests (`fetch_timeout_seconds`, partial results
   instead of outliving the caller) and a hard cap on the planner's calls
-- **v0.17.1**: startup with a large registry: registry files are parsed with libyaml (5x
+- **v0.17.2**: startup with a large registry: registry files are parsed with libyaml (5x
   faster; a 1 MB GitHub entry took seconds on a throttled core and the liveness probe killed
   the pod), the chart adds a startup probe and `probes` overrides, and `allow_slash` is
   omitted when false so entries written by 0.17 still load on 0.16 replicas
+- **v0.17.2**: a decision on a verified entry is applied on top of what its open proposal
+  already holds, so a second decision no longer overwrites the first (0.17.0 and 0.17.2
+  rebuilt the file from the live entry); a decision made in the console or on an enable
+  page is merged as the App at once (`publish.merge_console_decisions`, default on); the
+  console's API page offers *Re-apply and merge* for enabled writes a proposal lost
 
 ### Next
 

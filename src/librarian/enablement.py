@@ -171,6 +171,20 @@ class EnableWriteBroker:
             None,
         )
 
+    async def enabled_for(self, api: str) -> list[EnableWriteRequest]:
+        """Requests enabled for this API (here and on other replicas), oldest first."""
+        found = {
+            r.id: r
+            for r in self._requests.values()
+            if r.state is EnableState.ENABLED and r.api == api
+        }
+        if self.store is not None:
+            for data in await self.store.list_docs(KIND, EnableState.ENABLED.value):
+                request = EnableWriteRequest.model_validate_json(data)
+                if request.api == api:
+                    found[request.id] = request
+        return sorted(found.values(), key=lambda r: r.created_at)
+
     def declined_for(self, api: str, operation: str) -> EnableWriteRequest | None:
         """A recent decline of this operation: the agent is told no without asking again."""
         now = datetime.now(UTC)

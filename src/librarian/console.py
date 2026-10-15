@@ -266,6 +266,8 @@ EVENT_LABELS = {
     "enable_write_expired": "Write enable lapsed",
     "writes_enabled": "Write key allowed",
     "slashes_allowed": "Slashes allowed",
+    "decisions_reapplied": "Decisions re-applied",
+    "proposal_merge_failed": "Merge refused",
     "operation_access_set": "Operation decided",
     "auth_set": "Authentication set",
     "person_disconnected": "Signed out",
@@ -617,6 +619,7 @@ def _detail(
     query: str = "",
     connections: list[Any] | None = None,
     events: list[AuditEvent] | None = None,
+    stale: list[EnableWriteRequest] | None = None,
 ) -> str:
     connections = connections or []
     source_url = f": <code>{e(entry.source.url)}</code>" if entry.source.url else ""
@@ -694,7 +697,7 @@ def _detail(
                 "sends them a link.</p>"
             )
         people = f"<h2 id=people>Signed-in people</h2>{listing}"
-    cards, danger = _actions(librarian, entry, token)
+    cards, danger = _actions(librarian, entry, token, stale or [])
     if events is None:
         activity = f"<h2 id=activity>Activity</h2>{NO_ACTIVITY_DB}"
     else:
@@ -805,9 +808,22 @@ def _operations(librarian: Librarian, entry: ApiEntry, token: str, query: str) -
     return "".join(parts)
 
 
-def _actions(librarian: Librarian, entry: ApiEntry, token: str) -> tuple[str, str]:
+def _actions(
+    librarian: Librarian, entry: ApiEntry, token: str, stale: list[EnableWriteRequest]
+) -> tuple[str, str]:
     base = f"/apis/{entry.id}"
     cards: list[str] = []
+    if stale:
+        ops = sorted({name for r in stale for name in (r.enabled or r.operations)})
+        listed = ", ".join(f"<code>{e(n)}</code>" for n in ops[:8])
+        more = f" and {len(ops) - 8} more" if len(ops) > 8 else ""
+        cards.append(
+            "<div class=card><h2>Enabled writes not live yet</h2><p class=muted>"
+            f"{_n(len(stale), 'enabled write request')} ({listed}{more}) are not in the live "
+            "entry: the proposal is waiting to be merged or the registry to sync. If the "
+            "proposal lost them (a later decision overwrote it), put them back and merge.</p>"
+            f"{_form(f'{base}/reapply', token, 'Re-apply and merge', 'quiet')}</div>"
+        )
     if entry.source.kind in ("openapi", "docs"):
         cards.append(
             "<div class=card><h2>Re-check the source</h2><p class=muted>Re-read the spec or "
@@ -1102,7 +1118,8 @@ def console_routes(librarian: Librarian) -> list[Route]:
             if librarian.state is not None
             else None
         )
-        body = _detail(librarian, entry, token_for(identity), query, connections, events)
+        stale = await librarian.unapplied_enables(entry)
+        body = _detail(librarian, entry, token_for(identity), query, connections, events, stale)
         return page(entry.name, body, kind="console", active="apis")
 
     def back(api_id: str) -> str:
@@ -1212,32 +1229,31 @@ def console_routes(librarian: Librarian) -> list[Route]:
         if action == "access":
             form = await request.form()
             op_id = request.path_params["op_id"]
-            updated, link = await librarian.set_operation_access(
+            updated, proposal = await librarian.set_operation_access(
                 api_id, op_id, str(form.get("choice", "")), identity
-            )
-            review = f" Carried into the review: <a href='{e(link)}'>{e(link)}</a>." if link else ""
-            applied = (
-                "Applied now."
-                if updated.status is EntryStatus.PROVISIONAL
-                else "Proposed for review (verified entries change through the registry repo)."
             )
             return notice(
                 "ok",
                 f"{op_id} decided",
-                f"{applied}{review}{back(api_id)}",
+                f"{_proposal_text(updated, proposal)}{back(api_id)}",
             )
         if action == "slashes":
-            updated, link, names = await librarian.allow_slashes(api_id, identity)
-            review = f" Review: <a href='{e(link)}'>{e(link)}</a>." if link else ""
-            applied = (
-                "Applied now."
-                if updated.status is EntryStatus.PROVISIONAL
-                else "Proposed for review (verified entries change through the registry repo)."
-            )
+            updated, proposal, names = await librarian.allow_slashes(api_id, identity)
             return notice(
                 "ok",
                 "Slashes allowed",
-                f"{e(', '.join(names))}. {applied}{review}{back(api_id)}",
+                f"{e(', '.join(names))}. {_proposal_text(updated, proposal)}{back(api_id)}",
+            )
+        if action == "reapply":
+            stale, proposal = await librarian.reapply_decisions(api_id, identity)
+            entry = librarian.registry.get(api_id)
+            ops = sorted({n for r in stale for n in (r.enabled or r.operations)})
+            return notice(
+                "ok",
+                "Re-applied",
+                f"{e(', '.join(ops))}. "
+                + (_proposal_text(entry, proposal) if entry else e(proposal.note))
+                + back(api_id),
             )
         if action == "enable":
             form = await request.form()
@@ -1513,6 +1529,21 @@ def review_routes(librarian: Librarian) -> list[Route]:
 
 
 # -- the enable-writes page: an agent wants a write nobody has enabled yet -----------------
+
+
+def _proposal_text(entry: ApiEntry, proposal: Any) -> str:
+    """What happened to a console decision, for the notice."""
+    if entry.status is EntryStatus.PROVISIONAL:
+        text = "Applied now."
+        if proposal.link:
+            text += (
+                f" Carried into the review: <a href='{e(proposal.link)}'>{e(proposal.link)}</a>."
+            )
+        return text
+    text = e(proposal.note.capitalize()) + "."
+    if proposal.link:
+        text += f" Proposal: <a href='{e(proposal.link)}'>{e(proposal.link)}</a>."
+    return text
 
 
 def _enabled_text(librarian: Librarian, done: EnableWriteRequest, link: str | None) -> str:

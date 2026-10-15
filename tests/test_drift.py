@@ -84,7 +84,7 @@ class Proposals:
     async def comment(self, api_id: str, text: str) -> list[str]:
         return []
 
-    async def refresh(self, entry: ApiEntry, note: str) -> str | None:
+    async def refresh(self, entry: ApiEntry, note: str, change: Any = None) -> str | None:
         return None
 
     async def merge(self, api_id: str, by: str) -> str | None:

@@ -22,6 +22,7 @@ class FakeGitHub:
         self.file_exists = file_exists
         self.existing_status = existing_status
         self.merge_blocked = False
+        self.branch_files: dict[str, str] = {}  # branch -> file text, as committed
         self.open_pulls: list[dict[str, Any]] = [
             {
                 "number": 7,
@@ -45,11 +46,17 @@ class FakeGitHub:
         if request.method == "POST" and path == "/git/refs":
             return httpx.Response(201, json={})
         if request.method == "GET" and path.startswith("/contents/"):
+            ref = request.url.params.get("ref", "")
+            if ref in self.branch_files:
+                content = base64.b64encode(self.branch_files[ref].encode())
+                return httpx.Response(200, json={"sha": "head-sha", "content": content.decode()})
             if self.file_exists:
                 content = base64.b64encode(f"id: jira\nstatus: {self.existing_status}\n".encode())
                 return httpx.Response(200, json={"sha": "old-sha", "content": content.decode()})
             return httpx.Response(404, json={})
         if request.method == "PUT" and path.startswith("/contents/"):
+            assert body is not None
+            self.branch_files[str(body["branch"])] = base64.b64decode(body["content"]).decode()
             return httpx.Response(201, json={})
         if request.method == "POST" and path == "/pulls":
             return httpx.Response(201, json={"html_url": "https://github.com/acme/registry/pull/7"})
@@ -156,7 +163,7 @@ async def test_onboard_publishes_and_survives_publish_failure(
         async def comment(self, api_id: str, text: str) -> list[str]:
             raise PublishError("GitHub is down")
 
-        async def refresh(self, entry: Any, note: str) -> str | None:
+        async def refresh(self, entry: Any, note: str, change: Any = None) -> str | None:
             raise PublishError("GitHub is down")
 
         async def merge(self, api_id: str, by: str) -> str | None:

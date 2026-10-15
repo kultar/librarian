@@ -313,7 +313,7 @@ class DecisionPublisher:
     async def comment(self, api_id: str, text: str) -> list[str]:
         return []
 
-    async def refresh(self, entry: Any, note: str) -> str | None:
+    async def refresh(self, entry: Any, note: str, change: Any = None) -> str | None:
         if entry.id in self.open_for:
             self.refreshed.append((entry.id, note))
             return "https://github.test/pr/open"

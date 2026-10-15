@@ -76,6 +76,7 @@ from librarian.openapi import (
 from librarian.opsearch import rank
 from librarian.planner import FetchAnswer, FetchOutcome, Planner
 from librarian.policy import PolicyEngine
+from librarian.publish import Change as EntryChange
 from librarian.publish import GitHubPublisher, Publisher, PublishError
 from librarian.recipes import Recipe, recipe_summary
 from librarian.recipes import learn as learn_recipe
@@ -166,6 +167,27 @@ class WriteNotEnabled(WriteRefused):
             f"asked to enable it (request {request.id}). Retry once they have."
         )
         self.request = request
+
+
+@dataclass
+class Proposal:
+    """What happened to a decision on a verified entry: the proposal it went into,
+    whether it was merged (console decisions are, unless configured otherwise) and why
+    not, when GitHub refused."""
+
+    link: str | None
+    merged: bool = False
+    problem: str | None = None
+
+    @property
+    def note(self) -> str:
+        if self.link is None:
+            return "no review could be opened (no registry publisher); the entry is unchanged"
+        if self.merged:
+            return "merged; live once the registry syncs"
+        if self.problem:
+            return f"proposed; GitHub refused the merge ({self.problem}); merge it on GitHub"
+        return "proposed for review"
 
 
 @dataclass
@@ -1037,11 +1059,19 @@ class Librarian:
                 raise LibrarianError("that authentication needs a valid header or query name")
             updated = self._with_auth(entry, auth, f"chosen by {by}")
         await self.registry.save(updated)
-        link = await self._propose(
+        proposal = await self._propose(
             updated,
             f"{updated.name}: authentication {scheme}",
             f"{by} set the authentication to {scheme} in the console.",
+            lambda base: base.model_copy(
+                update={
+                    "auth": updated.auth,
+                    "credential": updated.credential,
+                    "notes": updated.notes,
+                }
+            ),
         )
+        link = proposal.link
         await self.audit.record(
             AuditEvent(
                 event="auth_set",
@@ -1054,20 +1084,51 @@ class Librarian:
         )
         return updated, link
 
-    async def _propose(self, entry: ApiEntry, title: str, body: str) -> str | None:
+    async def _propose(
+        self,
+        entry: ApiEntry,
+        title: str,
+        body: str,
+        change: EntryChange | None = None,
+        *,
+        merge: bool = False,
+        by: str = "",
+    ) -> Proposal:
         """Carry a decision into the entry's review: a new commit on its open proposal
-        when there is one (one pull request per entry, approve or deny), else a new
-        proposal. None when no review could be opened (logged)."""
+        when there is one (one pull request per entry), else a new proposal. `change`
+        is the decision as a function, applied to what the proposal already holds so
+        earlier decisions survive. With `merge`, a decision on a verified entry is
+        merged as the App at once (the approver decided in the console)."""
         if self.publisher is None:
-            return None
+            return Proposal(None)
         try:
-            link = await self.publisher.refresh(entry, f"{title}\n\n{body}")
+            link = await self.publisher.refresh(entry, f"{title}\n\n{body}", change)
             if link is None:
                 link = await self.publisher.propose_update(entry, title, body)
-            return link
         except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
             log.warning("could not carry %s into a review: %s", entry.id, exc)
-            return None
+            return Proposal(None, problem=str(exc)[:500])
+        if not (
+            merge
+            and entry.status is EntryStatus.VERIFIED
+            and self.settings.publish.merge_console_decisions
+        ):
+            return Proposal(link)
+        try:
+            merged = await self.publisher.merge(entry.id, by)
+        except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+            await self.audit.record(
+                AuditEvent(
+                    event="proposal_merge_failed",
+                    caller="console",
+                    principal=by,
+                    api=entry.id,
+                    detail=str(exc)[:500],
+                    extra={"review_url": link},
+                )
+            )
+            return Proposal(link, problem=str(exc)[:300])
+        return Proposal(link, merged=merged is not None)
 
     # -- enabling writes --------------------------------------------------------
 
@@ -1168,16 +1229,9 @@ class Librarian:
             lines.append("Left disabled: " + ", ".join(f"`{o}`" for o in left) + ".")
         if request.reasons:
             lines.append("Reason given: " + " / ".join(request.reasons))
-        changed = [
-            o.model_copy(update={"access": Access.WRITE, "writable": True})
-            if o.id in chosen_ids
-            else o
-            for o in entry.operations
-        ]
-        update: dict[str, Any] = {"operations": changed}
         key_request: CredentialRequest | None = None
+        write_auth: AuthSpec | None = None
         if entry.write_auth is None:
-            write_auth: AuthSpec
             if isinstance(entry.auth, OAuth2UserAuth):
                 write_auth = entry.auth
                 lines.append("Writes use each person's own sign-in, like reads.")
@@ -1202,23 +1256,23 @@ class Librarian:
                     f"Writes use a dedicated credential `{entry.id}/write`; "
                     f"{by} was asked to add it."
                 )
-            update["write_auth"] = write_auth
         note = "\n" + " ".join(lines)
-        updated = entry.model_copy(update={**update, "notes": (entry.notes + note)[:8000]})
+        change = _enable_change(chosen_ids, write_auth, note)
+        updated = change(entry)
         if entry.status is EntryStatus.PROVISIONAL:
             await self.registry.save(updated)
         named = ", ".join(o.id for o in chosen[:3]) + (
             f" and {len(chosen) - 3} more" if len(chosen) > 3 else ""
         )
-        link = await self._propose(
-            updated, f"{entry.name}: enable writes for {named}", " ".join(lines)
+        proposal = await self._propose(
+            updated,
+            f"{entry.name}: enable writes for {named}",
+            " ".join(lines),
+            change,
+            merge=True,
+            by=by,
         )
-        if entry.status is EntryStatus.PROVISIONAL:
-            outcome = "applied now"
-        elif link is not None:
-            outcome = "proposed for review"
-        else:
-            outcome = "no review could be opened (no registry publisher); the entry is unchanged"
+        outcome = "applied now" if entry.status is EntryStatus.PROVISIONAL else proposal.note
         if key_request is not None:
             outcome += "; a write credential was asked for"
         decided = await self.enablement.decide(
@@ -1226,11 +1280,11 @@ class Librarian:
             EnableState.ENABLED,
             by,
             outcome,
-            review_url=link,
+            review_url=proposal.link,
             key_request=key_request.id if key_request else None,
             enabled=[o.id for o in chosen],
         )
-        return decided, link
+        return decided, proposal.link
 
     async def enable_operation(
         self, api_id: str, op_id: str, by: str, key: str = "dedicated"
@@ -1290,7 +1344,8 @@ class Librarian:
                 status["state"] = "live"
                 status["message"] = "enabled and in effect; writes go through normal approval"
             else:
-                waits = ["the review to be merged"]
+                merged = bool(request.note and request.note.startswith("merged"))
+                waits = ["the registry to sync" if merged else "the review to be merged"]
                 key = self.broker.get(request.key_request) if request.key_request else None
                 if key is not None and key.state is RequestState.PENDING:
                     waits.append("the write credential to be added")
@@ -1309,6 +1364,75 @@ class Librarian:
             status["state"] = "expired"
             status["message"] = "nobody decided in time; asking again opens a new request"
         return status
+
+    async def unapplied_enables(self, entry: ApiEntry) -> list[EnableWriteRequest]:
+        """Enable-write requests already decided whose operations are not live yet: the
+        proposal is waiting to be merged or the registry to sync, or (before 0.17.2) a
+        later decision overwrote them in the proposal."""
+
+        def live(request: EnableWriteRequest) -> bool:
+            wanted = request.enabled or request.operations
+            return entry.write_auth is not None and all(
+                (op := entry.operation(name)) is not None and op.writable for name in wanted
+            )
+
+        return [r for r in await self.enablement.enabled_for(entry.id) if not live(r)]
+
+    async def reapply_decisions(
+        self, api_id: str, by: str
+    ) -> tuple[list[EnableWriteRequest], Proposal]:
+        """Put every enabled-but-not-live write request back into the entry's proposal
+        (and merge it): the repair for proposals where a later decision overwrote an
+        earlier one. Returns the requests re-applied and the proposal."""
+        entry = self.registry.get(api_id)
+        if entry is None:
+            raise LibrarianError(f"unknown API {api_id!r}")
+        stale = await self.unapplied_enables(entry)
+        if not stale:
+            raise LibrarianError("every enabled write request is already live")
+        wanted: set[str] = set()
+        write_auth: AuthSpec | None = None
+        for request in stale:
+            wanted |= set(request.enabled or request.operations)
+            if request.key_request:
+                key = await self.broker.load(request.key_request)
+                if key is not None:
+                    write_auth = _write_auth_like(entry.auth, key.secret_ref)
+        if entry.write_auth is None and write_auth is None:
+            # The approver chose the read credential (or the API has none / per-person).
+            write_auth = (
+                BearerAuth(secret_ref=f"{entry.id}/write")
+                if isinstance(entry.auth, NoAuth)
+                else entry.auth
+            )
+        names = sorted(wanted)
+        note = (
+            f"\n{by} re-applied enabled write requests to the proposal: "
+            + ", ".join(f"`{n}`" for n in names)
+            + "."
+        )
+        change = _enable_change(wanted, write_auth, note)
+        named = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+        proposal = await self._propose(
+            change(entry),
+            f"{entry.name}: re-apply enabled writes for {named}",
+            f"{by} re-applied {len(stale)} enabled write request(s) that were not in the "
+            f"proposal: {', '.join(names)}.",
+            change,
+            merge=True,
+            by=by,
+        )
+        await self.audit.record(
+            AuditEvent(
+                event="decisions_reapplied",
+                caller="console",
+                principal=by,
+                api=api_id,
+                detail=", ".join(names)[:2000],
+                extra={"review_url": proposal.link, "merged": proposal.merged},
+            )
+        )
+        return stale, proposal
 
     async def decline_writes(self, request_id: str, by: str, note: str = "") -> EnableWriteRequest:
         """An approver declines: the operation stays refused and the same agents are
@@ -1354,10 +1478,11 @@ class Librarian:
             if not p.allow_slash and looks_like_path(p.name, p.description)
         ]
 
-    async def allow_slashes(self, api_id: str, by: str) -> tuple[ApiEntry, str | None, list[str]]:
+    async def allow_slashes(self, api_id: str, by: str) -> tuple[ApiEntry, Proposal, list[str]]:
         """A person allows "/" in the path parameters that look like paths or refs (the
-        console). Provisional entries change at once; verified ones get a proposal.
-        Returns the entry, the review link and the `operation.parameter` names changed."""
+        console). Provisional entries change at once; verified ones get a proposal,
+        merged at once by default. Returns the entry, the proposal and the
+        `operation.parameter` names changed."""
         entry = self.registry.get(api_id)
         if entry is None:
             raise LibrarianError(f"unknown API {api_id!r}")
@@ -1365,31 +1490,38 @@ class Librarian:
         if not candidates:
             raise LibrarianError("no path parameter looks like a file path or a ref")
         wanted = {(op.id, p.name) for op, p in candidates}
-        operations = [
-            op.model_copy(
-                update={
-                    "parameters": [
-                        p.model_copy(update={"allow_slash": True})
-                        if (op.id, p.name) in wanted
-                        else p
-                        for p in op.parameters
-                    ]
-                }
-            )
-            for op in entry.operations
-        ]
         names = [f"{op.id}.{p.name}" for op, p in candidates]
         note = f"\n{by} allowed '/' in path arguments that are paths or refs: {', '.join(names)}."
-        updated = entry.model_copy(
-            update={"operations": operations, "notes": (entry.notes + note)[:8000]}
-        )
+
+        def change(base: ApiEntry) -> ApiEntry:
+            operations = [
+                op.model_copy(
+                    update={
+                        "parameters": [
+                            p.model_copy(update={"allow_slash": True})
+                            if (op.id, p.name) in wanted
+                            else p
+                            for p in op.parameters
+                        ]
+                    }
+                )
+                for op in base.operations
+            ]
+            return base.model_copy(
+                update={"operations": operations, "notes": (base.notes + note)[:8000]}
+            )
+
+        updated = change(entry)
         if entry.status is EntryStatus.PROVISIONAL:
             await self.registry.save(updated)
-        link = await self._propose(
+        proposal = await self._propose(
             updated,
             f"{entry.name}: allow slashes in {len(names)} path argument(s)",
             f"{by} allowed '/' in path arguments that are file paths or refs (segments are "
             f"still checked): {', '.join(names)}.",
+            change,
+            merge=True,
+            by=by,
         )
         await self.audit.record(
             AuditEvent(
@@ -1398,45 +1530,55 @@ class Librarian:
                 principal=by,
                 api=api_id,
                 detail=", ".join(names)[:2000],
-                extra={"review_url": link, "applied": entry.status is EntryStatus.PROVISIONAL},
+                extra={
+                    "review_url": proposal.link,
+                    "merged": proposal.merged,
+                    "applied": entry.status is EntryStatus.PROVISIONAL,
+                },
             )
         )
-        return updated, link, names
+        return updated, proposal, names
 
     async def set_operation_access(
         self, api_id: str, op_id: str, choice: str, by: str
-    ) -> tuple[ApiEntry, str | None]:
+    ) -> tuple[ApiEntry, Proposal]:
         """A person decided what an operation with unknown access is: `read` (safe to
         call), `write` (needs approval each time) or `exclude` (agents may not call it).
         Provisional entries change at once and the decision is carried into the open
-        review; verified entries only get a proposal."""
+        review; verified entries get it as a proposal, merged at once by default."""
         entry = self.registry.get(api_id)
         if entry is None:
             raise LibrarianError(f"unknown API {api_id!r}")
-        op = entry.operation(op_id)
-        if op is None:
+        if entry.operation(op_id) is None:
             raise LibrarianError(f"{api_id!r} has no operation {op_id!r}")
         if choice == "read":
-            changed = op.model_copy(
-                update={"access": Access.READ, "read_basis": ReadBasis.REVIEWED}
-            )
+            fields: dict[str, Any] = {"access": Access.READ, "read_basis": ReadBasis.REVIEWED}
         elif choice == "write":
-            changed = op.model_copy(update={"access": Access.WRITE, "writable": True})
+            fields = {"access": Access.WRITE, "writable": True}
         elif choice == "exclude":
-            changed = op.model_copy(update={"access": Access.WRITE, "writable": False})
+            fields = {"access": Access.WRITE, "writable": False}
         else:
             raise LibrarianError("the choice is read, write or exclude")
-        operations = [changed if o.id == op_id else o for o in entry.operations]
         note = f"\n{by} marked `{op_id}` as {choice} in the console."
-        updated = entry.model_copy(
-            update={"operations": operations, "notes": (entry.notes + note)[:8000]}
-        )
+
+        def change(base: ApiEntry) -> ApiEntry:
+            operations = [
+                o.model_copy(update=fields) if o.id == op_id else o for o in base.operations
+            ]
+            return base.model_copy(
+                update={"operations": operations, "notes": (base.notes + note)[:8000]}
+            )
+
+        updated = change(entry)
         if entry.status is EntryStatus.PROVISIONAL:
             await self.registry.save(updated)
-        link = await self._propose(
+        proposal = await self._propose(
             updated,
             f"{entry.name}: {op_id} is {choice}",
             f"{by} decided in the console that `{op_id}` is {choice}.",
+            change,
+            merge=True,
+            by=by,
         )
         await self.audit.record(
             AuditEvent(
@@ -1446,10 +1588,14 @@ class Librarian:
                 api=api_id,
                 operation=op_id,
                 detail=choice,
-                extra={"review_url": link, "applied": entry.status is EntryStatus.PROVISIONAL},
+                extra={
+                    "review_url": proposal.link,
+                    "merged": proposal.merged,
+                    "applied": entry.status is EntryStatus.PROVISIONAL,
+                },
             )
         )
-        return updated, link
+        return updated, proposal
 
     async def _settle_auth_after_401(self, entry: ApiEntry, status: int) -> ApiEntry | None:
         """An API whose entry says "no authentication" answered 401. Work the scheme out
@@ -2102,6 +2248,23 @@ class Librarian:
         if not result.ok:
             return f"validation call returned HTTP {result.status_code}"
         return None
+
+
+def _enable_change(ops: set[str], write_auth: AuthSpec | None, note: str) -> EntryChange:
+    """The decision "these operations are writable (and this is the write credential,
+    when the entry has none)" as a function of whatever the proposal already holds."""
+
+    def change(base: ApiEntry) -> ApiEntry:
+        operations = [
+            o.model_copy(update={"access": Access.WRITE, "writable": True}) if o.id in ops else o
+            for o in base.operations
+        ]
+        update: dict[str, Any] = {"operations": operations, "notes": (base.notes + note)[:8000]}
+        if base.write_auth is None and write_auth is not None:
+            update["write_auth"] = write_auth
+        return base.model_copy(update=update)
+
+    return change
 
 
 def _write_auth_like(auth: AuthSpec, secret_ref: str) -> AuthSpec:

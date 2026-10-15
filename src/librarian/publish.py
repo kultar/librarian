@@ -12,17 +12,23 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 from urllib.parse import quote
 
 import httpx
 import yaml
+from pydantic import ValidationError
 
 from librarian.registry.models import Access, ApiEntry, EntryStatus
 from librarian.registry.store import dump_entry, load_yaml
 
 log = logging.getLogger(__name__)
+
+Change = Callable[[ApiEntry], ApiEntry]
+"""A decision as a function: applied to whatever the proposal already holds, so a
+later decision never overwrites an earlier one that is still waiting to be merged."""
 
 
 class PublishError(Exception):
@@ -51,10 +57,11 @@ class Publisher(Protocol):
         """Leave `text` on the API's open review proposals; returns their URLs."""
         ...
 
-    async def refresh(self, entry: ApiEntry, note: str) -> str | None:
-        """Push the entry as a new commit onto its open proposal (with `note` as a
-        comment), so one pull request keeps carrying every decision; None when there
-        is no open proposal for it."""
+    async def refresh(self, entry: ApiEntry, note: str, change: Change | None = None) -> str | None:
+        """Commit onto the entry's open proposal (with `note` as a comment), so one pull
+        request keeps carrying every decision; None when there is no open proposal.
+        With `change`, it is applied to the proposal's current file (the head), which
+        already holds earlier decisions; without, `entry` replaces the file."""
         ...
 
     async def merge(self, api_id: str, by: str) -> str | None:
@@ -154,7 +161,7 @@ class GitHubPublisher:
             closed.append(str(pr["html_url"]))
         return closed
 
-    async def refresh(self, entry: ApiEntry, note: str) -> str | None:
+    async def refresh(self, entry: ApiEntry, note: str, change: Change | None = None) -> str | None:
         proposals = await self._open_proposals(entry.id)
         if not proposals:
             return None
@@ -162,9 +169,30 @@ class GitHubPublisher:
         branch = str(pr["head"]["ref"])
         file_path = self._file_path(entry)
         current = await self._call("GET", f"/contents/{quote(file_path)}", params={"ref": branch})
+        head_text: str | None = None
+        if current.status_code == 200:
+            try:
+                head_text = base64.b64decode(str(current.json()["content"])).decode("utf-8")
+            except (ValueError, KeyError):
+                head_text = None
+        proposed = entry
+        if change is not None and head_text is not None:
+            try:
+                head_entry = ApiEntry.model_validate(load_yaml(head_text))
+            except (ValidationError, yaml.YAMLError, TypeError, ValueError) as exc:
+                log.warning(
+                    "proposal head of %s is unreadable (%s); proposing from the live entry",
+                    entry.id,
+                    str(exc)[:200],
+                )
+            else:
+                proposed = change(head_entry)
+        text = dump_entry(as_approved(proposed))
+        if head_text is not None and text == head_text:
+            return str(pr["html_url"])  # already there: nothing to commit
         payload: dict[str, Any] = {
             "message": note,
-            "content": base64.b64encode(dump_entry(as_approved(entry)).encode()).decode(),
+            "content": base64.b64encode(text.encode()).decode(),
             "branch": branch,
         }
         if current.status_code == 200:
