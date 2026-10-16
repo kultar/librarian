@@ -12,8 +12,11 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any, cast
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
@@ -205,10 +208,12 @@ class Executor:
         )
 
         last_headers: dict[str, str] = {}
+        response_headers: Mapping[str, str] = {}
         while next_url is not None and page_count < request.max_pages:
             response, body, cut, final_url = await self._send(
                 entry, op, next_url, next_query, secret_query, headers, request.body
             )
+            response_headers = response.headers
             last_headers = {
                 name: response.headers[name]
                 for name in ("deprecation", "sunset")
@@ -276,6 +281,18 @@ class Executor:
             origin=op.origin.value,
             confirmed=self.observations.confirmed(entry, op),
         )
+        refusal, refusal_detail = _refusal(entry, status_code, response_headers, data, secret)
+        extra: dict[str, Any] = {"pages": page_count, "truncated": truncated}
+        if status_code >= 400:
+            extra["upstream"] = _said(data, secret)
+            log.info(
+                "%s.%s answered HTTP %s for %s: %s",
+                entry.id,
+                op.id,
+                status_code,
+                caller.agent,
+                refusal_detail or extra["upstream"] or "(no body)",
+            )
         await self.audit.record(
             AuditEvent(
                 event="call",
@@ -286,8 +303,8 @@ class Executor:
                 status_code=status_code,
                 bytes=total_bytes,
                 duration_ms=int((time.monotonic() - started) * 1000),
-                detail="permission denied by the API" if status_code == 403 else None,
-                extra={"pages": page_count, "truncated": truncated},
+                detail=refusal_detail,
+                extra=extra,
             )
         )
         if status_code == 401 and auth is not None:
@@ -318,13 +335,10 @@ class Executor:
                 "authentication. It needs a credential: choose its authentication in the "
                 "console (APIs → this API → Authentication), then a key can be added."
             )
-        if status_code == 403:
-            # The credential works but may not see this resource. A new key would not
-            # help, so tell the caller instead of paging an approver.
-            error = (
-                f"{entry.name} refused this request (HTTP 403): the credential is valid but "
-                "lacks permission for this resource"
-            )
+        if refusal is not None:
+            # Rate limited, SAML, or the credential works but may not see this resource.
+            # A new key would not help, so tell the caller instead of paging an approver.
+            error = refusal
         if request.select:
             data = select(data, request.select)
         return CallResult(
@@ -388,7 +402,22 @@ class Executor:
             span.set_attribute("http.response.status_code", response.status_code)
         content_type = response.headers.get("content-type", "")
         status_code = response.status_code
+        data = _decode(body, content_type, cut)
         excerpt = json.dumps(request.body, default=str)[:2000] if request.body is not None else None
+        refusal, refusal_detail = _refusal(
+            entry, status_code, response.headers, data, secret, write=True
+        )
+        extra: dict[str, Any] = {"args": request.args, "body_excerpt": excerpt}
+        if status_code >= 400:
+            extra["upstream"] = _said(data, secret)
+            log.info(
+                "%s.%s answered HTTP %s to a write by %s: %s",
+                entry.id,
+                op.id,
+                status_code,
+                caller.agent,
+                refusal_detail or extra["upstream"] or "(no body)",
+            )
         await self.audit.record(
             AuditEvent(
                 event="write",
@@ -399,20 +428,19 @@ class Executor:
                 status_code=status_code,
                 bytes=len(body),
                 duration_ms=int((time.monotonic() - started) * 1000),
-                extra={"args": request.args, "body_excerpt": excerpt},
+                detail=refusal_detail,
+                extra=extra,
             )
         )
-        error = None
-        if status_code in (401, 403):
-            error = (
-                f"{entry.name} refused the write (HTTP {status_code}): check the write credential"
-            )
-        elif response.is_redirect:
+        error = refusal
+        if status_code == 401:
+            error = f"{entry.name} refused the write (HTTP 401): check the write credential"
+        elif error is None and response.is_redirect:
             error = f"{entry.name} answered with a redirect; writes are never re-sent elsewhere"
         return CallResult(
             status_code=status_code,
             ok=200 <= status_code < 300,
-            data=_decode(body, content_type, cut),
+            data=data,
             truncated=cut,
             content_type=content_type,
             error=error,
@@ -530,6 +558,122 @@ class Executor:
                 if client is not self.client:
                     await client.aclose()
         raise PolicyDenied(f"too many redirects calling {entry.id!r}")
+
+
+SAID_LIMIT = 240
+_TOKEN_SHAPES = re.compile(
+    r"(?i)\b(?:bearer\s+\S+|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+    r"|xox[abprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})"
+)
+
+
+def _said(data: Any, secret: str | None = None) -> str:
+    """What the API said in an error body: one short line, with any credential removed."""
+    text = ""
+    if isinstance(data, dict):
+        found = cast(dict[str, Any], data)
+        for key in ("message", "error_description", "detail", "title", "error", "errors"):
+            value = found.get(key)
+            if value:
+                text = value if isinstance(value, str) else json.dumps(value, default=str)
+                break
+        else:
+            text = json.dumps(found, default=str) if found else ""
+    elif isinstance(data, str):
+        text = data
+    elif data is not None:
+        text = json.dumps(data, default=str)
+    text = " ".join(text.split())
+    if secret:
+        text = text.replace(secret, "[redacted]")
+    text = _TOKEN_SHAPES.sub("[redacted]", text)
+    return text if len(text) <= SAID_LIMIT else text[: SAID_LIMIT - 1] + "…"
+
+
+def _reset_time(headers: Mapping[str, str]) -> datetime | None:
+    """When the limit lifts: Retry-After (seconds or a date), else X-RateLimit-Reset."""
+    retry_after = headers.get("retry-after")
+    if retry_after:
+        if retry_after.strip().isdigit():
+            return datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=int(retry_after))
+        try:
+            return parsedate_to_datetime(retry_after).astimezone(UTC)
+        except (TypeError, ValueError):
+            pass
+    reset = headers.get("x-ratelimit-reset") or headers.get("ratelimit-reset")
+    if reset and reset.strip().isdigit():
+        value = int(reset)
+        if value > 10**9:  # an epoch, as GitHub sends it
+            return datetime.fromtimestamp(value, UTC)
+        return datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=value)
+    return None
+
+
+def _throttled(status_code: int, headers: Mapping[str, str], said: str) -> str | None:
+    """How the API throttled the call and when to retry, or None when it did not throttle."""
+    lowered = said.lower()
+    limited = status_code == 429 or (
+        status_code == 403
+        and (
+            headers.get("x-ratelimit-remaining") == "0"
+            or "retry-after" in headers
+            or "rate limit" in lowered
+            or "too many requests" in lowered
+        )
+    )
+    if not limited:
+        return None
+    kind = "a secondary rate limit" if "secondary" in lowered else "the rate limit"
+    reset = _reset_time(headers)
+    if reset is None:
+        return f"{kind} is exhausted and the API gave no reset time; retry in a few minutes"
+    wait = max(0, int((reset - datetime.now(UTC)).total_seconds()))
+    minutes = (wait + 59) // 60
+    when = reset.strftime("%Y-%m-%dT%H:%M:%SZ")
+    in_words = f"in {minutes} min" if minutes else "now"
+    return f"{kind} is exhausted until {when} ({in_words}); retry then"
+
+
+def _refusal(
+    entry: ApiEntry,
+    status_code: int,
+    headers: Mapping[str, str],
+    data: Any,
+    secret: str | None,
+    *,
+    write: bool = False,
+) -> tuple[str | None, str | None]:
+    """Why the API refused a call, for the caller and for the audit record.
+
+    Rate limiting (429, or GitHub's 403 with the limit exhausted) is told apart from
+    a permission problem so nobody goes checking token scopes when the token is fine.
+    """
+    said = _said(data, secret)
+    quoted = f" The API said: {said}" if said else ""
+    what = "the write" if write else "this request"
+    throttled = _throttled(status_code, headers, said)
+    if throttled is not None:
+        return (
+            f"{entry.name} is rate limiting this credential (HTTP {status_code}): {throttled}. "
+            f"The credential and its permissions are fine.{quoted}",
+            f"rate limited by the API: {throttled}",
+        )
+    if status_code != 403:
+        return None, None
+    if "saml" in said.lower() or "saml" in json.dumps(data, default=str).lower():
+        return (
+            f"{entry.name} refused {what} (HTTP 403): the organization enforces "
+            "SAML single sign-on and this token is not authorized for it. On GitHub, "
+            "open the token's settings and use Configure SSO to authorize it for the "
+            "organization; the token itself is fine.",
+            "refused by the API: token not authorized for SAML single sign-on",
+        )
+    credential = "the write credential" if write else "the credential"
+    return (
+        f"{entry.name} refused {what} (HTTP 403): {credential} is valid but lacks permission "
+        f"for this resource.{quoted}",
+        "permission denied by the API",
+    )
 
 
 def _build_request(

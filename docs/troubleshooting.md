@@ -114,6 +114,23 @@ If the message names the right group and you are in it, the proxy is not forward
 claim: check the groups header the pod receives. Before 0.18.2 the page compared your groups
 with the Slack group and said "members of None" when there was none; upgrade.
 
+**GitHub answers 403 "Resource protected by organization SAML enforcement".**
+The token is fine but not authorized for an organization that enforces SAML single sign-on.
+On GitHub open the token's settings and use *Configure SSO* for that organization, then retry.
+Since 0.19.1 the write's error and the credential page say so.
+
+**"the credential is valid but lacks permission" near the top of every hour (GitHub).**
+That was a rate limit, not a permission problem: a token shared with another consumer runs
+out of its hourly core limit, and GitHub answers 403 with `X-RateLimit-Remaining: 0`. Since
+0.19.1 librarian reports it as rate limiting, with the reset time, in the error and in the audit
+record (`rate limited by the API: ...`); the audit record's `upstream` field keeps the API's
+own message. Give librarian its own token, or raise the limit (a GitHub App gets its own).
+
+**A retried write ran twice / opened a second approval.**
+Before 0.19.1 an `idempotency_key` was matched in one pod's memory only; with two replicas a
+retry on the other pod sent the write again, and grant or automatic writes were never matched.
+Upgrade; the key is now kept in the database with the write.
+
 **"no one can approve: ... (approvers.group)"** when an agent asks to write.
 The agent has no `owner` (or acts for no one) and no approver group is configured, so nobody
 could ever approve: set `approvers.group`, or give the agent an owner who signs in.

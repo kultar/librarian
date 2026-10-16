@@ -66,6 +66,7 @@ class WriteApproval(BaseModel):
     grant_id: str | None = None
     note: str | None = None
     result: dict[str, Any] | None = None  # CallResult as JSON once executed
+    executed_at: datetime | None = None  # when the write ran (the result is as of then)
     # Requested by a caller that does not wait (e.g. MCP): librarian runs the write
     # itself once approved, and the caller polls for the outcome.
     detached: bool = False
@@ -292,6 +293,27 @@ class ApprovalBroker:
         )
         return grant
 
+    async def set_grant_notices(self, grant_id: str, by: str, *, on: bool) -> Grant:
+        """Whether each use of this grant is posted to the channel (writes.announce_grants
+        must be on too)."""
+        grant = await self._grant(grant_id)
+        if grant.source == "config":
+            raise ApprovalError("this grant comes from the config file; change it there")
+        grant.notify_owner = on
+        self._grants[grant.id] = grant
+        await self._save_grant(grant)
+        await self.audit.record(
+            AuditEvent(
+                event="grant_adjusted",
+                api=grant.api,
+                operation=grant.operation,
+                caller=by,
+                detail=f"grant {grant.id} for {grant.agent}: notices " + ("on" if on else "off"),
+                extra={"notify_owner": on},
+            )
+        )
+        return grant
+
     async def revoke_grant(self, grant_id: str, by: str) -> Grant:
         grant = await self._grant(grant_id)
         grant.revoked = True
@@ -323,17 +345,62 @@ class ApprovalBroker:
             if a.detached and a.state in (ApprovalState.PENDING, ApprovalState.APPROVED)
         ]
 
-    def find_executed(self, caller: Caller, idempotency_key: str) -> WriteApproval | None:
-        return next(
+    @staticmethod
+    def _key_doc(agent: str, idempotency_key: str) -> str:
+        return hashlib.sha256(f"{agent}\0{idempotency_key}".encode()).hexdigest()[:32]
+
+    async def _remember_key(self, approval: WriteApproval) -> None:
+        """Index the approval by (agent, idempotency key) so every replica finds it."""
+        key = approval.request.idempotency_key
+        if key and self.store is not None:
+            await self.store.save_doc(
+                "idempotency", self._key_doc(approval.agent, key), approval.state.value, approval.id
+            )
+
+    async def find_by_key(self, caller: Caller, idempotency_key: str) -> WriteApproval | None:
+        """The live or executed write this agent already made with this key, if any
+        (pending, approved, running or executed; on any replica)."""
+        live = (
+            ApprovalState.PENDING,
+            ApprovalState.APPROVED,
+            ApprovalState.EXECUTING,
+            ApprovalState.EXECUTED,
+        )
+        found = next(
             (
                 a
                 for a in self._approvals.values()
                 if a.agent == caller.agent
                 and a.request.idempotency_key == idempotency_key
-                and a.state is ApprovalState.EXECUTED
+                and a.state in live
             ),
             None,
         )
+        if found is None and self.store is not None:
+            approval_id = await self.store.get_doc(
+                "idempotency", self._key_doc(caller.agent, idempotency_key)
+            )
+            if approval_id:
+                stored = await self.load(approval_id)
+                if stored is not None and stored.agent == caller.agent and stored.state in live:
+                    found = stored
+        return found
+
+    async def record_executed(
+        self, notice: WriteApproval, result: dict[str, Any], note: str
+    ) -> WriteApproval:
+        """Keep a write that ran without a decision (a grant, automatic approval) like any
+        other executed write: `write_status` finds it and a repeat with the same
+        idempotency key returns this result."""
+        notice.state = ApprovalState.EXECUTED
+        notice.result = result
+        notice.note = note
+        notice.executed_at = datetime.now(UTC)
+        self._approvals[notice.id] = notice
+        self._events.setdefault(notice.id, asyncio.Event())
+        await self._save(notice)
+        await self._remember_key(notice)
+        return notice
 
     async def open(
         self, entry: ApiEntry, op: Operation, request: WriteRequest, caller: Caller
@@ -371,6 +438,7 @@ class ApprovalBroker:
             self._approvals[approval.id] = approval
             self._events[approval.id] = asyncio.Event()
             await self._save(approval)
+            await self._remember_key(approval)
         telemetry.write_requests.add(
             1, {"librarian.api": entry.id, "outcome": "approval_requested"}
         )
@@ -566,6 +634,7 @@ class ApprovalBroker:
         approval.state = ApprovalState.EXECUTED if ok else ApprovalState.FAILED
         approval.result = result
         approval.note = note
+        approval.executed_at = datetime.now(UTC)
         await self._save(approval)
         await self.notifier.write_closed(approval)
 
@@ -580,10 +649,11 @@ class ApprovalBroker:
     async def _decide(
         self, approval: WriteApproval, state: ApprovalState, by: str | None, note: str
     ) -> None:
-        approval.state = state
-        approval.decided_by = by
-        approval.note = note
-        await self._save(approval)
+        # Store first, then update the shared copy: a waiter that wakes in between must
+        # not try to claim a write the database still shows as pending.
+        decided = approval.model_copy(update={"state": state, "decided_by": by, "note": note})
+        await self._save(decided)
+        approval.state, approval.decided_by, approval.note = state, by, note
         self._events.setdefault(approval.id, asyncio.Event()).set()
         await self.audit.record(
             AuditEvent(

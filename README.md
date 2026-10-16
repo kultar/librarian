@@ -69,7 +69,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.19.0
+docker pull ghcr.io/kultar/librarian:0.19.1
 ```
 
 ### What happens on a request
@@ -492,6 +492,10 @@ writes:
       notify_owner: true               # FYI to the channel on each use
 ```
 
+Each use of a grant is posted to the channel. `writes.announce_grants: false` stops that for all
+grants, and the console's Grants page turns notices off per grant; every use is still in the
+audit log and on the Activity page.
+
 An agent with no owner and no person can only be approved by the approver group; if no one could
 approve, the write is refused immediately. `librarian grants list|revoke` and `librarian approvals
 list` manage it all; revoking is the kill switch.
@@ -635,6 +639,19 @@ uv run pytest
   days, a number of their own, or until revoked (the page used to offer 1, 7 or 30 and the
   backend capped at 90). The console's Grants page sets a new expiry on any grant. Optional
   ceiling `writes.max_grant_days`
+- **v0.19.1**: idempotency keys work across replicas and restarts, and for grant and automatic
+  writes too (they were matched in one process's memory only, so a retry on the other pod sent
+  the write again and opened a second approval). A repeat while the first is pending joins
+  it. Every executed write answers with a `message` saying how it ran (approved by whom,
+  under which grant, automatically, or not sent again); `write_status` dates the result and
+  says it is as of execution. A decision is stored before waiters see it (a waiter could try
+  to claim a write the database still showed as pending). GitHub's SAML enforcement 403 is
+  explained, on the credential page and in the error. Upstream rate limiting (429, or a 403
+  with the limit exhausted) is told apart from a permission problem: the error and the audit
+  record say when the limit resets, and the API's own error message is kept (redacted) in the
+  audit record. `writes.announce_grants: false` (chart: `config.writes.announce_grants`) stops
+  the channel post on each use of a standing grant, and the Grants page turns notices off per
+  grant
 
 ### Next
 

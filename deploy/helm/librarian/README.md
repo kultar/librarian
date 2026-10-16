@@ -42,6 +42,7 @@ people ──HTTPS──► │ oauth2-proxy :4180 ──► 127.0.0.1:8081     
 | Registry repo access (GitHub App) | `githubApp.enabled=true`, `githubApp.appId`, `githubApp.installationId`, `githubApp.secretName` (see below) |
 | Probes | `probes.startup` (default: 10 s period, 60 failures, so a large registry can finish parsing before liveness applies), `probes.readiness`, `probes.liveness`; each takes Kubernetes probe fields |
 | Automatic writes in the channel | `config.writes.announce_auto: true` posts each automatically approved write to Slack with a one-click way back; off by default, every one is in the audit log regardless |
+| Grant uses in the channel | `config.writes.announce_grants: false` stops the post made each time a standing grant is used (a grant covering a multi-step flow posts one per step); on by default. Every use stays in the audit log and on the console's Activity page, and the Grants page can turn notices off per grant |
 | Grant length | `config.writes.max_grant_days` (default `null`: no limit) caps how long an approver may make an "allow similar writes" grant last, e.g. `90`; with no limit approvers may choose until revoked. Grants are re-timed or revoked on the console's Grants page |
 | Caller keys | `config.callers` + caller keys as `LIBRARIAN_SECRET_LIBRARIAN_CALLERS_<AGENT>` via `envFrom` |
 | Secrets in AWS | `config.secrets_backend: aws`, `serviceAccount.annotations` (IRSA role) |

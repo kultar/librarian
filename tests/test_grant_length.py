@@ -16,7 +16,7 @@ from librarian.config import ApproverSettings, Settings
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian
 from librarian.web import approval_routes, grant_length
-from tests.conftest import BASE, Router
+from tests.conftest import BASE, RecordingNotifier, Router
 from tests.test_console import console, token
 from tests.test_writes import KIM, approve_when_open, comment
 
@@ -144,3 +144,49 @@ async def test_the_console_adjusts_a_grant(librarian: Librarian, audit: MemoryAu
     assert capped.status_code == 400 and "at most 3 days" in capped.text
     await broker.revoke_grant("g1", "kim@x.test")
     assert c.post("/grants/g1/expiry", data={"t": t, "days": "1"}).status_code == 400
+
+
+async def test_grant_notices_can_be_turned_off_globally_or_per_grant(
+    librarian: Librarian, router: Router, notifier: RecordingNotifier, audit: MemoryAuditSink
+) -> None:
+    librarian.settings.approvers.console = "open"
+    task = asyncio.create_task(librarian.write(comment("PAY-1"), KIM))
+    await approve_when_open(librarian, remember=True, grant_days=7)
+    await asyncio.wait_for(task, 5)
+    grant = librarian.approvals.grants()[0]
+    assert grant.notify_owner  # the default: each use is posted
+    assert (await librarian.write(comment("PAY-1", text="2"), KIM)).how == "grant"
+    assert notifier.write_events[-1][0] == "grant_used"
+    # off for the deployment: audited and logged, not posted
+    librarian.settings.writes.announce_grants = False
+    before = len(notifier.write_events)
+    assert (await librarian.write(comment("PAY-1", text="3"), KIM)).how == "grant"
+    assert len(notifier.write_events) == before
+    assert audit.events[-1].event == "write"
+    c = console(librarian)
+    t = token(librarian)
+    assert "off for all: writes.announce_grants" in c.get("/grants").text
+    # back on for the deployment, off for this grant from the console
+    librarian.settings.writes.announce_grants = True
+    page = c.get("/grants").text
+    assert f"/grants/{grant.id}/notices" in page and "Turn off" in page
+    done = c.post(f"/grants/{grant.id}/notices", data={"t": t, "on": "off"})
+    assert done.status_code == 200 and "no longer posted" in done.text
+    assert not librarian.approvals.grants()[0].notify_owner
+    assert audit.events[-1].event == "grant_adjusted"
+    assert audit.events[-1].extra == {"notify_owner": False}
+    assert (await librarian.write(comment("PAY-1", text="4"), KIM)).how == "grant"
+    assert len(notifier.write_events) == before
+    assert "Turn on" in c.get("/grants").text
+    # a config grant is changed in the file
+    broker = librarian.approvals
+    broker._grants["cfg"] = Grant(  # pyright: ignore[reportPrivateUsage]
+        id="cfg",
+        agent="bot",
+        api="tracker",
+        operation="addComment",
+        created_by="config",
+        source="config",
+    )
+    refused = c.post("/grants/cfg/notices", data={"t": t, "on": "off"})
+    assert refused.status_code == 400 and "config file" in refused.text

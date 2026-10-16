@@ -503,6 +503,21 @@ def _grants_page(librarian: Librarian, token: str, include_inactive: bool) -> st
     now = datetime.now(UTC)
     grants = librarian.approvals.grants(include_inactive=include_inactive)
 
+    announce = librarian.settings.writes.announce_grants
+
+    def notices(g: Grant) -> str:
+        state = "on" if g.notify_owner else "off"
+        if not announce:
+            return (
+                f"<td><span class=muted>{state} (off for all: writes.announce_grants)</span></td>"
+            )
+        if g.source != "approval" or not g.usable(now):
+            return f"<td>{state}</td>"
+        flip = "off" if g.notify_owner else "on"
+        field = f"<input type=hidden name=on value='{flip}'>"
+        form = _form(f"/grants/{g.id}/notices", token, f"Turn {flip}", "quiet small", field)
+        return f"<td>{state} {form}</td>"
+
     def last(g: Grant) -> str:
         if g.usable(now):
             adjust = ""
@@ -520,12 +535,12 @@ def _grants_page(librarian: Librarian, token: str, include_inactive: bool) -> st
         f"<tr><td>{e(g.agent)}{' for ' + e(g.principal) if g.principal else ''}</td>"
         f"<td><code>{e(g.api)}.{e(g.operation)}</code></td>"
         f"<td>{_pins(g)}</td><td>{_expiry(g)}</td><td>{e(g.source)}, by {e(g.created_by)}</td>"
-        f"{last(g)}</tr>"
+        f"{notices(g)}{last(g)}</tr>"
         for g in grants
     )
     table = (
         f"<table><tr><th>Agent</th><th>Operation</th><th>Pinned</th><th>Limits</th>"
-        f"<th>Source</th><th></th></tr>{rows}</table>"
+        f"<th>Source</th><th>Notices</th><th></th></tr>{rows}</table>"
         if grants
         else "<p class=empty>No standing grants: every write is approved one by one.</p>"
     )
@@ -537,8 +552,9 @@ def _grants_page(librarian: Librarian, token: str, include_inactive: bool) -> st
     return f"""<div class=pagehead><h1>Grants</h1></div>
 <p class=lede>Writes an agent may make without asking each time. Revoking one is the kill
 switch: the next such write waits for a person again. <i>Set</i> gives a grant a new expiry,
-counted from now, or makes it last until revoked. Grants from the config file come back on
-restart.</p>{table}{toggle}"""
+counted from now, or makes it last until revoked. <i>Notices</i> is whether each use is posted
+to the channel; every use is in the audit log and on the Activity page regardless. Grants from
+the config file come back on restart.</p>{table}{toggle}"""
 
 
 def _people_page(librarian: Librarian, token: str, connections: list[Any]) -> str:
@@ -1212,6 +1228,19 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 "Grant updated",
                 f"The grant for {e(grant.agent)} on {e(grant.api)}.{e(grant.operation)} "
                 f"now lasts {lasts}. <a href='/grants'>Back</a>.",
+            )
+        if action == "notices":
+            form = await request.form()
+            on = form.get("on") == "on"
+            grant = await librarian.approvals.set_grant_notices(
+                request.path_params["grant_id"], identity, on=on
+            )
+            posted = "is posted to the channel" if on else "is no longer posted to the channel"
+            return notice(
+                "ok",
+                "Grant updated",
+                f"Each use of the grant for {e(grant.agent)} on {e(grant.api)}."
+                f"{e(grant.operation)} {posted}. <a href='/grants'>Back</a>.",
             )
         if action == "block":
             await librarian.block(api_id, identity)

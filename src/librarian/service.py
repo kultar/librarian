@@ -193,9 +193,10 @@ class Proposal:
 @dataclass
 class WriteOutcome:
     result: CallResult
-    how: str  # "approved" | "grant" | "idempotent"
+    how: str  # "approved" | "grant" | "auto" | "idempotent"
     approval_id: str | None = None
     grant_id: str | None = None
+    message: str = ""  # how it came to run, for the agent
 
 
 ApprovalHook = Callable[[WriteApproval], Awaitable[None]]
@@ -684,7 +685,45 @@ class Librarian:
         }
         if approval.result is not None:
             status["result"] = approval.result
+        if approval.state is ApprovalState.EXECUTED:
+            when = f" at {approval.executed_at:%Y-%m-%d %H:%M} UTC" if approval.executed_at else ""
+            status["result_as_of"] = (
+                approval.executed_at.isoformat() if approval.executed_at else None
+            )
+            status["message"] = (
+                f"The result is {approval.api}'s response when the write ran{when}; the "
+                "resource may have changed since. Read it again for its current state."
+            )
         return status
+
+    async def _prior_write(
+        self, idempotency_key: str, caller: Caller
+    ) -> WriteOutcome | WriteApproval | None:
+        """What this agent already did with this key: the earlier result (never sent
+        again), or the approval still deciding or running."""
+        prior = await self.approvals.find_by_key(caller, idempotency_key)
+        if prior is None:
+            return None
+        deadline = time.monotonic() + 5
+        while prior.state in (ApprovalState.APPROVED, ApprovalState.EXECUTING):
+            # decided, running on some replica: its result is moments away
+            if time.monotonic() > deadline:
+                break
+            await asyncio.sleep(0.2)
+            prior = await self.approvals.load(prior.id) or prior
+        if prior.state is ApprovalState.EXECUTED and prior.result is not None:
+            when = f" at {prior.executed_at:%Y-%m-%d %H:%M} UTC" if prior.executed_at else ""
+            return WriteOutcome(
+                CallResult.model_validate(prior.result),
+                "idempotent",
+                prior.id,
+                prior.grant_id,
+                f"Not sent again: this agent already ran this write with idempotency key "
+                f"{idempotency_key!r}{when}; this is that result.",
+            )
+        if prior.state is ApprovalState.PENDING:
+            return prior
+        return None  # failed, denied or expired: a fresh request
 
     def _finish_in_background(self, approval: WriteApproval, caller: Caller) -> None:
         async def finish() -> None:
@@ -703,11 +742,9 @@ class Librarian:
     ) -> WriteOutcome | WriteApproval:
         """Policy, idempotency and grants; opens an approval when a human must decide."""
         if request.idempotency_key:
-            prior = self.approvals.find_executed(caller, request.idempotency_key)
-            if prior is not None and prior.result is not None:
-                return WriteOutcome(
-                    CallResult.model_validate(prior.result), "idempotent", prior.id, prior.grant_id
-                )
+            prior = await self._prior_write(request.idempotency_key, caller)
+            if prior is not None:
+                return prior
         if self.registry.get(request.api) is None:
             await self.registry.refresh_stored()  # learned on another replica?
         decision = self.policy.check_write(request, caller)
@@ -763,8 +800,35 @@ class Librarian:
                 expires_at=datetime.now(UTC),
                 channel=entry.owners.channel or self.settings.notifier.slack.channel,
             )
-            await self.notifier.grant_used(grant, notice)
-            return WriteOutcome(result, "grant", grant_id=grant.id)
+            if self.settings.writes.announce_grants and grant.notify_owner:
+                await self.notifier.grant_used(grant, notice)
+            else:
+                log.info(
+                    "write by %s ran under grant %s: %s.%s (use %d%s)",
+                    caller.agent,
+                    grant.id,
+                    entry.id,
+                    op.id,
+                    grant.uses,
+                    f"/{grant.max_uses}" if grant.max_uses else "",
+                )
+            notice.grant_id = grant.id
+            await self.approvals.record_executed(
+                notice, result.model_dump(mode="json"), f"ran under grant {grant.id}"
+            )
+            lasts = (
+                f"until {grant.expires_at:%Y-%m-%d}"
+                if grant.expires_at is not None
+                else "until it is revoked"
+            )
+            return WriteOutcome(
+                result,
+                "grant",
+                notice.id,
+                grant.id,
+                f"Ran at once under a standing grant ({grant.id}, created by {grant.created_by}, "
+                f"{lasts}): similar writes by this agent run without asking a person.",
+            )
 
         if op.approval == "auto" and op.method != "DELETE":
             used = await self._auto_count(entry, op)
@@ -809,7 +873,18 @@ class Librarian:
                         op.auto_limit_per_day,
                         link,
                     )
-                return WriteOutcome(result, "auto")
+                await self.approvals.record_executed(
+                    notice, result.model_dump(mode="json"), "approved automatically"
+                )
+                return WriteOutcome(
+                    result,
+                    "auto",
+                    notice.id,
+                    message=(
+                        f"Approved automatically: an approver chose that for {entry.id}."
+                        f"{op.id} ({used} of {op.auto_limit_per_day} today)."
+                    ),
+                )
             await self.audit.record(
                 AuditEvent(
                     event="write_auto_capped",
@@ -861,7 +936,10 @@ class Librarian:
         note = "done" if result.ok else (result.error or f"HTTP {result.status_code}")
         await self.approvals.finish(approval, result.ok, stored, note)
         telemetry.write_requests.add(1, {"librarian.api": approval.api, "outcome": "executed"})
-        return WriteOutcome(result, "approved", approval.id, approval.grant_id)
+        who = f" by {approval.decided_by}" if approval.decided_by else ""
+        return WriteOutcome(
+            result, "approved", approval.id, approval.grant_id, f"Approved{who} and run once."
+        )
 
     def capabilities(
         self, query: str | None = None, caller: Caller = SYSTEM_CALLER

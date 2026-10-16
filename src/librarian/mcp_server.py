@@ -68,7 +68,8 @@ def _write_outcome(outcome: WriteOutcome | WriteApproval, librarian: Librarian) 
         }
     return {
         "status": "executed",
-        "how": outcome.how,  # grant | idempotent | approved
+        "how": outcome.how,  # approved | grant | auto | idempotent
+        "message": outcome.message,
         "approval": outcome.approval_id,
         "grant": outcome.grant_id,
         "result": outcome.result.model_dump(mode="json"),

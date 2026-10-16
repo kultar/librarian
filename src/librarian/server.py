@@ -341,6 +341,7 @@ class LibrarianExecutor(AgentExecutor):
             outcome = await librarian.write(write_request, caller, on_approval_required)
             return {
                 "how": outcome.how,
+                "message": outcome.message,
                 "approval": outcome.approval_id,
                 "grant": outcome.grant_id,
                 "result": outcome.result.model_dump(mode="json"),

@@ -29,6 +29,7 @@ config:
   writes:
     approvers: requester_or_group
     # announce_auto: true   # post each automatically approved write to the channel (noisy)
+    # announce_grants: false  # stop the channel post on each use of a standing grant
     # Longest an approver may make an "allow similar writes" grant last, in days.
     # null (default): no limit; approvers may choose "until revoked".
     max_grant_days: null

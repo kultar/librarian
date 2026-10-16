@@ -30,7 +30,8 @@ high-value target. This document lists what we defend against, how, and what is 
 - Writes use a **separate write credential** (`write_auth`); the read path never holds it.
 - **Automatic approval** is per operation, chosen by an approver (recorded in the reviewed
   entry), capped per day, never for DELETE, still subject to every policy check and the write
-  rate limit, announced on each use, and revocable with one click.
+  rate limit, audited on each use (and announced, unless `writes.announce_grants` or the
+  grant's notices are off), and revocable with one click.
 - Every write needs a human approval for that exact request (bound by a fingerprint of agent,
   principal, operation, arguments and body) or a matching **grant**. Agents cannot approve
   anything; approvals come only from the approval page.
@@ -39,7 +40,8 @@ high-value target. This document lists what we defend against, how, and what is 
   revocable or re-timed at once from the console (`librarian grants revoke` too). DELETE
   approvals can never become grants.
 - Writes are sent exactly once and never follow redirects (a 307/308 would replay the write).
-  `Idempotency-Key` is forwarded and idempotent retries return the first result.
+  `Idempotency-Key` is forwarded and idempotent retries return the first result, on any replica
+  and after a restart (the key is indexed with the write in the database).
 - The planner can only *propose* writes; proposals go back to the calling agent.
 - Per-agent `write_apis` allowlists and a separate, lower write rate limit.
 - With `principals.mode: optional` or `required`, only a **verified** principal (or the agent's

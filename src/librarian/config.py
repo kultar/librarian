@@ -150,6 +150,12 @@ class WriteSettings(BaseModel):
     # back). Off by default: it gets noisy fast. Each one is always in the audit log
     # (`write_auto`) and the server log, and the console's Activity page shows them.
     announce_auto: bool = False
+    # Post a notice to the channel each time a standing grant is used. On by default;
+    # a grant covering a multi-step flow posts one per step, so deployments that find
+    # it noisy turn it off here (every use stays in the audit log, `write`
+    # with "ran under grant", the server log and the console's Activity page) or per
+    # grant with the Grants page's Notices control (`notify_owner` on the grant).
+    announce_grants: bool = True
 
 
 class SearchSettings(BaseModel):

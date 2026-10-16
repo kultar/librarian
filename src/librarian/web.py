@@ -304,6 +304,12 @@ def _form(request_obj: CredentialRequest, token: str, names: list[str], error: s
         else ""
     )
     instructions = f"<p>{e(request_obj.instructions)}</p>" if request_obj.instructions else ""
+    if request_obj.host == "github.com" or request_obj.host.endswith(".github.com"):
+        instructions += (
+            "<p class=muted>GitHub: if the organization enforces SAML single sign-on, "
+            "authorize the token for it (token settings → <i>Configure SSO</i>); otherwise "
+            "GitHub answers 403 “Resource protected by organization SAML enforcement”.</p>"
+        )
     writes = (
         "<label class=muted><input type=checkbox name=allow_writes value=1> "
         "Also allow <b>approved writes</b> with this key (every write is still approved "
