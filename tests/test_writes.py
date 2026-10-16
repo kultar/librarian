@@ -152,24 +152,66 @@ async def test_agent_that_stops_waiting_expires_its_approval(librarian: Libraria
 
 
 async def test_nobody_can_approve_an_orphan_agent_without_a_group(librarian: Librarian) -> None:
-    librarian.settings.notifier.slack.approver_group = None
-    entry = librarian.registry.get("tracker")
-    assert entry is not None
-    await librarian.registry.save(entry.model_copy(update={"owners": Owners()}))
-    with pytest.raises(PolicyDenied, match="no one can approve"):
+    # Signed-in approvers (trusted_header) but no `approvers.group`: only requesters decide,
+    # and an agent with no owner acting for no one has none.
+    librarian.settings.approvers.mode = "trusted_header"
+    librarian.approvals.deciding_group = None
+    with pytest.raises(PolicyDenied, match=r"no one can approve.*approvers\.group"):
         await librarian.write(comment(), ORPHAN)
     assert not librarian.approvals._approvals  # pyright: ignore[reportPrivateUsage]
+    # the Slack user group is who gets pinged, not who may decide
+    librarian.settings.notifier.slack.approver_group = "S0PINGED"
+    with pytest.raises(PolicyDenied, match="no one can approve"):
+        await librarian.write(comment(), ORPHAN)
+    # in token mode whoever holds the link decides, so the write is asked
+    librarian.settings.approvers.mode = "token"
+    task = asyncio.create_task(librarian.write(comment(), ORPHAN))
+    while not librarian.approvals._approvals:  # pyright: ignore[reportPrivateUsage]
+        await asyncio.sleep(0.01)
+    task.cancel()
 
 
 async def test_orphan_agent_goes_to_the_group(librarian: Librarian) -> None:
+    librarian.approvals.deciding_group = "api-approvers"  # approvers.group, the IdP's name
     task = asyncio.create_task(librarian.write(comment(), ORPHAN))
     while not librarian.approvals._approvals:  # pyright: ignore[reportPrivateUsage]
         await asyncio.sleep(0.01)
     approval = next(iter(librarian.approvals._approvals.values()))  # pyright: ignore[reportPrivateUsage]
     assert approval.requesters == []
-    assert approval.approver_group == "S0TRACKER"  # from the entry's owners
-    assert librarian.approvals.may_approve(approval, "eve@x.test", {"S0TRACKER"}) is None
-    assert librarian.approvals.may_approve(approval, "eve@x.test", set()) is not None
+    assert approval.approver_group == "S0TRACKER"  # the Slack group from the entry's owners
+    broker = librarian.approvals
+    assert broker.may_approve(approval, "eve@x.test", {"api-approvers"}) is None
+    # the Slack group is who gets pinged, not who decides
+    assert broker.may_approve(approval, "eve@x.test", {"S0TRACKER"}) is not None
+    assert (
+        broker.may_approve(approval, "eve@x.test", set())
+        == "Only the requester or members of api-approvers can approve this write."
+    )
+    task.cancel()
+
+
+async def test_the_refusal_names_who_may_approve(librarian: Librarian) -> None:
+    """The bug: an agent with an owner who never signs in, no Slack group and the IdP group
+    in `approvers.group` said "Only the requester or members of None can approve"."""
+    broker = librarian.approvals
+    broker.deciding_group = "1725aa2a-group-object-id"
+    owned = ORPHAN.model_copy(update={"owner": "infra@x.test"})
+    task = asyncio.create_task(librarian.write(comment(), owned))
+    while not broker._approvals:  # pyright: ignore[reportPrivateUsage]
+        await asyncio.sleep(0.01)
+    approval = next(iter(broker._approvals.values()))  # pyright: ignore[reportPrivateUsage]
+    assert broker.may_approve(approval, "sam@x.test", {"1725aa2a-group-object-id"}) is None
+    why = broker.may_approve(approval, "sam@x.test", {"staff"})
+    assert why == (
+        "Only the requester (infra@x.test) or members of 1725aa2a-group-object-id "
+        "can approve this write."
+    )
+    broker.deciding_group = None
+    assert broker.may_approve(approval, "sam@x.test", {"staff"}) == (
+        "Only the requester (infra@x.test) or the approver group can approve this write."
+        " No approver group is configured (approvers.group)."
+    )
+    assert "None" not in str(broker.may_approve(approval, "sam@x.test", set()))
     task.cancel()
 
 
@@ -191,6 +233,7 @@ def test_who_may_approve(librarian: Librarian) -> None:
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     broker = librarian.approvals
+    broker.deciding_group = "admins"
     broker.approver_mode = "requester"
     assert broker.may_approve(approval, "OPS@x.test", set()) is None  # owner, case-insensitive
     assert broker.may_approve(approval, "eve@x.test", {"admins"}) is not None
@@ -335,6 +378,51 @@ async def test_approval_page_shows_request_and_approves(librarian: Librarian) ->
     outcome = await asyncio.wait_for(task, 5)
     assert outcome.how == "approved"
     assert client.get(url, headers={"X-Auth-Request-Email": "kim@x.test"}).status_code == 404
+
+
+async def test_approval_page_lets_the_identity_provider_group_decide(librarian: Librarian) -> None:
+    """The live scenario behind 0.18.2: oauth2-proxy sends X-Forwarded-* headers, the
+    approver group is an Entra object id in approvers.group, the agent's owner is a
+    distribution list that never signs in, there is no Slack group and no principal."""
+    settings = ApproverSettings(
+        mode="trusted_header",
+        group="1725aa2a-cad6-453e-a043-20f04bf27ef6",
+        user_header="X-Forwarded-Email",
+        groups_header="X-Forwarded-Groups",
+    )
+    librarian.settings.approvers = settings
+    librarian.approvals.deciding_group = settings.group
+    librarian.settings.notifier.slack.approver_group = None
+    entry = librarian.registry.get("tracker")
+    assert entry is not None
+    await librarian.registry.save(entry.model_copy(update={"owners": Owners()}))
+    gateway = Caller(agent="litellm-gateway", write_apis=("*",), owner="infrastructure@x.test")
+    task = asyncio.create_task(librarian.write(comment(), gateway))
+    while not librarian.approvals._approvals:  # pyright: ignore[reportPrivateUsage]
+        await asyncio.sleep(0.01)
+    approval = next(iter(librarian.approvals._approvals.values()))  # pyright: ignore[reportPrivateUsage]
+    assert approval.approver_group is None and approval.principal is None
+    token = librarian.approvals.token_for(approval)
+    client = TestClient(Starlette(routes=approval_routes(librarian.approvals, settings)))
+    url = f"/approvals/{approval.id}?t={token}"
+    member = {
+        "X-Forwarded-Email": "kultar@x.test",
+        "X-Forwarded-Groups": f"other-group-id,{settings.group}",
+    }
+    outsider = {"X-Forwarded-Email": "kultar@x.test", "X-Forwarded-Groups": "other-group-id"}
+    refused = client.get(url, headers=outsider)
+    assert refused.status_code == 403 and "None" not in refused.text
+    assert (
+        "Only the requester (infrastructure@x.test) or members of "
+        f"{settings.group} can approve this write." in refused.text
+    )
+    assert client.get(url, headers=member).status_code == 200
+    done = client.post(
+        f"/approvals/{approval.id}", data={"t": token, "action": "once"}, headers=member
+    )
+    assert done.status_code == 200 and "Approved" in done.text
+    assert (await asyncio.wait_for(task, 5)).how == "approved"
+    assert approval.decided_by == "kultar@x.test"
 
 
 async def test_credential_page_can_enable_writes(librarian: Librarian, router: Router) -> None:

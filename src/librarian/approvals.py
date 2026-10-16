@@ -161,6 +161,7 @@ class ApprovalBroker:
         expire_after: timedelta = timedelta(hours=24),
         default_channel: str | None = None,
         default_approver_group: str | None = None,
+        deciding_group: str | None = None,
         store: ApprovalStore | None = None,
         config_grants: list[Grant] | None = None,
     ) -> None:
@@ -171,7 +172,11 @@ class ApprovalBroker:
         self.approver_mode: ApproverMode = approver_mode
         self.expire_after = expire_after
         self.default_channel = default_channel
+        # Who gets pinged (a Slack user group, for the card)...
         self.default_approver_group = default_approver_group
+        # ...and who may decide: the identity provider's group (`approvers.group`), as the
+        # auth proxy sends it. None: no group can approve; only requesters.
+        self.deciding_group = deciding_group
         self.store = store
         self._approvals: dict[str, WriteApproval] = {}
         self._events: dict[str, asyncio.Event] = {}
@@ -378,22 +383,26 @@ class ApprovalBroker:
                 await self.load(approval_id)
         return approval
 
-    def approval_route(self, requesters: set[str], approver_group: str | None) -> str | None:
+    def approval_route(self, requesters: set[str], *, link_holders: bool = False) -> str | None:
         """Why no human could approve such a write, or None if someone can.
 
         Checked before opening an approval so a write nobody can approve is refused
         at once instead of waiting until it expires (e.g. an autonomous agent with no
-        owner when only requesters may approve).
+        owner when only requesters may approve). `link_holders`: approver pages are
+        in token mode, so whoever holds the link decides and a group is not needed.
         """
         mode = self.approver_mode
         has_requester = bool(requesters)
-        has_group = approver_group is not None
+        has_group = self.deciding_group is not None or link_holders
         if mode == "requester" and not has_requester:
             return "no one can approve: this agent has no owner and acts for no person"
         if mode == "group" and not has_group:
-            return "no one can approve: no approver group is configured for this API"
+            return "no one can approve: no approver group is configured (approvers.group)"
         if mode == "requester_or_group" and not (has_requester or has_group):
-            return "no one can approve: set an owner for this agent or configure an approver group"
+            return (
+                "no one can approve: set an owner for this agent or configure an approver "
+                "group (approvers.group)"
+            )
         return None
 
     def may_approve(
@@ -403,7 +412,7 @@ class ApprovalBroker:
         if identity is None:  # token mode: link possession (local use only)
             return None
         is_requester = identity.lower() in approval.requesters
-        in_group = approval.approver_group is not None and approval.approver_group in groups
+        in_group = self.deciding_group is not None and self.deciding_group in groups
         mode = self.approver_mode
         if mode == "requester" and is_requester:
             return None
@@ -411,12 +420,25 @@ class ApprovalBroker:
             return None
         if mode == "requester_or_group" and (is_requester or in_group):
             return None
+        requester = "the requester" + (
+            f" ({', '.join(approval.requesters)})" if approval.requesters else ""
+        )
+        group = (
+            f"members of {self.deciding_group}"
+            if self.deciding_group is not None
+            else "the approver group"
+        )
         who = {
-            "requester": "the requester",
-            "group": f"members of {approval.approver_group}",
-            "requester_or_group": f"the requester or members of {approval.approver_group}",
+            "requester": requester,
+            "group": group,
+            "requester_or_group": f"{requester} or {group}",
         }[mode]
-        return f"Only {who} can approve this write."
+        why = f"Only {who} can approve this write."
+        if mode == "requester" and not approval.requesters:
+            why = "No one can approve this write: the agent has no owner and acts for no person."
+        elif mode != "requester" and self.deciding_group is None:
+            why += " No approver group is configured (approvers.group)."
+        return why
 
     async def approve(
         self,

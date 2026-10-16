@@ -912,7 +912,7 @@ wheels = [
 
 [[package]]
 name = "librarian-a2a"
-version = "0.18.1"
+version = "0.18.2"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server", "sqlite"] },

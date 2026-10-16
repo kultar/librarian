@@ -69,7 +69,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.18.1
+docker pull ghcr.io/kultar/librarian:0.18.2
 ```
 
 ### What happens on a request
@@ -466,7 +466,9 @@ completes on its own after the decision.
 
 Who may approve (`writes.approvers`): the **requester** (the person the agent acts for, or the
 agent's `owner`), the **approver group**, or either (default). Approvers sign in through your
-SSO proxy (`approvers.mode: trusted_header`); agents can never approve.
+SSO proxy (`approvers.mode: trusted_header`); the approver group is `approvers.group`, as your
+identity provider names it (the chart's `oauth2Proxy.approverGroup`). The Slack user group
+(`notifier.slack.approver_group`) is only who gets pinged. Agents can never approve.
 
 **Autonomous agents** (no person behind them) get an `owner`, who stands in as requester. For
 unattended work, configure bounded grants:
@@ -623,6 +625,10 @@ uv run pytest
   instead of only undecided ones
 - **v0.18.1**: the per-write FYI is off by default (`writes.announce_auto`); automatic writes
   are always in the audit log and the server log
+- **v0.18.2**: fix: the write approval page checked the approver's groups against the Slack
+  user group instead of `approvers.group`, so with no Slack group nobody but the requester could
+  approve and the refusal said "members of None". The refusal now names the requester and the
+  configured group
 
 ### Next
 

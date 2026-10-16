@@ -347,6 +347,7 @@ class Librarian:
             expire_after=timedelta(hours=settings.writes.approval_expire_hours),
             default_channel=settings.notifier.slack.channel,
             default_approver_group=settings.notifier.slack.approver_group,
+            deciding_group=settings.approvers.group,
             store=self.state,
             config_grants=[
                 Grant(
@@ -819,8 +820,9 @@ class Librarian:
                 )
             )
 
-        group = entry.owners.approver_group or self.settings.notifier.slack.approver_group
-        problem = self.approvals.approval_route(caller.requesters(), group)
+        problem = self.approvals.approval_route(
+            caller.requesters(), link_holders=self.settings.approvers.mode == "token"
+        )
         if problem is not None:
             raise PolicyDenied(problem)
         return await self.approvals.open(entry, op, request, caller)

@@ -105,9 +105,18 @@ Fixed in 0.13.1: the pages now serve their own icon. Before that, the sign-in re
 browser cache the provider's icon for librarian's address; reload the page after upgrading.
 
 **"Only ... can approve this write." / "Only members of ... can approve credential requests."**
-Approvals follow `writes.approvers`; adding keys needs the approver group. The group comes from
-your identity provider's `groups` claim (oauth2-proxy `--oidc-groups-claim` if it is named
-differently).
+Approvals follow `writes.approvers`; adding keys needs the approver group. The group is
+`approvers.group` (the chart's `oauth2Proxy.approverGroup`), as your identity provider names it
+in the `groups` claim (oauth2-proxy `--oidc-groups-claim` if it is named differently; Entra ID
+sends group object ids, and only when the app registration's *groupMembershipClaims* is set).
+The Slack user group (`notifier.slack.approver_group`) is who gets pinged, not who may decide.
+If the message names the right group and you are in it, the proxy is not forwarding the
+claim: check the groups header the pod receives. Before 0.18.2 the page compared your groups
+with the Slack group and said "members of None" when there was none; upgrade.
+
+**"no one can approve: ... (approvers.group)"** when an agent asks to write.
+The agent has no `owner` (or acts for no one) and no approver group is configured, so nobody
+could ever approve: set `approvers.group`, or give the agent an owner who signs in.
 
 **Approval pages show "executed by link holder".**
 `approvers.mode: token` (local mode): whoever has the link decides, so no name is known. In a
