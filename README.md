@@ -97,13 +97,14 @@ Nothing is set up per API in advance: the registry fills itself as agents need t
 | `execute` | Run one read operation: `{"skill":"execute","api":"jira","operation":"getIssue","args":{"issueIdOrKey":"ABC-1"}}`. Optional `select` (dotted paths, e.g. `["fields.summary"]`) and `max_pages` | No |
 | `capabilities` | List APIs and read operations: `{"skill":"capabilities","query":"issues"}` | No |
 | `onboard` | Learn an API: `{"skill":"onboard","api":"jira","spec_url":"https://..."}`, `"base_url"` to auto-discover, or `"docs_url"` + `"base_url"` when there is no spec | No |
-| `write` | Change data, with human approval or a grant: `{"skill":"write","api":"jira","operation":"addComment","args":{...},"body":{...},"reason":"why"}` | No |
+| `write` | Change data, with human approval or a grant: `{"skill":"write","api":"jira","operation":"addComment","args":{...},"body":{...},"reason":"why"}`. Optional `idempotency_key`: a repeat returns the first result instead of running again. The answer says how it ran (approved by whom, under which grant, or automatically) | No |
 | `fetch` | Plain language: *"open bugs assigned to the payments team"* (only when a model is configured) | Yes |
 
 The same skills are available as **MCP tools** at `/mcp` (Streamable HTTP, same caller keys):
 `capabilities`, `execute`, `fetch`, `write`, `write_status`, `enable_status`, `onboard`. MCP calls
 never wait on a human: writes return `pending_approval` and librarian finishes them once
-approved, or `write_not_enabled` when nobody has enabled that operation yet (approvers are
+approved (`write_status` reports where a write stands and, once run, its result dated as of
+execution), or `write_not_enabled` when nobody has enabled that operation yet (approvers are
 asked; `enable_status` says where the request stands). librarian
 works behind the **LiteLLM** gateway as both an MCP server and an A2A agent
 ([docs/integrations.md](docs/integrations.md#litellm-agent-gateway)).

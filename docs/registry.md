@@ -34,8 +34,6 @@ operations:
     parameters:
       - {name: issueIdOrKey, in: path}
       # - {name: path, in: path, allow_slash: true}   # a file path or git ref may contain "/"
-    # approval: auto            # writes run without a person (never DELETE), up to
-    # auto_limit_per_day: 100   # this many a day; chosen in the console or when enabling
       - {name: fields, in: query, description: Comma-separated fields}
   - id: searchPost
     method: POST
@@ -101,9 +99,17 @@ operations:
     writable: true                # opt in; every call still needs approval or a grant
     accepts_body: true
     rememberable: true            # default true; always false for DELETE
+    # approval: auto              # writes run without a person (never DELETE), up to
+    # auto_limit_per_day: 100     # this many a day; chosen in the console or when enabling
     parameters:
       - {name: issueIdOrKey, in: path}
 ```
+
+A write runs after a person approves it on the approval page, under a grant (*approve and allow
+similar writes*: pinned to the agent, the operation and the argument values the approver keeps
+fixed, lasting as long as they choose), or automatically when an approver chose that for the
+operation. A request may carry an `idempotency_key`; a repeat with the same key returns the
+first result. Grants are adjusted, revoked or quieted on the console's Grants page.
 
 ## Pagination
 

@@ -149,7 +149,7 @@ docker pull ghcr.io/kultar/librarian:0.19.1</code></pre></div>
     <dl class="rules">
       <div><dt>The model never decides</dt><dd>A deterministic policy engine with no LLM in it authorises every call. The optional planner can only plan reads and propose writes.</dd></div>
       <div><dt>Credentials never travel through agents</dt><dd>Keys enter on a one-time page and go straight to the secret store. Agents, messages, logs and the model only ever see references like <code>jira/readonly</code>.</dd></div>
-      <div><dt>Writes need a person</dt><dd>A verified registry entry, a separate write credential, and a human approval or a grant pinned to an agent, a person and an operation. Each write is sent once, with no redirects and an idempotency key, and claimed atomically so replicas never run it twice.</dd></div>
+      <div><dt>Writes need a person</dt><dd>A verified registry entry, a separate write credential, and a human approval or a grant pinned to an agent, a person and an operation. Each write is sent once, with no redirects and an idempotency key, and claimed atomically so replicas never run it twice. A repeat with the same key, on any replica, gets the first result instead of a second run.</dd></div>
       <div><dt>Untrusted input is fenced</dt><dd>The API host only ever comes from the caller's <code>base_url</code>, never from documentation or search results. Read versus write is decided by HTTP method. Search results are trust-ranked and third-party sites are skipped by default.</dd></div>
       <div><dt>No way out to your network</dt><dd>An SSRF guard with DNS pinning refuses private addresses unless you allow them, redirects stay on the same origin, and response sizes are capped.</dd></div>
       <div><dt>Approval pages are locked down</dt><dd>A separate listener behind your SSO proxy, one-time HMAC links that expire, a strict content security policy with no external resources, and every decision recorded with who made it. The console on the same listener shows credential references only, and every action there is audited too.</dd></div>
@@ -206,7 +206,7 @@ mcp_servers:
         <tr><td><code>capabilities</code></td><td>Which APIs and read operations this agent may use.</td></tr>
         <tr><td><code>execute</code></td><td>Run one read operation, with optional field selection and pagination.</td></tr>
         <tr><td><code>onboard</code></td><td>Teach librarian an API: a spec URL, a docs URL, or just a base URL.</td></tr>
-        <tr><td><code>write</code></td><td>Change data, after a person approves it, a grant covers it, or an approver chose automatic approval for that operation. If nobody has enabled the operation yet, approvers are asked.</td></tr>
+        <tr><td><code>write</code></td><td>Change data, after a person approves it, a grant covers it, or an approver chose automatic approval for that operation. If nobody has enabled the operation yet, approvers are asked. The answer says how it ran: who approved, which grant, or automatic.</td></tr>
         <tr><td><code>fetch</code></td><td>Plain language ("open bugs assigned to the payments team"), planned by a model and executed by the policy engine.</td></tr>
       </tbody>
     </table>
@@ -247,6 +247,8 @@ mcp_servers:
         <li>Writes an agent wants but nobody has enabled yet become requests: Enable or Decline from Slack or the console, with a dedicated write credential asked for when there is none</li>
         <li>Whole write flows enabled in one go, slashes in path arguments that are paths or refs, and plain-language requests that answer within a time budget</li>
         <li>Automatic approval per operation with a daily cap and a one-click way back, and a Change control on every operation in the console</li>
+        <li>Grants that last as long as the approver chooses, re-timed, revoked or quieted from the console's Grants page</li>
+        <li>Idempotency keys kept with the write across replicas and restarts, every write answering how it ran, and rate limiting told apart from a permission problem</li>
       </ul></div>
       <div><h3>Next</h3><ul>
         <li>Console actions that answer at once, with the proposal, model guidance and Slack updates finishing in the background</li>

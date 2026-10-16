@@ -412,6 +412,9 @@ config:
     slack: {channel: "#api-access", approver_group: S0123ABCD}
   writes:
     approvers: requester_or_group
+    # max_grant_days: 90        # cap on "allow similar writes" grants; default: no cap
+    # announce_grants: false    # no channel post on each use of a grant (audited regardless)
+    # announce_auto: true       # post each automatically approved write (off by default)
   callers:
     - agent: litellm-gateway
       key_ref: librarian/callers/litellm-gateway
@@ -495,7 +498,9 @@ Rate limits are shared: with Postgres, `rate_limit_per_minute` is one limit acro
   State is in Postgres and Secrets Manager; the registry is in git.
 - **Turning things on later**: writes per agent (`write_apis`; the operations themselves are
   enabled from the Slack card or the console when an agent first asks), standing grants
-  (`config.writes.grants`), verified sign-in for agents' users (`config.principals`), internal
+  (`config.writes.grants`; approvers also create them from the approval page, capped by
+  `config.writes.max_grant_days`, quieted with `config.writes.announce_grants`), verified
+  sign-in for agents' users (`config.principals`), internal
   APIs within the domains you list (`config.internal_hosts`). See [`examples/librarian.yaml`](../examples/librarian.yaml)
   for every option.
 - **Audit**: one JSON line per call, decision and approval on stdout (`"audit"` events), plus

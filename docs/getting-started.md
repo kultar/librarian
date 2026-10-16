@@ -94,7 +94,7 @@ docker compose logs librarian | grep -o 'http://localhost:8080/approvals/[^ ]*' 
 ```
 
 The approval page shows exactly what will be sent and why. Click **Approve this write** (or
-**Approve and allow similar**, which also saves a narrow, expiring grant). Then:
+**Approve and allow similar**, which also saves a narrow grant that lasts as long as you choose). Then:
 
 ```bash
 ./ask task <the write's task id>

@@ -63,7 +63,9 @@ Things that matter behind LiteLLM:
 - **MCP is stateless with JSON responses**, so LiteLLM's per-call upstream sessions work and
   any replica can answer.
 - **MCP tool calls never block on a human:** writes return `pending_approval` and are finished
-  by librarian after approval (`write_status`); missing credentials return `credential_pending`.
+  by librarian after approval (`write_status` reports the state and, once run, the result with
+  `result_as_of`); missing credentials return `credential_pending`. An executed write carries
+  `how` (approved, grant, auto or idempotent) and a plain `message` saying so.
 - **Host header:** librarian accepts any `Host` on `/mcp` by default (the MCP SDK's default
   allows only localhost and answers 421 through a gateway). Pin hosts with `mcp_allowed_hosts`.
 

@@ -94,6 +94,11 @@ Fixed in 0.8.1: upgrade.
 `notifier.slack.approver_group` (or an entry's `owners.approver_group`) must be the user group's
 **ID** (`S...`), not its handle. It is optional: without it cards still post.
 
+**The channel fills with "ran ... under a standing grant" cards.**
+A grant covering a multi-step flow posts one card per step. `writes.announce_grants: false`
+(chart: `config.writes.announce_grants`) stops the post for every grant; the console's Grants
+page turns notices off per grant. Every use stays in the audit log and on the Activity page.
+
 **Saving the bot token with `read -rs` prints an error.**
 Non-interactive shells (an editor's or assistant's `!` command runner) have no terminal to read
 from. Save tokens from a real terminal, or write the file with your password manager's CLI.
