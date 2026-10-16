@@ -162,6 +162,7 @@ class ApprovalBroker:
         default_channel: str | None = None,
         default_approver_group: str | None = None,
         deciding_group: str | None = None,
+        max_grant_days: int | None = None,
         store: ApprovalStore | None = None,
         config_grants: list[Grant] | None = None,
     ) -> None:
@@ -177,6 +178,8 @@ class ApprovalBroker:
         # ...and who may decide: the identity provider's group (`approvers.group`), as the
         # auth proxy sends it. None: no group can approve; only requesters.
         self.deciding_group = deciding_group
+        # Ceiling on grant length (`writes.max_grant_days`); None: until revoked is allowed.
+        self.max_grant_days = max_grant_days
         self.store = store
         self._approvals: dict[str, WriteApproval] = {}
         self._events: dict[str, asyncio.Event] = {}
@@ -247,13 +250,50 @@ class ApprovalBroker:
         grant.uses_today += 1
         await self._save_grant(grant)
 
-    async def revoke_grant(self, grant_id: str, by: str) -> Grant:
+    def grant_expiry(self, days: int | None) -> datetime | None:
+        """When a grant of `days` (None: until revoked) expires, within the ceiling."""
+        if days is not None and days < 1:
+            raise ApprovalError("a grant lasts at least a day")
+        if self.max_grant_days is not None and (days is None or days > self.max_grant_days):
+            raise ApprovalError(
+                f"grants here last at most {self.max_grant_days} days (writes.max_grant_days)"
+            )
+        return None if days is None else datetime.now(UTC) + timedelta(days=days)
+
+    async def _grant(self, grant_id: str) -> Grant:
         grant = self._grants.get(grant_id)
         if grant is None and self.store is not None:
             data = await self.store.get_doc("grant", grant_id)
             grant = Grant.model_validate_json(data) if data else None
         if grant is None:
             raise ApprovalError(f"unknown grant {grant_id!r}")
+        return grant
+
+    async def adjust_grant(self, grant_id: str, by: str, *, days: int | None) -> Grant:
+        """Give an active grant a new expiry: `days` from now, or None for until revoked."""
+        grant = await self._grant(grant_id)
+        if grant.source == "config":
+            raise ApprovalError("this grant comes from the config file; change it there")
+        if not grant.usable(datetime.now(UTC)):
+            raise ApprovalError("this grant is no longer active")
+        grant.expires_at = self.grant_expiry(days)
+        self._grants[grant.id] = grant
+        await self._save_grant(grant)
+        await self.audit.record(
+            AuditEvent(
+                event="grant_adjusted",
+                api=grant.api,
+                operation=grant.operation,
+                caller=by,
+                detail=f"grant {grant.id} for {grant.agent}: "
+                + (f"expires in {days} days" if days is not None else "until revoked"),
+                extra={"days": days},
+            )
+        )
+        return grant
+
+    async def revoke_grant(self, grant_id: str, by: str) -> Grant:
+        grant = await self._grant(grant_id)
         grant.revoked = True
         self._grants[grant.id] = grant
         await self._save_grant(grant)
@@ -447,13 +487,15 @@ class ApprovalBroker:
         *,
         remember: bool = False,
         pin: list[str] | None = None,
-        grant_days: int = 7,
+        grant_days: int | None = 7,
         grant_uses: int | None = None,
     ) -> WriteApproval:
+        """`grant_days`: how long the grant lasts; None means until revoked."""
         approval = await self._require_pending(approval_id)
         if remember:
             if not approval.rememberable:
                 raise ApprovalError("this operation can only be approved once")
+            expires_at = self.grant_expiry(grant_days)
             pinned = {
                 name: text
                 for name in (pin or [])
@@ -465,7 +507,7 @@ class ApprovalBroker:
                 api=approval.api,
                 operation=approval.operation,
                 pinned_args=pinned,
-                expires_at=datetime.now(UTC) + timedelta(days=max(1, min(grant_days, 90))),
+                expires_at=expires_at,
                 max_uses=grant_uses,
                 created_by=approver,
             )

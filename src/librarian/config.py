@@ -141,6 +141,10 @@ class WriteSettings(BaseModel):
     approvers: Literal["requester", "group", "requester_or_group"] = "requester_or_group"
     approval_expire_hours: float = 24
     rate_limit_per_minute: int = 10
+    # The longest an approver may make an "allow similar writes" grant last, in days.
+    # None (default): any length, including until revoked. Approvers can shorten, extend
+    # or revoke grants from the console at any time.
+    max_grant_days: int | None = None
     grants: list[GrantSettings] = Field(default_factory=list[GrantSettings])
     # Post every automatically approved write to the channel (with the one-click way
     # back). Off by default: it gets noisy fast. Each one is always in the audit log

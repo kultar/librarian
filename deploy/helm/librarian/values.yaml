@@ -29,6 +29,9 @@ config:
   writes:
     approvers: requester_or_group
     # announce_auto: true   # post each automatically approved write to the channel (noisy)
+    # Longest an approver may make an "allow similar writes" grant last, in days.
+    # null (default): no limit; approvers may choose "until revoked".
+    max_grant_days: null
   callers: []
 
 # Extra environment, e.g. secrets as LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN,

@@ -348,6 +348,7 @@ class Librarian:
             default_channel=settings.notifier.slack.channel,
             default_approver_group=settings.notifier.slack.approver_group,
             deciding_group=settings.approvers.group,
+            max_grant_days=settings.writes.max_grant_days,
             store=self.state,
             config_grants=[
                 Grant(

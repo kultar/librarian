@@ -40,7 +40,7 @@
     <h1>One librarian for every API your agents&nbsp;use.</h1>
     <p class="lede">Agents ask librarian for data instead of carrying their own API keys. It learns an API the first time one is needed, asks a person for the key once, serves reads within policy, and holds every write for a person's approval unless an approver decided in advance.</p>
     <div class="install"><pre><code>pip install librarian-a2a
-docker pull ghcr.io/kultar/librarian:0.18.2</code></pre></div>
+docker pull ghcr.io/kultar/librarian:0.19.0</code></pre></div>
     <div class="actions">
       <a class="btn" href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Try it in ten minutes</a>
       <a class="btn quiet" href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploy it for a team</a>
@@ -95,7 +95,7 @@ docker pull ghcr.io/kultar/librarian:0.18.2</code></pre></div>
       <li><div><h3>An agent asks for data from an API librarian doesn't know yet</h3><p>Over A2A or MCP, through a gateway such as LiteLLM or directly. The agent names the API and what it wants; it never names a host, so it can't point librarian anywhere else.</p></div></li>
       <li><div><h3>librarian learns the API</h3><p>From its OpenAPI spec, else its documentation (found by itself if needed, with every extracted operation quote-checked against the page), else the model's own knowledge. Reads work at once; a pull request is opened on your registry repo so a person can review the entry.</p></div></li>
       <li><div><h3>If the API needs a key, a person is asked once</h3><p>The agent's task waits and approvers get a Slack card. Someone follows the one-time link, signs in and pastes the key. It goes straight to your secret store, never through Slack, an agent or a model, and the task carries on by itself. When the API needs the person's own sign-in instead, the person behind the agent gets the link, signs in to the provider once, and every later request for them carries their own token.</p></div></li>
-      <li><div><h3>Writes wait for a person's approval</h3><p>The approval page shows exactly what will be sent: method, path, arguments and body. Approve once, allow similar writes with a narrow, expiring grant, or decide once that an operation's writes are approved automatically, up to a daily cap and with one click back. DELETEs can only ever be approved one at a time. A write nobody has enabled yet is not refused silently: approvers get a card, enable the whole flow, and their decision is merged into the registry at once.</p></div></li>
+      <li><div><h3>Writes wait for a person's approval</h3><p>The approval page shows exactly what will be sent: method, path, arguments and body. Approve once, allow similar writes with a narrow grant that lasts as long as the approver chooses, or decide once that an operation's writes are approved automatically, up to a daily cap and with one click back. DELETEs can only ever be approved one at a time. A write nobody has enabled yet is not refused silently: approvers get a card, enable the whole flow, and their decision is merged into the registry at once.</p></div></li>
     </ol>
   </div>
 </section>
@@ -106,7 +106,7 @@ docker pull ghcr.io/kultar/librarian:0.18.2</code></pre></div>
     <p>Three kinds of access, chosen per API, and none of them ever in an agent's hands.</p>
     <dl class="rules">
       <div><dt>A shared read-only key</dt><dd>Added once by an approver on a one-time page, straight into your secret store. Every agent's reads use it, within policy. Agents, logs and the model only see a reference like <code>jira/readonly</code>.</dd></div>
-      <div><dt>A separate write credential</dt><dd>Reviewed into the entry, and used only after a person approves that exact write, a narrow, expiring grant covers it, or an approver chose automatic approval for that operation, capped per day. DELETE is never granted or automatic.</dd></div>
+      <div><dt>A separate write credential</dt><dd>Reviewed into the entry, and used only after a person approves that exact write, a narrow grant covers it, or an approver chose automatic approval for that operation, capped per day. DELETE is never granted or automatic.</dd></div>
       <div><dt>The person's own sign-in</dt><dd>For APIs where what you see depends on who you are: librarian is the OAuth client, each person signs in once in their browser, and every request their agents make for them carries their own token, so the API enforces their access. Tokens are stored per person, refreshed by librarian, never shown to agents, and a request for one person can never go out with another's token. People see and drop their own sign-ins in the console.</dd></div>
     </dl>
   </div>
@@ -176,7 +176,7 @@ docker compose up -d
         <h3>For your team</h3>
         <p>A Helm chart with oauth2-proxy sign-in, git-sync for the registry, Postgres for shared state and AWS Secrets Manager for keys. Two or more replicas, no volumes, nothing exposed to the internet.</p>
 <pre><code>helm install librarian oci://ghcr.io/kultar/charts/librarian \
-  --version 0.18.2 -n librarian -f values.yaml
+  --version 0.19.0 -n librarian -f values.yaml
 helm test librarian -n librarian</code></pre>
         <a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a>
       </div>

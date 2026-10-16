@@ -34,8 +34,10 @@ high-value target. This document lists what we defend against, how, and what is 
 - Every write needs a human approval for that exact request (bound by a fingerprint of agent,
   principal, operation, arguments and body) or a matching **grant**. Agents cannot approve
   anything; approvals come only from the approval page.
-- Grants are bounded: one agent, one operation, pinned argument values, expiry, use caps, and
-  revocable at once (`librarian grants revoke`). DELETE approvals can never become grants.
+- Grants are bounded: one agent, one operation, pinned argument values, use caps, and an expiry
+  the approver chooses (until revoked is allowed unless `writes.max_grant_days` caps it); each is
+  revocable or re-timed at once from the console (`librarian grants revoke` too). DELETE
+  approvals can never become grants.
 - Writes are sent exactly once and never follow redirects (a 307/308 would replay the write).
   `Idempotency-Key` is forwarded and idempotent retries return the first result.
 - The planner can only *propose* writes; proposals go back to the calling agent.

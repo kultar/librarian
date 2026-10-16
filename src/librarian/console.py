@@ -32,7 +32,14 @@ from librarian.registry.models import Access, ApiEntry, EntryStatus, OAuth2UserA
 from librarian.registry.store import RegistryError
 from librarian.reviews import ReviewRequest
 from librarian.service import Librarian, LibrarianError
-from librarian.web import approver_identity, expired, notice, page
+from librarian.web import (
+    approver_identity,
+    expired,
+    grant_length,
+    grant_length_field,
+    notice,
+    page,
+)
 
 e = html.escape
 
@@ -498,7 +505,13 @@ def _grants_page(librarian: Librarian, token: str, include_inactive: bool) -> st
 
     def last(g: Grant) -> str:
         if g.usable(now):
-            return f"<td>{_form(f'/grants/{g.id}/revoke', token, 'Revoke', 'deny small')}</td>"
+            adjust = ""
+            if g.source == "approval":
+                field = grant_length_field(librarian.approvals.max_grant_days, selected=30)
+                adjust = _form(f"/grants/{g.id}/expiry", token, "Set", "quiet small", field)
+            return (
+                f"<td>{adjust}{_form(f'/grants/{g.id}/revoke', token, 'Revoke', 'deny small')}</td>"
+            )
         if g.revoked:
             return "<td><span class=muted>revoked</span></td>"
         return "<td><span class=muted>expired or used up</span></td>"
@@ -523,8 +536,9 @@ def _grants_page(librarian: Librarian, token: str, include_inactive: bool) -> st
     )
     return f"""<div class=pagehead><h1>Grants</h1></div>
 <p class=lede>Writes an agent may make without asking each time. Revoking one is the kill
-switch: the next such write waits for a person again. Grants from the config file come back
-on restart.</p>{table}{toggle}"""
+switch: the next such write waits for a person again. <i>Set</i> gives a grant a new expiry,
+counted from now, or makes it last until revoked. Grants from the config file come back on
+restart.</p>{table}{toggle}"""
 
 
 def _people_page(librarian: Librarian, token: str, connections: list[Any]) -> str:
@@ -612,7 +626,9 @@ def _expiry(grant: Grant) -> str:
         parts.append(f"{grant.uses}/{grant.max_uses} uses")
     if grant.max_uses_per_day is not None:
         parts.append(f"{grant.uses_today}/{grant.max_uses_per_day} today")
-    return ", ".join(parts) or "no limit"
+    if grant.expires_at is None:
+        parts.append("until revoked")
+    return ", ".join(parts)
 
 
 def _detail(
@@ -1180,6 +1196,22 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 "Grant revoked",
                 f"{e(grant.agent)} must ask again for {e(grant.api)}.{e(grant.operation)}. "
                 "<a href='/'>Back</a>.",
+            )
+        if action == "expiry":
+            form: Any = await request.form()
+            try:
+                days = grant_length(form)
+            except ValueError as exc:
+                raise ApprovalError(str(exc)) from exc
+            grant = await librarian.approvals.adjust_grant(
+                request.path_params["grant_id"], identity, days=days
+            )
+            lasts = f"{days} more days" if days is not None else "until it is revoked"
+            return notice(
+                "ok",
+                "Grant updated",
+                f"The grant for {e(grant.agent)} on {e(grant.api)}.{e(grant.operation)} "
+                f"now lasts {lasts}. <a href='/grants'>Back</a>.",
             )
         if action == "block":
             await librarian.block(api_id, identity)

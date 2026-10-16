@@ -438,7 +438,44 @@ def _identity(
     return user, groups - {""}, None
 
 
-def _approval_form(approval: WriteApproval, token: str, error: str | None) -> str:
+GRANT_LENGTHS = (1, 7, 30, 90)
+
+
+def grant_length_field(max_days: int | None, name: str = "days", selected: int = 7) -> str:
+    """A choice of grant length: the usual lengths within the ceiling, until revoked when
+    there is none, and a custom number of days."""
+    e = html.escape
+    options = "".join(
+        f"<option value={d}{' selected' if d == selected else ''}>{d} day{'s' if d > 1 else ''}"
+        "</option>"
+        for d in GRANT_LENGTHS
+        if max_days is None or d <= max_days
+    )
+    if max_days is None:
+        options += "<option value=never>until revoked</option>"
+    options += "<option value=custom>a number of days…</option>"
+    cap = f" max={max_days}" if max_days is not None else ""
+    return (
+        f"<select name={e(name)} aria-label='How long'>{options}</select> "
+        f"<input name={e(name)}_custom type=number min=1{cap} placeholder='days' "
+        f"aria-label='Number of days'>"
+    )
+
+
+def grant_length(form: Any, name: str = "days") -> int | None:
+    """The chosen grant length in days, or None for until revoked."""
+    choice = str(form.get(name, "7")).strip()
+    if choice == "never":
+        return None
+    raw = str(form.get(f"{name}_custom", "")).strip() if choice == "custom" else choice
+    if not raw.isdigit() or int(raw) < 1:
+        raise ValueError("choose how long the grant lasts: a number of days, or until revoked")
+    return int(raw)
+
+
+def _approval_form(
+    approval: WriteApproval, token: str, error: str | None, max_days: int | None = None
+) -> str:
     e = html.escape
     req = approval.request
     method = approval.method.upper()
@@ -480,8 +517,7 @@ def _approval_form(approval: WriteApproval, token: str, error: str | None) -> st
 again without asking{for_whom}. Unchecked arguments may differ; the request body may
 always differ. You can revoke this at any time.</p>
 <form method=post>{hidden}<input type=hidden name=action value=grant>{pins}
-<label>For <select name=days><option value=1>1 day</option><option value=7 selected>7 days</option>
-<option value=30>30 days</option></select></label>
+<label>For {grant_length_field(max_days)}</label>
 <label>At most <input name=max_uses type=number min=1 placeholder="unlimited"> uses</label>
 <button class=quiet>Approve and allow similar</button></form></div>"""
     elif method == "DELETE":
@@ -521,7 +557,10 @@ def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> li
         approval, _, denied = await authorized(request, token)
         if denied is not None or approval is None:
             return denied or _notice("bad", "Error", "Something went wrong.", 400)
-        return _page(f"Approve a write: {approval.api_name}", _approval_form(approval, token, None))
+        return _page(
+            f"Approve a write: {approval.api_name}",
+            _approval_form(approval, token, None, approvals.max_grant_days),
+        )
 
     async def submit(request: Request) -> Response:
         form: Any = await request.form()
@@ -543,17 +582,25 @@ def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> li
                     approver,
                     remember=True,
                     pin=[str(p) for p in form.getlist("pin")],
-                    grant_days=int(str(form.get("days", "7")) or 7),
+                    grant_days=grant_length(form),
                     grant_uses=int(max_uses) if max_uses.isdigit() else None,
                 )
             else:
-                return _page("Error", _approval_form(approval, token, "Unknown action."), 400)
+                return _page(
+                    "Error",
+                    _approval_form(approval, token, "Unknown action.", approvals.max_grant_days),
+                    400,
+                )
         except LookupError:
             return _notice(
                 "note", "This write was already decided", "Someone else got there first.", 409
             )
         except (ApprovalError, ValueError) as exc:
-            return _page("Error", _approval_form(approval, token, str(exc)), 400)
+            return _page(
+                "Error",
+                _approval_form(approval, token, str(exc), approvals.max_grant_days),
+                400,
+            )
         extra = " Similar writes are now allowed by a grant." if action == "grant" else ""
         return _notice(
             "ok",

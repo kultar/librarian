@@ -69,6 +69,7 @@ writes:
   approval_expire_hours: 24
   rate_limit_per_minute: 10
   announce_auto: false                 # post each automatically approved write to Slack (noisy)
+  max_grant_days: null                 # longest "allow similar writes" grant; null: until revoked
   grants: []
 #    - agent: triage-bot
 #      api: jira

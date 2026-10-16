@@ -69,7 +69,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.18.2
+docker pull ghcr.io/kultar/librarian:0.19.0
 ```
 
 ### What happens on a request
@@ -460,9 +460,11 @@ page offers *Allow slashes* for parameters that look like paths, which lands in 
 
 The approval card (Slack) shows the operation, arguments and full body. On the approval page the
 approver can **approve once**, **approve and allow similar writes** (a grant for that agent and
-operation, with the argument values they choose kept fixed, an expiry and an optional use cap), or
-**deny**. DELETE operations can only ever be approved once. The task waits in `AUTH_REQUIRED` and
-completes on its own after the decision.
+operation, with the argument values they choose kept fixed, a length of their choosing from a day
+to until revoked, and an optional use cap), or **deny**. DELETE operations can only ever be
+approved once. The task waits in `AUTH_REQUIRED` and completes on its own after the decision.
+Grants are adjusted or revoked from the console's Grants page at any time; `writes.max_grant_days`
+caps how long one may last (no cap by default).
 
 Who may approve (`writes.approvers`): the **requester** (the person the agent acts for, or the
 agent's `owner`), the **approver group**, or either (default). Approvers sign in through your
@@ -629,6 +631,10 @@ uv run pytest
   user group instead of `approvers.group`, so with no Slack group nobody but the requester could
   approve and the refusal said "members of None". The refusal now names the requester and the
   configured group
+- **v0.19**: approvers choose how long an *allow similar writes* grant lasts: 1, 7, 30 or 90
+  days, a number of their own, or until revoked (the page used to offer 1, 7 or 30 and the
+  backend capped at 90). The console's Grants page sets a new expiry on any grant. Optional
+  ceiling `writes.max_grant_days`
 
 ### Next
 
