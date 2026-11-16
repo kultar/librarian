@@ -7,6 +7,7 @@ Run:  docker compose -p libid -f tests/integration/identity/docker-compose.yaml 
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
 import subprocess
@@ -200,8 +201,12 @@ def test_only_the_requester_can_approve_their_write() -> None:
     while get_task(task["id"])["status"]["state"] != "TASK_STATE_COMPLETED":
         assert time.monotonic() < deadline, "write did not complete"
         time.sleep(0.5)
-    echoed = get_task(task["id"])["artifacts"][-1]["parts"][0]["data"]["result"]["data"]
-    assert echoed["headers"]["Authorization"] == ["Bearer w-identity"]
+    finished = get_task(task["id"])
+    echoed = finished["artifacts"][-1]["parts"][0]["data"]["result"]["data"]
+    # The test API answers with the request it received; librarian removes the write
+    # key it sent, so neither the agent nor the stored result holds it.
+    assert echoed["headers"]["Authorization"] == ["Bearer [redacted]"]
+    assert "w-identity" not in json.dumps(finished)
 
 
 def test_credential_page_requires_the_approver_group() -> None:

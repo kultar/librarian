@@ -148,7 +148,7 @@ docker pull ghcr.io/kultar/librarian:0.19.1</code></pre></div>
     <p>The design assumes that agents can be talked into anything. So nothing an agent, a document or a model says can change what librarian is allowed to do.</p>
     <dl class="rules">
       <div><dt>The model never decides</dt><dd>A deterministic policy engine with no LLM in it authorises every call. The optional planner can only plan reads and propose writes.</dd></div>
-      <div><dt>Credentials never travel through agents</dt><dd>Keys enter on a one-time page and go straight to the secret store. Agents, messages, logs and the model only ever see references like <code>jira/readonly</code>.</dd></div>
+      <div><dt>Credentials never travel through agents</dt><dd>Keys enter on a one-time page and go straight to the secret store. Agents, messages, logs and the model only ever see references like <code>jira/readonly</code>. If an API sends the key back in its answer, librarian removes it first.</dd></div>
       <div><dt>Writes need a person</dt><dd>A verified registry entry, a separate write credential, and a human approval or a grant pinned to an agent, a person and an operation. Each write is sent once, with no redirects and an idempotency key, and claimed atomically so replicas never run it twice. A repeat with the same key, on any replica, gets the first result instead of a second run.</dd></div>
       <div><dt>Untrusted input is fenced</dt><dd>The API host only ever comes from the caller's <code>base_url</code>, never from documentation or search results. Read versus write is decided by HTTP method. Search results are trust-ranked and third-party sites are skipped by default.</dd></div>
       <div><dt>No way out to your network</dt><dd>An SSRF guard with DNS pinning refuses private addresses unless you allow them, redirects stay on the same origin, and response sizes are capped.</dd></div>
@@ -263,6 +263,7 @@ substrate:
         <li>Idempotency keys kept with the write across replicas and restarts, every write answering how it ran, and rate limiting told apart from a permission problem</li>
         <li>The database decides: approvals and every later decision take effect at once on every replica, and GitHub becomes the record, written after each decision and never read back</li>
         <li>Agents on Agent Substrate and kagent with no key of their own: the platform's gateway signs each call, librarian verifies it and applies the rule for that agent</li>
+        <li>A key an API sends back in its answer is removed before any agent sees it, and a stored key that cannot be sent is refused without being named</li>
       </ul></div>
       <div><h3>Next</h3><ul>
         <li>Console actions that answer at once everywhere, with model guidance and Slack updates finishing in the background as the record already does</li>

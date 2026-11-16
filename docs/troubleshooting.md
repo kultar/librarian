@@ -37,6 +37,18 @@ changed under an approved entry. Approve the update librarian found (the console
 under *Waiting*), or, after checking by hand, clear the suspension on the API's page or with
 `librarian registry clear <api> <operation>`.
 
+**An answer contains `[redacted]`.**
+The API sent back the credential librarian called it with (an echo endpoint, a link that repeats
+the query string, an error that quotes the key), and librarian removed it: agents never get a
+key. Nothing else in the answer is changed. If ordinary data is affected, the stored credential
+is a word that also occurs in the data; values shorter than six characters are never replaced.
+
+**"... contains a line break or another character that cannot be sent in an HTTP header"**
+The stored key has a line break (or a character outside ASCII) in the middle of it, typically
+two lines pasted as one value. Store it again: on the credential page, or in the secret store
+librarian reads. Whitespace around a key, such as the line break at the end of a file, is
+ignored and needs no fixing.
+
 **A task stays in `TASK_STATE_AUTH_REQUIRED`.**
 It is waiting for a person: a key to add, or a write to approve. The link is in Slack (or in the
 log with the default `log` notifier). The task resumes by itself; agents poll with `GetTask`.

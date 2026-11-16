@@ -80,7 +80,9 @@ async def test_mcp_through_the_gateway() -> None:
         )
         data: dict[str, Any] = read_result.structured_content  # type: ignore[assignment]
         assert data["status"] == "ok"
-        assert data["data"] == {"headers": {"Authorization": ["Bearer read-1"]}}
+        # The test API answers with the request it received; librarian removes the key
+        # it sent before the answer reaches the gateway or the agent.
+        assert data["data"] == {"headers": {"Authorization": ["Bearer [redacted]"]}}
         assert data["provenance"]["caller"] == "litellm-gateway"
 
         written = await session.call_tool(
@@ -107,7 +109,8 @@ async def test_mcp_through_the_gateway() -> None:
             await asyncio.sleep(0.2)
         assert status["state"] == "executed"
         echoed = status["result"]["data"]
-        assert echoed["headers"]["Authorization"] == ["Bearer w-litellm"]
+        assert echoed["headers"]["Authorization"] == ["Bearer [redacted]"]
+        assert "w-litellm" not in json.dumps(status)
         assert json.loads(echoed["data"]) == {"body": "via LiteLLM MCP"}
 
 
@@ -177,4 +180,5 @@ def test_a2a_through_the_gateway_including_task_polling() -> None:
         assert time.monotonic() < deadline, task["status"]
         time.sleep(0.5)
     result = task["artifacts"][-1]["parts"][0]["data"]["result"]
-    assert result["data"]["headers"]["Authorization"] == ["Bearer w-litellm"]
+    assert result["data"]["headers"]["Authorization"] == ["Bearer [redacted]"]
+    assert "w-litellm" not in json.dumps(task)

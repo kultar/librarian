@@ -77,7 +77,7 @@ class Provider:
         self.seen_tokens.append(token)
         if not token.startswith("tok-"):
             return httpx.Response(401, json={"error": "unauthorized"})
-        return httpx.Response(200, json={"owner": token})
+        return httpx.Response(200, json={"owner": token.removeprefix("tok-")})
 
 
 @pytest.fixture
@@ -134,7 +134,7 @@ async def test_each_person_signs_in_once_and_calls_carry_their_own_token(
     assert drive.seen_tokens == []  # nothing was tried without a token
     await sign_in(librarian, notifier, "kim")
     result = await librarian.execute(request, KIM)
-    assert result.ok and result.data == {"owner": "tok-kim"}
+    assert result.ok and result.data == {"owner": "kim"}
     ref = result.provenance.credential_ref
     assert ref is not None
     assert ref == principal_key("drive", "kim@x.test") and "kim@x.test" not in ref
@@ -144,7 +144,7 @@ async def test_each_person_signs_in_once_and_calls_carry_their_own_token(
     assert drive.seen_tokens == ["tok-kim"]
     await sign_in(librarian, notifier, "bob")
     bob = await librarian.execute(request, BOB)
-    assert bob.data == {"owner": "tok-bob"} and drive.seen_tokens[-1] == "tok-bob"
+    assert bob.data == {"owner": "bob"} and drive.seen_tokens[-1] == "tok-bob"
     stored = await librarian.secrets.get(principal_key("drive", "kim@x.test"))
     assert stored and json.loads(stored)["access_token"] == "tok-kim"
     assert any(
@@ -163,7 +163,8 @@ async def test_expired_tokens_are_refreshed_and_rejected_ones_ask_again(
     )
     await librarian.secrets.put(principal_key("drive", "kim@x.test"), old.model_dump_json())
     result = await librarian.execute(CallRequest(api="drive", operation="listFiles"), KIM)
-    assert result.data == {"owner": "tok-kim-2"}  # refreshed before the call
+    assert result.data == {"owner": "kim-2"}  # refreshed before the call
+    assert drive.seen_tokens[-1] == "tok-kim-2"
     assert drive.exchanges[-1]["grant_type"] == "refresh_token"
     stored = await librarian.secrets.get(principal_key("drive", "kim@x.test"))
     assert stored and json.loads(stored)["refresh_token"] == "ref-kim"  # kept when not rotated
@@ -176,6 +177,23 @@ async def test_expired_tokens_are_refreshed_and_rejected_ones_ask_again(
         )
     assert notifier.consents[-1][0] == "opened"
     assert not await librarian.secrets.get(principal_key("drive", "kim@x.test"))
+
+
+async def test_a_persons_token_the_api_sends_back_never_reaches_the_agent(
+    librarian: Librarian, drive: Provider, router: Router, audit: MemoryAuditSink
+) -> None:
+    tokens = UserTokens(access_token="tok-kim-0123456789", expires_at=None)
+    await librarian.secrets.put(principal_key("drive", "kim@x.test"), tokens.model_dump_json())
+    router.add(
+        "GET",
+        "https://drive.example.test/files",
+        lambda r: httpx.Response(200, json={"sent": r.headers["authorization"]}),
+    )
+    result = await librarian.execute(CallRequest(api="drive", operation="listFiles"), KIM)
+    assert router.requests[-1].headers["authorization"] == "Bearer tok-kim-0123456789"
+    assert result.data == {"sent": "Bearer [redacted]"}
+    left = result.model_dump_json() + "".join(event.model_dump_json() for event in audit.events)
+    assert "tok-kim" not in left
 
 
 async def test_per_person_apis_need_a_person_a_verified_one_and_a_verified_entry(

@@ -86,6 +86,26 @@ high-value target. This document lists what we defend against, how, and what is 
   gateway URL.)
 - Secrets never enter A2A messages, Slack, logs, audit events, provenance or LLM context.
   Query-string keys are redacted in provenance URLs.
+- **An API that sends the credential back.** Some APIs answer with the request they received:
+  an echo or debugging endpoint, links that repeat the query string with its key, an error page
+  that quotes the URL, a message that names the rejected key. librarian removes the credential
+  it sent from every answer before the answer goes anywhere (the agent, a model, the audit
+  trail, the stored result of a write). It looks for the value as sent, for Basic
+  authentication also the encoded pair and its password, and each of those as a URL, a JSON
+  string or an HTML page would write it; an answer cut off at the size limit inside the
+  credential loses that fragment too. **Limits:** only the credential of that call is removed
+  (another key that an API returns as data is data); a value shorter than six characters is
+  left alone, because replacing it everywhere would mangle ordinary data; and a key the API
+  transformed (hashed, or encoded some other way) is not recognised. Results stored before
+  0.20 are not rewritten: if an API you write to sends its key back, replace that key after
+  upgrading.
+- **A stored key that cannot be sent.** A key stored with a line break after it (the usual
+  accident when it is created from a file) makes an HTTP client refuse the request, with an
+  error that quotes the header it refused: the key. librarian therefore sends a credential
+  without the whitespace around it (or a byte-order mark before it), refuses one with a line
+  break or a non-ASCII character inside it before anything is sent, with a reason that does
+  not name it, and never passes the HTTP client's own message on. (Before 0.20 that message
+  went to the log, and for a write to the agent and into the approval's record.)
 - Secrets are only accepted through the secure page and written straight to the store
   (file store: `0600` files, path traversal rejected).
 - Credentials are only attached to requests for the entry's own origin; off-origin redirects are

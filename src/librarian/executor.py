@@ -4,12 +4,15 @@ Security properties enforced here (in addition to the policy engine):
 - the URL is built from the registry entry; callers can never supply a host
 - only same-origin redirects are followed, and credentials are re-attached only there
 - responses are size-capped before parsing
-- secret values are injected at the last moment and never returned or logged
+- secret values are injected at the last moment and never returned or logged: a
+  credential the API sends back (an echo, an error quoting the request) is removed from
+  the answer, and a credential that cannot be sent is refused without being named
 """
 
 from __future__ import annotations
 
 import base64
+import html
 import json
 import logging
 import re
@@ -18,7 +21,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any, cast
-from urllib.parse import quote, urlencode, urljoin, urlsplit
+from urllib.parse import quote, quote_plus, urlencode, urljoin, urlsplit
 
 import httpx
 
@@ -183,15 +186,20 @@ class Executor:
                 )
             )
             raise PolicyDenied(limited)
-        secret = (
+        sent_as = auth if auth is not None else entry.auth
+        secret = _sendable(
+            entry,
             await self._resolve_secret(entry, caller)
             if auth is None
-            else await self._shared_secret(entry, auth)
+            else await self._shared_secret(entry, auth),
+            sent_as,
+            caller,
         )
         started = time.monotonic()
         url, headers, query = _build_request(entry, op, request.args)
         secret_query = _auth_query(entry, secret, auth)
         _apply_auth_headers(entry, secret, headers, auth)
+        echoes = _echoes(secret, sent_as)
 
         pages: list[Any] = []
         total_bytes = 0
@@ -217,7 +225,7 @@ class Executor:
             )
             response_headers = response.headers
             last_headers = {
-                name: response.headers[name]
+                name: _scrub(response.headers[name], echoes)
                 for name in ("deprecation", "sunset")
                 if name in response.headers
             }
@@ -226,7 +234,9 @@ class Executor:
             content_type = response.headers.get("content-type", "")
             total_bytes += len(body)
             truncated = truncated or cut
-            page = _decode(body, content_type, cut)
+            # Nothing below (the caller, a model, the audit trail, what is remembered
+            # about the API) may see the credential, even if the API sent it back.
+            page = _scrub(_decode(body, content_type, cut), echoes, cut=cut)
             pages.append(page)
             if not response.is_success or cut or page_count >= request.max_pages:
                 break
@@ -373,6 +383,7 @@ class Executor:
             secret = await self.secrets.get(ref)
             if secret is None:
                 raise CredentialMissing(entry, reason=f"write credential {ref!r} is missing")
+        secret = _sendable(entry, secret, auth, caller, what="the write credential")
         url, headers, query = _build_request(entry, op, request.args)
         _apply_auth_headers(entry, secret, headers, auth)
         params: dict[str, ArgValue] = {**query, **_auth_query(entry, secret, auth)}
@@ -396,7 +407,10 @@ class Executor:
                 headers=headers,
                 json=request.body if request.body is not None else None,
             )
-            response = await self.client.send(http_request, stream=True)
+            try:
+                response = await self.client.send(http_request, stream=True)
+            except httpx.LocalProtocolError:
+                raise _refused_to_send() from None
             try:
                 body, cut = await _read_capped(response, self.max_response_bytes)
             finally:
@@ -404,7 +418,9 @@ class Executor:
             span.set_attribute("http.response.status_code", response.status_code)
         content_type = response.headers.get("content-type", "")
         status_code = response.status_code
-        data = _decode(body, content_type, cut)
+        # The result is stored with the approval and returned to the agent: neither may
+        # hold the write credential, even if the API sent it back.
+        data = _scrub(_decode(body, content_type, cut), _echoes(secret, auth), cut=cut)
         excerpt = json.dumps(request.body, default=str)[:2000] if request.body is not None else None
         refusal, refusal_detail = _refusal(
             entry, status_code, response.headers, data, secret, write=True
@@ -539,7 +555,10 @@ class Executor:
                     json=body if body is not None else None,
                     extensions=extensions,
                 )
-                response = await client.send(request, stream=True)
+                try:
+                    response = await client.send(request, stream=True)
+                except httpx.LocalProtocolError:
+                    raise _refused_to_send() from None
                 try:
                     if response.is_redirect:
                         location = response.headers.get("location", "")
@@ -590,6 +609,152 @@ def _said(data: Any, secret: str | None = None) -> str:
         text = text.replace(secret, "[redacted]")
     text = _TOKEN_SHAPES.sub("[redacted]", text)
     return text if len(text) <= SAID_LIMIT else text[: SAID_LIMIT - 1] + "…"
+
+
+# What the HTTP client refuses to put into a header: these, and anything outside ASCII.
+_NOT_FOR_A_HEADER = re.compile(r"[\x00\n\r\x0b\x0c]|[^\x00-\x7f]")
+
+
+def _sendable(
+    entry: ApiEntry,
+    secret: str | None,
+    auth: AuthSpec,
+    caller: Caller,
+    *,
+    what: str = "the stored credential",
+) -> str | None:
+    """The credential as it will be sent.
+
+    Whitespace around it is not part of it: a trailing line break is the usual accident
+    when a key is stored from a file (and a byte-order mark when a Windows editor wrote
+    the file). A value that cannot go into an HTTP header is refused here, with a reason
+    that does not name it. The HTTP client would refuse it as well, but its error quotes
+    the header it refused, and that error would travel to the agent and the logs.
+    """
+    if secret is None:
+        return None
+    secret = secret.strip().removeprefix("\ufeff").strip()
+    person = caller.principal if isinstance(auth, OAuth2UserAuth) else None
+    if not secret:
+        raise CredentialMissing(entry, reason=f"{what} is empty", principal=person)
+    in_header = isinstance(auth, BearerAuth | OAuth2UserAuth) or (
+        isinstance(auth, ApiKeyAuth) and auth.location == "header"
+    )
+    if in_header and _NOT_FOR_A_HEADER.search(secret):
+        raise CredentialMissing(
+            entry,
+            reason=f"{what} contains a line break or another character that cannot be sent "
+            "in an HTTP header; store it again",
+            principal=person,
+        )
+    return secret
+
+
+def _refused_to_send() -> httpx.LocalProtocolError:
+    """The HTTP client refused to send a request. Its own message quotes what it refused
+    (a header value, which may be the credential), so that message is not passed on."""
+    return httpx.LocalProtocolError(
+        "the request could not be sent: one of its headers is not valid HTTP"
+    )
+
+
+REDACTED = "[redacted]"
+# A shorter value is left alone: replacing a few characters wherever they occur would
+# mangle ordinary data, and a value that short protects nothing.
+SCRUB_MIN = 6
+# An answer cut off inside the credential ends with the start of it. Fewer characters
+# than this give nothing away (many keys begin with a public prefix anyway).
+CUT_MIN = 4
+
+
+def _echoes(secret: str | None, auth: AuthSpec) -> tuple[str, ...]:
+    """Every form in which an API could send this call's credential back.
+
+    Some APIs answer with the request they received: an echo or debugging endpoint, an
+    error page that quotes the URL, a message that names the rejected key. The forms
+    are the value as it was sent (for Basic: the encoded pair, the pair, and its secret
+    half; after a scheme word such as "Token": the key alone as well), each of them
+    also as a URL, a JSON string and an HTML page would write it. Longest first, so a
+    form that contains another is replaced whole.
+    """
+    if secret is None or isinstance(auth, NoAuth):
+        return ()
+    sent = [secret]
+    if isinstance(auth, BasicAuth):
+        user, _, password = secret.partition(":")
+        # The name says who is calling and turns up in ordinary data (an email address);
+        # the password is the secret, unless the key itself is sent as the name.
+        sent += [base64.b64encode(secret.encode()).decode(), password or user]
+    elif isinstance(auth, ApiKeyAuth) and auth.location == "header":
+        words = secret.split()
+        if len(words) == 2:  # "Token <key>": a message may name the key without the word
+            sent.append(words[1])
+    forms: set[str] = set()
+    for value in sent:
+        forms |= {
+            value,
+            str(httpx.QueryParams({"k": value}))[2:],  # as httpx writes it into a URL
+            quote(value, safe=""),
+            quote_plus(value),
+            json.dumps(value)[1:-1],
+            json.dumps(value, ensure_ascii=False)[1:-1],
+            html.escape(value),
+        }
+    return tuple(sorted((f for f in forms if len(f) >= SCRUB_MIN), key=lambda f: (-len(f), f)))
+
+
+def _scrub(data: Any, echoes: tuple[str, ...], *, cut: bool = False) -> Any:
+    """What an API answered, without the credential the call was sent with.
+
+    `data` is the decoded answer: parsed JSON (cleaned in place: it was decoded for this
+    call alone) or text. `cut` says the answer was cut off at the size limit.
+    """
+    if not echoes:
+        return data
+
+    def clean(text: str) -> str:
+        for form in echoes:
+            if form in text:
+                text = text.replace(form, REDACTED)
+        return text
+
+    if isinstance(data, str):
+        text = clean(data)
+        if cut:
+            partial = max(
+                (
+                    size
+                    for form in echoes
+                    for size in range(CUT_MIN, len(form))
+                    if text.endswith(form[:size])
+                ),
+                default=0,
+            )
+            if partial:
+                text = text[:-partial] + REDACTED
+        return text
+    # Without recursion: an answer may be nested deeper than a function may call itself.
+    todo: list[Any] = [data]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, dict):
+            items = cast(dict[Any, Any], node)
+            for key in list(items):
+                value = items[key]
+                if isinstance(value, str):
+                    items[key] = clean(value)
+                elif isinstance(value, dict | list):
+                    todo.append(value)
+                if isinstance(key, str) and (renamed := clean(key)) != key:
+                    items[renamed] = items.pop(key)
+        elif isinstance(node, list):
+            values = cast(list[Any], node)
+            for index, value in enumerate(values):
+                if isinstance(value, str):
+                    values[index] = clean(value)
+                elif isinstance(value, dict | list):
+                    todo.append(value)
+    return data
 
 
 def _reset_time(headers: Mapping[str, str]) -> datetime | None:

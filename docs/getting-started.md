@@ -93,6 +93,11 @@ Open it in your browser, paste any value as the key (the demo API accepts anythi
 The key went from your browser straight into librarian's secret store: never through the agent,
 the chat, or a model. Agents only ever see a reference such as `demo/read`.
 
+Look at the answer once more. The demo API replies with the request it received, headers
+included, and where the key would be the agent got `"Authorization": ["Bearer [redacted]"]`:
+librarian removes the key it sent from whatever an API sends back. (A value shorter than six
+characters is left alone; replacing it would mangle ordinary data.)
+
 ## 4. A write waits for a person
 
 ```bash

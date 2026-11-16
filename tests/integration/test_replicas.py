@@ -135,7 +135,10 @@ def test_credential_requested_on_a_is_provided_on_b_and_lands_in_aws() -> None:
     # The task waiting on replica A resumes; replica B can see it too (shared task store).
     finished = wait_task(A, task["id"])
     echoed = artifact(finished)["data"]
-    assert echoed["headers"]["Authorization"] == ["Bearer read-secret-1"]
+    # The test API answers with the request it received. librarian removes the key it
+    # sent from the answer, so the agent never sees it.
+    assert echoed["headers"]["Authorization"] == ["Bearer [redacted]"]
+    assert "read-secret-1" not in json.dumps(finished)
     assert wait_task(B, task["id"])["id"] == task["id"]
 
     stored = secrets_manager().get_secret_value(SecretId="lib/echo/read")["SecretString"]
@@ -167,7 +170,9 @@ def test_write_requested_on_a_is_approved_on_b_with_json_key_secret() -> None:
     echoed = result["data"]
     assert echoed["method"] == "POST"
     assert json.loads(echoed["data"]) == {"body": "hello"}
-    # The write key came from one key of a JSON secret: service/echo#write_token.
+    # The write key came from one key of a JSON secret: service/echo#write_token. It is
+    # five characters long, too short for librarian to remove from an answer (it would
+    # mangle ordinary data), which is what lets this test see which value was sent.
     assert echoed["headers"]["Authorization"] == ["Bearer w-123"]
 
 

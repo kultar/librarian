@@ -29,6 +29,7 @@ credential out.
   lands in one audit log.
 - **Credentials never travel through agents.** Secrets enter via a one-time secure page, straight
   into the secret store. Agents, messages, logs and the LLM only see references like `jira/readonly`.
+  If an API sends the key back in its answer, librarian removes it first.
 - **Learn once, reuse everywhere.** The first agent that needs an API triggers onboarding; every
   agent after that benefits.
 - **The LLM proposes, code decides.** The optional planner can suggest any call, but only the rule
@@ -596,7 +597,8 @@ Validate in CI with `uv run librarian registry validate`. Format reference:
 Read [docs/threat-model.md](docs/threat-model.md). Highlights: deterministic policy engine;
 host-locked URL building (callers can't choose hosts); same-origin-only redirects; response size
 caps; SSRF protection for onboarding and provisional entries; one-time, expiring approval links;
-secrets never logged or returned. Report vulnerabilities via [SECURITY.md](SECURITY.md).
+secrets never logged or returned, also when an API sends them back in its answer. Report
+vulnerabilities via [SECURITY.md](SECURITY.md).
 
 ## Development
 
@@ -717,7 +719,12 @@ uv run pytest
   egress gateway signs each request with the actor's identity, librarian verifies it against
   the cluster's issuer, resolves the session to its kagent Agent, and applies the rule for
   that agent (`substrate.rules`); the chart registers librarian as a `RemoteMCPServer`
-  (`substrate.enabled`). Tested on kagent 1.0.1 with Agent Substrate 1.0
+  (`substrate.enabled`). Tested on kagent 1.0.1 with Agent Substrate 1.0.
+  A credential an API sends back (an echo, a link that repeats the query string, an error that
+  names the key) is removed from the answer before it reaches the agent, a model, the audit
+  trail or the stored result of a write. Whitespace around a stored key (the line break at the
+  end of a file) is not sent, and a key that cannot be sent is refused without being named:
+  the HTTP client's own error quoted it, to the log and, for a write, to the agent
 
 ### Next
 
