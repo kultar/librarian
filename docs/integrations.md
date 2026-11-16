@@ -97,13 +97,158 @@ prompted`, the default with `model_base_url`), because some providers reject the
 that structured output otherwise needs. [`examples/compose`](../examples/compose) runs librarian
 and LiteLLM together.
 
-## kagent
+## Agent Substrate and kagent
 
-kagent 1.0 (`api.kagent.dev/v1alpha3`, alpha at the time of writing) runs bring-your-own agents
-as per-session sandboxed actors with an egress allowlist and kagent's own task store, which does
-not fit a shared service like librarian. The supported way for kagent agents to use librarian
-is as a tool: register librarian's `/mcp` endpoint as a `RemoteMCPServer` and bind it to the
-agent (this also adds librarian to the agent's egress allowlist).
+[Agent Substrate](https://github.com/agent-substrate/substrate) runs each agent session as an
+*actor* in a sandbox that holds no credentials and can reach nothing by default. Everything an
+actor sends out passes Substrate's egress gateway, which decides per destination and can put a
+credential into the request on the way. [kagent](https://kagent.dev) 1.0 is the distribution
+that runs it on any Kubernetes.
+
+librarian is the destination an actor reaches when it needs somebody else's API: one egress
+rule instead of one per API, and behind it the APIs learned on demand, the keys, the
+per-operation policy and the human approval. No agent holds a key for librarian either:
+
+```
+agent (an actor: sandboxed, no credentials)
+   │  MCP call to librarian, Authorization: a placeholder
+   ▼
+egress gateway        swaps the placeholder for an actor JWT, signed by the cluster's issuer
+   ▼
+librarian             1. verifies the token: issuer, signature, audience "librarian", an actor
+                      2. asks kagent which Agent this actor (one session) belongs to
+                      3. applies the first matching rule in substrate.rules
+   ▼
+the API, with the key only librarian holds
+```
+
+### With kagent (Helm)
+
+```yaml
+# librarian values
+substrate:
+  enabled: true
+  rules:                                  # first match wins; no match: refused
+    - match: {namespace: payments}        # the kagent Agent's namespace, name (globs), labels
+      write_apis: [github]                # may ask for writes there; each still needs approval
+      owner: payments-leads@example.com   # approves them
+    - match: {}                           # every other agent: reads and learning, no writes
+```
+
+That sets `config.substrate` (issuer `https://idp.ate-system.svc`, audience `librarian`, kagent's
+controller at `http://kagent-controller.kagent.svc:8083`), mounts the cluster signer's trust
+bundle so librarian can fetch the issuer's keys, and creates a `RemoteMCPServer` named
+`librarian` that any namespace's Agents may use. kagent's controller must watch the namespace
+it is in (`substrate.kagent.remoteMCPServer.namespace`, by default librarian's).
+
+Tested end to end on kind (Kubernetes 1.35) with kagent 1.0.1 and Agent Substrate 1.0.0: an
+agent learning an API and reading from it, a write approved by the rule's owner, a second
+session of the same agent writing under the grant that approval created, and the refusals
+below. The steps and manifests are in
+[`tests/integration/substrate`](../tests/integration/substrate).
+
+Give an agent the tools by naming the server in its template:
+
+```yaml
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata: {name: release-notes, namespace: payments}
+spec:
+  systemPrompt: Write release notes from merged pull requests and Jira issues.
+  tools:
+    - mcp:
+        server: {kind: RemoteMCPServer, name: librarian, namespace: librarian}
+```
+
+Nothing else is needed: kagent adds librarian to that agent's egress policy and has the gateway
+inject the token. The agent discovers the tools itself, at run time, so they do not show in
+kagent's tool picker.
+
+**Who the caller is.** An actor is one session, so librarian records the *Agent*:
+`payments/release-notes`. Grants, rate limits, the console and the audit trail are about that
+name, and stay valid across the agent's sessions. Each audited call also carries the session
+(`via: actor/kagent/<actor> uid=... session=...`).
+
+**Who approves.** kagent can send an MCP server the agent's identity or the signed-in user's
+token, not both, so librarian knows the agent but not the person behind it. A rule's `owner`
+stands in: they (or the approver group) approve the agent's writes. Two things therefore do not
+work through kagent yet: APIs that use each person's own sign-in, and "only the requester may
+approve".
+
+**Waiting on a person.** A write that needs approval answers `pending` at once; the agent can
+end its turn (the actor is suspended, at no cost) and ask `write_status` later. The approval
+does not need the agent to be running.
+
+### Plain Agent Substrate
+
+Without kagent there is no Agent to look up: the caller is the actor, and rules match on its
+atespace and name. An actor is one session, so give a group of them one caller name:
+
+```yaml
+# librarian config
+substrate:
+  issuer: https://idp.ate-system.svc
+  ca_file: /var/run/librarian/substrate/ca.crt   # the servicedns.podcert.ate.dev/identity bundle
+  rules:
+    - match: {atespace: team-a}
+      agent: team-a                       # recorded instead of team-a/<actor name>
+      write_apis: [github]
+      owner: team-a-leads@example.com
+```
+
+(Helm: `substrate.enabled: true`, `substrate.kagent.enabled: false`.) Then let the actor reach
+librarian and have the gateway sign for it, in the actor's `EgressPolicy`:
+
+```yaml
+rules:
+- http:
+    hostnames: ["librarian.librarian.svc.cluster.local"]
+    ports: {all: {}}
+    effects:
+      replaceHeaders:
+      - header: Authorization
+        prefix: "Bearer "
+        actorJwt: {audiences: ["librarian"], expirationSeconds: 900}
+```
+
+The agent sends `Authorization: Bearer anything` to
+`http://librarian.librarian.svc.cluster.local:8080/mcp` (or the A2A endpoint at `/`). Use the
+full name: a sandbox's DNS answers only for the exact hostnames in the actor's policy and has
+no search domains, so `librarian.librarian.svc` does not resolve there.
+
+### Settings
+
+| `substrate.` | |
+|---|---|
+| `issuer` | The actor JWT issuer; setting it turns this on. Substrate's default is `https://idp.<its namespace>.svc` |
+| `audience` | What tokens must be minted for (`librarian`). A token for any other service is refused, so a service that receives an actor's token cannot replay it here |
+| `ca_file` | CA bundle for fetching the issuer's keys. The in-cluster issuer's certificate comes from the cluster signer `servicedns.podcert.ate.dev/identity`; the chart projects its ClusterTrustBundle |
+| `kagent_url` | kagent's controller. Set: callers are Agents (`namespace/name`), and tokens must also carry the audience `kagent-agent-info`. Unset: callers are actors |
+| `rules[].match` | `namespace`, `name` (globs) and `labels` of the Agent; `atespace` and `actor` (globs) of the actor. Every field given must match; `{}` matches everyone |
+| `rules[]` | `apis` (default all), `write_apis` (default none), `can_onboard`, `owner`, `agent` (a caller name to record instead), `approval_wait_seconds`: the same meaning as under `callers` |
+
+Agents with their own key (`callers`) keep working beside this.
+
+### Things to know
+
+- **Tokens are bearer tokens that cannot be revoked**; Substrate lets them live 5 to 60
+  minutes (the chart asks for 15). librarian never logs or stores one, and asks kagent again
+  about an actor every minute, so a deleted agent or an ended session stops working within
+  that minute rather than at the token's expiry.
+- **In-cluster traffic is plain HTTP** between the gateway and librarian unless a service mesh
+  encrypts it: kagent cannot yet trust a private CA for an MCP server. Restrict who can reach
+  librarian's Service with a NetworkPolicy if other workloads share the cluster network.
+- **Timeouts.** kagent's default for an MCP server is 30 seconds; the chart sets 120, because a
+  plain-language request may run for `fetch_timeout_seconds` (100).
+- **Why an agent was refused** is in librarian's log (`refused a Substrate caller (HTTP 403):
+  ...`, each reason at most once a minute). kagent itself only reports that discovering the
+  tools failed with "Forbidden" or "Unauthorized", and leaves the toolset out of that run.
+- **The platform needs a recent cluster.** Agent Substrate 1.0 uses pod certificates and cluster
+  trust bundles (Kubernetes 1.35 with the `PodCertificateRequest`, `ClusterTrustBundle` and
+  `ClusterTrustBundleProjection` feature gates, as kagent's own kind setup enables them).
+  librarian's chart relies on the same trust-bundle projection to verify the issuer.
+- **Only HTTP leaves a sandbox** (no WebSocket, no raw TCP). librarian's MCP endpoint is
+  stateless Streamable HTTP with JSON responses, so nothing else is needed.
 
 ## Verified principals
 

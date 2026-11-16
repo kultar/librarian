@@ -40,6 +40,9 @@ class Caller(BaseModel):
     owner: str | None = None
     # Seconds to wait for a write approval before returning "pending" (0 = don't wait).
     approval_wait_seconds: float | None = None
+    # How the agent proved who it is, when not by its own key: the Agent Substrate
+    # actor (one agent session) behind this call. Recorded with each call for audit.
+    via: str | None = None
 
     def requesters(self) -> set[str]:
         """Humans who count as 'the requester' when approving this caller's writes.

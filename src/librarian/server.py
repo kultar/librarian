@@ -58,6 +58,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from librarian import __version__, telemetry
+from librarian.actors import ActorAuthenticator, ActorError
 from librarian.approvals import WriteApproval
 from librarian.calls import Caller, CallRequest, WriteRequest
 from librarian.config import PrincipalSettings
@@ -171,11 +172,18 @@ def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) 
         default_output_modes=["application/json", "text/plain"],
         skills=skills,
     )
-    if require_auth if require_auth is not None else bool(settings.callers):
+    wants_auth = bool(settings.callers) or settings.substrate.enabled
+    if require_auth if require_auth is not None else wants_auth:
         card.security_schemes["bearer"].CopyFrom(
             SecurityScheme(
                 http_auth_security_scheme=HTTPAuthSecurityScheme(
-                    scheme="Bearer", description="Per-agent API key issued by the operator."
+                    scheme="Bearer",
+                    description="Per-agent API key issued by the operator"
+                    + (
+                        ", or the actor token Agent Substrate's gateway injects."
+                        if librarian.settings.substrate.enabled
+                        else "."
+                    ),
                 )
             )
         )
@@ -457,7 +465,8 @@ class CallerContextBuilder(DefaultServerCallContextBuilder):
 
 
 class CallerAuthMiddleware(BaseHTTPMiddleware):
-    """Authenticates calling agents (per-agent bearer keys) and verifies principal tokens."""
+    """Authenticates calling agents (a per-agent bearer key, or an Agent Substrate
+    actor JWT) and verifies principal tokens."""
 
     def __init__(
         self,
@@ -466,12 +475,14 @@ class CallerAuthMiddleware(BaseHTTPMiddleware):
         profiles: dict[str, Caller],
         principals: PrincipalSettings,
         verifier: PrincipalVerifier | None,
+        actors: ActorAuthenticator | None = None,
     ) -> None:
         super().__init__(app)
         self.keys = keys  # agent -> key
         self.profiles = profiles  # agent -> permissions
         self.principals = principals
         self.verifier = verifier
+        self.actors = actors  # agents identified by a signed token instead of a key
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         path = request.url.path
@@ -479,7 +490,7 @@ class CallerAuthMiddleware(BaseHTTPMiddleware):
         is_mcp = path == MCP_PATH or path.startswith(MCP_PATH + "/")
         if not (is_a2a or is_mcp):
             return await call_next(request)
-        if not self.keys:
+        if not self.keys and self.actors is None:
             caller = Caller(agent="anonymous", authenticated=False)
         else:
             header = request.headers.get("authorization", "")
@@ -488,11 +499,19 @@ class CallerAuthMiddleware(BaseHTTPMiddleware):
                 (n for n, key in self.keys.items() if token and hmac.compare_digest(token, key)),
                 None,
             )
-            if agent is None:
+            if agent is not None:
+                caller = self.profiles.get(agent, Caller(agent=agent)).model_copy(
+                    update={"authenticated": True}
+                )
+            elif self.actors is not None and token.count(".") == 2:
+                # Not one of the keys, and shaped like a JWT: an actor's token.
+                try:
+                    caller = await self.actors.caller(token)
+                except ActorError as exc:
+                    self.actors.refused(exc)
+                    return JSONResponse({"error": str(exc)}, status_code=exc.status)
+            else:
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
-            caller = self.profiles.get(agent, Caller(agent=agent)).model_copy(
-                update={"authenticated": True}
-            )
         caller = caller.model_copy(
             update={"trust_claimed_principal": self.principals.mode == "off"}
         )
@@ -676,12 +695,26 @@ def create_app(
         else None
     )
     app.state.principal_verifier = verifier
+    substrate = librarian.settings.substrate
+    actors = ActorAuthenticator(substrate) if substrate.enabled else None
+    app.state.actor_authenticator = actors
+    if actors is not None:
+        log.info(
+            "agents on Agent Substrate are accepted: issuer %s, audience %r, %d rule(s)%s",
+            substrate.issuer,
+            substrate.audience,
+            len(substrate.rules),
+            f", agents resolved by kagent at {substrate.kagent_url}"
+            if substrate.kagent_url
+            else "",
+        )
     app.add_middleware(
         CallerAuthMiddleware,
         keys=app.state.caller_keys,
         profiles=profiles,
         principals=principals,
         verifier=verifier,
+        actors=actors,
     )
     return app
 

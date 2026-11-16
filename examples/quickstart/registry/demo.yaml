@@ -1,5 +1,5 @@
 # A reviewed ("verified") entry for the demo API. In a real deployment entries like this are
-# learned on demand and reviewed by pull request; this one is prewritten so the quick start can
+# learned on demand and approved by a person in librarian; this one is prewritten so the quick start can
 # show a credential request and a write approval against something that needs a key.
 id: demo
 name: Demo API

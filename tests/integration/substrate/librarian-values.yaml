@@ -1,0 +1,24 @@
+# librarian on a kind cluster with kagent: an image built from this checkout and loaded
+# into the cluster, the console open, and two rules for the test agents.
+image:
+  repository: librarian
+  tag: substrate
+  pullPolicy: Never
+publicUrl: http://localhost:18081
+config:
+  notifier:
+    type: log
+  approvers:
+    console: open
+  allow_private_networks: true      # this test's demo API is an in-cluster Service
+env:
+  - {name: LIBRARIAN_SECRET_DEMO_READ, value: demo-read-key}
+  - {name: LIBRARIAN_SECRET_DEMO_WRITE, value: demo-write-key}
+substrate:
+  enabled: true
+  rules:
+    - match: {namespace: kagent, name: lib-reader}
+      owner: owner@example.test
+    - match: {namespace: kagent, labels: {librarian-test/role: writer}}
+      write_apis: ["*"]
+      owner: owner@example.test

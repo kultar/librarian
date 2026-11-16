@@ -48,7 +48,7 @@ docker pull ghcr.io/kultar/librarian:0.19.1</code></pre></div>
     <p class="muted" style="margin-top:18px">Open source, Apache-2.0. Alpha: expect breaking changes before 1.0.</p>
   </div>
 
-  <svg class="diagram" viewBox="0 0 520 330" role="img" aria-label="Agents talk to librarian over A2A or MCP; librarian calls the APIs. Below it: the registry in git, the secret store, and people who approve.">
+  <svg class="diagram" viewBox="0 0 520 330" role="img" aria-label="Agents talk to librarian over A2A or MCP; librarian calls the APIs. Below it: the registry in its database, the secret store, and people who approve.">
     <!-- agents -->
     <g class="lbl">
       <rect class="box" x="10" y="30" width="130" height="40" rx="8"/><text x="22" y="55">release-notes agent</text>
@@ -122,7 +122,7 @@ docker pull ghcr.io/kultar/librarian:0.19.1</code></pre></div>
       <figure><img src="assets/screens/console-activity.png" alt="The Activity page: seven-day numbers, the busiest APIs and recent events" loading="lazy"><figcaption>Activity: what agents did through librarian, and what it cost.</figcaption></figure>
       <figure><img src="assets/screens/enable-flow.png" alt="The enable page for a write flow: operations with ticks, the approval choice, the write credential choice" loading="lazy"><figcaption>An agent wanted a write nobody had enabled: enable the whole flow, choose how writes are approved and where the write credential comes from.</figcaption></figure>
       <figure><img src="assets/screens/review.png" alt="The review page for a learned API" loading="lazy"><figcaption>Approving a learned API from the Slack card: decide the open operations, then approve. It is verified at once.</figcaption></figure>
-      <figure><img src="assets/screens/approve-write.png" alt="A write approval page" loading="lazy"><figcaption>Approving one write: method, path, arguments and body, nothing hidden.</figcaption></figure>
+      <figure><img src="assets/screens/approve-write.png" alt="A write approval page" loading="lazy"><figcaption>Approving one write: method, path, arguments and body, nothing hidden. This agent runs on kagent with no person behind it, so its owner decides.</figcaption></figure>
     </div>
   </div>
 </section>
@@ -152,6 +152,7 @@ docker pull ghcr.io/kultar/librarian:0.19.1</code></pre></div>
       <div><dt>Writes need a person</dt><dd>A verified registry entry, a separate write credential, and a human approval or a grant pinned to an agent, a person and an operation. Each write is sent once, with no redirects and an idempotency key, and claimed atomically so replicas never run it twice. A repeat with the same key, on any replica, gets the first result instead of a second run.</dd></div>
       <div><dt>Untrusted input is fenced</dt><dd>The API host only ever comes from the caller's <code>base_url</code>, never from documentation or search results. Read versus write is decided by HTTP method. Search results are trust-ranked and third-party sites are skipped by default.</dd></div>
       <div><dt>No way out to your network</dt><dd>An SSRF guard with DNS pinning refuses private addresses unless you allow them, redirects stay on the same origin, and response sizes are capped.</dd></div>
+      <div><dt>Agents can hold nothing at all</dt><dd>On Agent Substrate and kagent an agent's sandbox has no credentials, not even one for librarian. The platform's egress gateway signs each call with the agent's identity; librarian verifies it against the cluster's issuer, accepts only tokens minted for librarian, and gives the agent what a rule in its own config allows, never what the agent or its metadata claims.</dd></div>
       <div><dt>Decisions are made in one place</dt><dd>What agents may do is decided by signed-in approvers on librarian's own pages and stored in its database, in effect on every replica at once. A GitHub repository receives a commit for every decision, saying who decided what, but it is only ever written to: nothing edited or merged there changes what agents may do.</dd></div>
       <div><dt>Approval pages are locked down</dt><dd>A separate listener behind your SSO proxy, one-time HMAC links that expire, a strict content security policy with no external resources, and every decision recorded with who made it. The console on the same listener shows credential references only, and every action there is audited too.</dd></div>
     </dl>
@@ -183,14 +184,24 @@ helm test librarian -n librarian</code></pre>
       </div>
       <div>
         <h3>Connect your agents</h3>
-        <p>Behind LiteLLM's agent gateway librarian is both an MCP server and an A2A agent. Any A2A or MCP client can also talk to it directly.</p>
+        <p>Behind LiteLLM's agent gateway librarian is both an MCP server and an A2A agent. On kagent and Agent Substrate agents need no key at all: the platform's gateway signs each call and librarian knows which agent it is. Any A2A or MCP client can also talk to it directly.</p>
 <pre><code># LiteLLM config.yaml
 mcp_servers:
   librarian:
     url: http://librarian.librarian.svc:8080/mcp
     transport: http
     auth_type: bearer_token
-    auth_value: os.environ/LIBRARIAN_GATEWAY_KEY</code></pre>
+    auth_value: os.environ/LIBRARIAN_GATEWAY_KEY
+
+# kagent, Agent Substrate
+# (librarian's Helm values)
+substrate:
+  enabled: true
+  rules:
+    - match: {namespace: payments}
+      write_apis: [github]
+      owner: leads@example.com
+    - match: {}   # the rest: reads</code></pre>
         <a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md">Integrations</a>
       </div>
     </div>
@@ -221,7 +232,7 @@ mcp_servers:
     <ul class="docs">
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Getting started</a><span>The laptop walkthrough with Docker Compose.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a><span>Kubernetes, step by step: the record repository, Slack, SSO, secrets, database, replicas.</span></li>
-      <li><a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md">Integrations</a><span>LiteLLM, any A2A or MCP client, verified principals.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md">Integrations</a><span>LiteLLM, kagent and Agent Substrate, any A2A or MCP client, verified principals.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/registry.md">Registry format</a><span>What an entry holds, how approval works, and the record kept on GitHub.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/threat-model.md">Threat model</a><span>Assets, actors, threats and mitigations.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/troubleshooting.md">Troubleshooting</a><span>What to check when agents, learning, Slack, sign-in or Kubernetes misbehave.</span></li>
@@ -251,6 +262,7 @@ mcp_servers:
         <li>Grants that last as long as the approver chooses, re-timed, revoked or quieted from the console's Grants page</li>
         <li>Idempotency keys kept with the write across replicas and restarts, every write answering how it ran, and rate limiting told apart from a permission problem</li>
         <li>The database decides: approvals and every later decision take effect at once on every replica, and GitHub becomes the record, written after each decision and never read back</li>
+        <li>Agents on Agent Substrate and kagent with no key of their own: the platform's gateway signs each call, librarian verifies it and applies the rule for that agent</li>
       </ul></div>
       <div><h3>Next</h3><ul>
         <li>Console actions that answer at once everywhere, with model guidance and Slack updates finishing in the background as the record already does</li>
@@ -258,6 +270,7 @@ mcp_servers:
       </ul></div>
       <div><h3>Later</h3><ul>
         <li>Vault, GCP Secret Manager and Azure Key Vault</li>
+        <li>Through kagent: the person behind an agent as well as the agent, and waking a suspended agent when its write is approved</li>
         <li>A community registry of reviewed, signed entries</li>
       </ul></div>
     </div>

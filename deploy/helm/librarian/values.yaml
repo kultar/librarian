@@ -92,6 +92,54 @@ githubApp:
   secretName: ""            # Secret holding the App's private key
   secretKey: private-key.pem
 
+# Agents on Agent Substrate / kagent. Their sandboxes hold no credentials: the egress gateway
+# puts a signed actor JWT into each request, and librarian accepts it in place of a per-agent
+# key. Enabling this sets config.substrate, mounts the trust bundle librarian needs to fetch
+# the issuer's keys, and (with kagent) registers librarian as a RemoteMCPServer that agents
+# can list under their tools. See docs/integrations.md.
+substrate:
+  enabled: false
+  # Substrate's actor JWT issuer: https://idp.<namespace of Substrate>.svc unless you set
+  # `actorJWT.issuer` when installing Substrate.
+  issuer: https://idp.ate-system.svc
+  # What the tokens must be minted for. The RemoteMCPServer below asks for it.
+  audience: librarian
+  # The cluster's DNS domain. Sandboxes resolve only fully qualified names, so librarian is
+  # registered as <service>.<namespace>.svc.<clusterDomain>.
+  clusterDomain: cluster.local
+  # The in-cluster issuer's certificate comes from a cluster signer, not a public CA: the
+  # chart projects that signer's ClusterTrustBundle into the pod. Turn off for an issuer
+  # served with a publicly trusted certificate.
+  trustBundle:
+    enabled: true
+    signerName: servicedns.podcert.ate.dev/identity
+    labelSelector:
+      podcert.ate.dev/canarying: live
+  kagent:
+    # An actor is one agent session. With kagent, librarian asks its controller for the
+    # Agent behind the actor, so rules, grants and the audit trail are about the Agent.
+    # Off: plain Substrate, where rules match on `atespace` and `actor`.
+    enabled: true
+    url: http://kagent-controller.kagent.svc:8083
+    remoteMCPServer:
+      create: true          # needs kagent's CRDs in the cluster
+      name: librarian
+      namespace: ""         # default: the release namespace (kagent must watch it)
+      # Which namespaces' Agents may use it: All, or Same (only its own namespace).
+      allowedNamespaces: All
+      # kagent's default is 30s; a plain-language request may take up to
+      # config.fetch_timeout_seconds (100).
+      timeout: 120s
+      tokenSeconds: 900     # lifetime of each injected token (300 to 3600)
+  # What each agent may do. First match wins; an agent no rule matches is refused.
+  # `namespace`, `name` (globs) and `labels` describe the kagent Agent.
+  rules: []
+  # - match: {namespace: payments}
+  #   write_apis: [github]              # may ask for writes there; each still needs approval
+  #   owner: payments-leads@example.com # approves them (no person is known through kagent)
+  # - match: {}                         # every other agent: reads and learning, no writes
+  #   apis: ["*"]
+
 # Sign-in for approvers. Runs oauth2-proxy as a sidecar in front of the approval pages
 # (and the console at the pages host's root, for the approver group) and switches
 # librarian to approvers.mode=trusted_header. Agents keep using the A2A

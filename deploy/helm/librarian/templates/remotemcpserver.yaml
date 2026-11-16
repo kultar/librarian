@@ -1,0 +1,33 @@
+{{- $s := .Values.substrate -}}
+{{- if and $s.enabled $s.kagent.enabled $s.kagent.remoteMCPServer.create }}
+{{- $r := $s.kagent.remoteMCPServer -}}
+{{- if not (has $r.allowedNamespaces (list "All" "Same")) -}}
+{{- fail "substrate.kagent.remoteMCPServer.allowedNamespaces must be All or Same" -}}
+{{- end }}
+# librarian as an MCP server in kagent. Agents list it under their tools; the egress gateway
+# puts the calling actor's JWT into each request, so no agent holds a key for librarian.
+apiVersion: api.kagent.dev/v1alpha3
+kind: RemoteMCPServer
+metadata:
+  name: {{ $r.name }}
+  namespace: {{ default .Release.Namespace $r.namespace }}
+  labels:
+    {{- include "librarian.labels" . | nindent 4 }}
+spec:
+  description: >-
+    librarian: use any HTTP API without holding its credentials. Reads within policy, APIs
+    learned on demand, writes with a person's approval.
+  # The full name: a sandbox's DNS answers only for the exact hostnames in the actor's
+  # egress policy, and has no search domains to complete `<service>.<namespace>.svc` with.
+  url: {{ printf "http://%s.%s.svc.%s:%v/mcp" (include "librarian.fullname" .) .Release.Namespace $s.clusterDomain .Values.service.a2aPort }}
+  protocol: STREAMABLE_HTTP
+  timeout: {{ $r.timeout }}
+  actorJwt:
+    # librarian's own audience, and the one kagent needs to say which Agent the actor is.
+    audiences:
+      - {{ $s.audience | quote }}
+      - kagent-agent-info
+    expirationSeconds: {{ int $r.tokenSeconds }}
+  allowedNamespaces:
+    from: {{ $r.allowedNamespaces }}
+{{- end }}

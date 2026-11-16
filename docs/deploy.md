@@ -482,6 +482,10 @@ and add the key. That is the whole loop.
 ## 11. Connect your agents
 
 - **Through LiteLLM** (MCP and/or A2A): [integrations](integrations.md#litellm-agent-gateway).
+- **On kagent or Agent Substrate**: set `substrate.enabled: true` and `substrate.rules` in the
+  values file. Agents then need no key for librarian: the platform's gateway signs each call,
+  and a rule says what each agent may do:
+  [integrations](integrations.md#agent-substrate-and-kagent).
 - **Directly**: A2A at `http://librarian.librarian.svc:8080/`, MCP at `.../mcp`, with
   `Authorization: Bearer <caller key>`.
 

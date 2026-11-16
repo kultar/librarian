@@ -47,6 +47,7 @@ people ──HTTPS──► │ oauth2-proxy :4180 ──► 127.0.0.1:8081     
 | Grant uses in the channel | `config.writes.announce_grants: false` stops the post made each time a standing grant is used (a grant covering a multi-step flow posts one per step); on by default. Every use stays in the audit log and on the console's Activity page, and the Grants page can turn notices off per grant |
 | Grant length | `config.writes.max_grant_days` (default `null`: no limit) caps how long an approver may make an "allow similar writes" grant last, e.g. `90`; with no limit approvers may choose until revoked. Grants are re-timed or revoked on the console's Grants page |
 | Caller keys | `config.callers` + caller keys as `LIBRARIAN_SECRET_LIBRARIAN_CALLERS_<AGENT>` via `envFrom` |
+| Agents on Agent Substrate / kagent | `substrate.enabled=true`, `substrate.rules`: agents are identified by the actor JWT the egress gateway injects (no key each). Mounts the cluster signer's trust bundle and creates a kagent `RemoteMCPServer`; `substrate.kagent.enabled=false` for plain Substrate. See [integrations](../../../docs/integrations.md#agent-substrate-and-kagent) |
 | Secrets in AWS | `config.secrets_backend: aws`, `serviceAccount.annotations` (IRSA role) |
 | Several replicas | `replicaCount>1`, `persistence.enabled=false`, Postgres (`LIBRARIAN_DATABASE_URL`), `config.secrets_backend: aws` |
 | Slack | `config.notifier.type: slack`, `config.notifier.slack.channel`, token via `envFrom` |

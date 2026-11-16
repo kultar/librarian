@@ -163,6 +163,7 @@ class Executor:
                     api=request.api,
                     operation=request.operation,
                     detail=decision.reason,
+                    extra=_via(caller),
                 )
             )
             raise PolicyDenied(decision.reason)
@@ -178,6 +179,7 @@ class Executor:
                     api=request.api,
                     operation=request.operation,
                     detail=limited,
+                    extra=_via(caller),
                 )
             )
             raise PolicyDenied(limited)
@@ -304,7 +306,7 @@ class Executor:
                 bytes=total_bytes,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 detail=refusal_detail,
-                extra=extra,
+                extra=extra | _via(caller),
             )
         )
         if status_code == 401 and auth is not None:
@@ -429,7 +431,7 @@ class Executor:
                 bytes=len(body),
                 duration_ms=int((time.monotonic() - started) * 1000),
                 detail=refusal_detail,
-                extra=extra,
+                extra=extra | _via(caller),
             )
         )
         error = refusal
@@ -774,6 +776,12 @@ def _int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _via(caller: Caller) -> dict[str, Any]:
+    """For the audit record: the Agent Substrate actor (one agent session) behind a
+    call, when the agent was identified by its actor token."""
+    return {"via": caller.via} if caller.via else {}
 
 
 def _merge_pages(pages: list[Any], items_path: str | None) -> Any:

@@ -8,6 +8,10 @@ asymmetric algorithms are accepted.
 
 The token travels in a header rather than in A2A message metadata because
 metadata is stored with the task, which would leave tokens in the database.
+
+The same checks verify the tokens that identify a calling *agent* on Agent
+Substrate (see `actors.py`), which is why the verifier can also hand back the whole
+set of verified claims and trust an issuer whose certificate comes from a private CA.
 """
 
 from __future__ import annotations
@@ -15,8 +19,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -36,6 +42,11 @@ class PrincipalError(Exception):
     """The token could not be verified. The message is safe to return to the caller."""
 
 
+class KeysUnavailable(PrincipalError):
+    """The issuer's signing keys could not be fetched: nothing is wrong with the token
+    as far as anyone can tell, and trying again later may work."""
+
+
 @dataclass(frozen=True)
 class Issuer:
     issuer: str
@@ -44,6 +55,9 @@ class Issuer:
     claim: str = "email"
     algorithms: tuple[str, ...] = ("RS256", "ES256")
     leeway_seconds: int = 30
+    # A CA bundle (PEM) to trust instead of the system roots when fetching this
+    # issuer's keys: an in-cluster issuer serves a certificate from the cluster's CA.
+    ca_file: Path | None = None
 
 
 @dataclass
@@ -53,30 +67,50 @@ class _KeySet:
 
 
 class PrincipalVerifier:
-    def __init__(self, issuers: list[Issuer], client: httpx.AsyncClient | None = None) -> None:
+    """Verifies tokens from the configured issuers. `noun` is what the token is called
+    in errors ("principal token" for a person, "actor token" for an agent)."""
+
+    def __init__(
+        self,
+        issuers: list[Issuer],
+        client: httpx.AsyncClient | None = None,
+        noun: str = "principal token",
+    ) -> None:
         for issuer in issuers:
             bad = set(issuer.algorithms) - ALLOWED_ALGORITHMS
             if bad:
                 raise ValueError(f"{issuer.issuer}: algorithms not allowed: {sorted(bad)}")
         self.issuers = {i.issuer.rstrip("/"): i for i in issuers}
+        self._injected = client is not None
         self.client = client or httpx.AsyncClient(timeout=10)
+        self.noun = noun
         self._keys: dict[str, _KeySet] = {}
         self._last_refresh: dict[str, float] = {}
         self._lock = asyncio.Lock()
 
     async def verify(self, token: str) -> str:
         """Return the verified principal (the configured claim, e.g. email)."""
+        issuer, claims = await self.claims(token)
+        subject = claims.get(issuer.claim)
+        if not isinstance(subject, str) or not subject:
+            raise PrincipalError(f"{self.noun} has no {issuer.claim!r} claim")
+        return subject[:200]
+
+    async def claims(self, token: str) -> tuple[Issuer, dict[str, Any]]:
+        """The issuer that signed the token and its claims, once the signature, issuer,
+        audience and validity window all check out."""
+        noun = self.noun
         try:
             header = jwt.get_unverified_header(token)
             unverified: dict[str, Any] = jwt.decode(token, options={"verify_signature": False})
         except jwt.PyJWTError as exc:
-            raise PrincipalError("malformed principal token") from exc
+            raise PrincipalError(f"malformed {noun}") from exc
         issuer = self.issuers.get(str(unverified.get("iss", "")).rstrip("/"))
         if issuer is None:
-            raise PrincipalError("principal token is from an untrusted issuer")
+            raise PrincipalError(f"{noun} is from an untrusted issuer")
         algorithm = str(header.get("alg", ""))
         if algorithm not in issuer.algorithms:
-            raise PrincipalError(f"principal token algorithm {algorithm!r} is not accepted")
+            raise PrincipalError(f"{noun} algorithm {algorithm!r} is not accepted")
         key = await self._key(issuer, str(header.get("kid", "")))
         try:
             claims: dict[str, Any] = jwt.decode(
@@ -89,15 +123,14 @@ class PrincipalVerifier:
                 options={"require": ["exp", "iss", "aud"]},
             )
         except jwt.ExpiredSignatureError as exc:
-            raise PrincipalError("principal token has expired") from exc
+            raise PrincipalError(f"{noun} has expired") from exc
         except jwt.InvalidAudienceError as exc:
-            raise PrincipalError("principal token was not issued for librarian") from exc
+            raise PrincipalError(
+                f"{noun} was not issued for librarian (audience {issuer.audience!r})"
+            ) from exc
         except jwt.PyJWTError as exc:
-            raise PrincipalError(f"principal token is invalid: {exc}") from exc
-        subject = claims.get(issuer.claim)
-        if not isinstance(subject, str) or not subject:
-            raise PrincipalError(f"principal token has no {issuer.claim!r} claim")
-        return subject[:200]
+            raise PrincipalError(f"{noun} is invalid: {exc}") from exc
+        return issuer, claims
 
     async def _key(self, issuer: Issuer, kid: str) -> PyJWK:
         keyset = self._keys.get(issuer.issuer)
@@ -112,24 +145,32 @@ class PrincipalVerifier:
                 self._keys[issuer.issuer] = keyset
                 self._last_refresh[issuer.issuer] = time.monotonic()
         if kid not in keyset.keys:
-            raise PrincipalError("principal token is signed with an unknown key")
+            raise PrincipalError(f"{self.noun} is signed with an unknown key")
         return keyset.keys[kid]
+
+    async def _get(self, issuer: Issuer, url: str) -> httpx.Response:
+        if issuer.ca_file is None or self._injected:
+            return await self.client.get(url)
+        # Read the bundle each time: the cluster rotates it, and fetches are rare.
+        context = ssl.create_default_context(cafile=str(issuer.ca_file))
+        async with httpx.AsyncClient(timeout=10, verify=context) as client:
+            return await client.get(url)
 
     async def _fetch(self, issuer: Issuer) -> _KeySet:
         try:
             url = issuer.jwks_url
             if url is None:
-                discovery = await self.client.get(
-                    issuer.issuer.rstrip("/") + "/.well-known/openid-configuration"
+                discovery = await self._get(
+                    issuer, issuer.issuer.rstrip("/") + "/.well-known/openid-configuration"
                 )
                 discovery.raise_for_status()
                 url = str(discovery.json()["jwks_uri"])
-            response = await self.client.get(url)
+            response = await self._get(issuer, url)
             response.raise_for_status()
             document: Any = response.json()
-        except (httpx.HTTPError, KeyError, ValueError) as exc:
+        except (httpx.HTTPError, OSError, ssl.SSLError, KeyError, ValueError) as exc:
             log.error("cannot fetch signing keys for %s: %s", issuer.issuer, exc)
-            raise PrincipalError("cannot verify principal tokens right now") from exc
+            raise KeysUnavailable(f"cannot verify {self.noun}s right now") from exc
         keys: dict[str, PyJWK] = {}
         for item in cast(list[Any], document.get("keys", [])) if isinstance(document, dict) else []:
             if not isinstance(item, dict) or "kid" not in item:

@@ -54,6 +54,19 @@ callers: []
 #    write_apis: ["jira"]              # may request writes (each needs approval or a grant)
 #    owner: ops@example.com            # stands in as requester for autonomous agents
 
+# Agents on Agent Substrate / kagent: identified by the actor JWT the platform's egress
+# gateway injects, instead of a key each. Off until `issuer` is set.
+substrate: {}
+#  issuer: https://idp.ate-system.svc
+#  audience: librarian
+#  ca_file: /var/run/librarian/substrate/ca.crt   # the cluster signer's trust bundle
+#  kagent_url: http://kagent-controller.kagent.svc:8083   # callers are kagent Agents
+#  rules:                                 # first match wins; no match: refused
+#    - match: {namespace: payments}       # namespace, name (globs), labels; atespace, actor
+#      write_apis: ["github"]
+#      owner: payments-leads@example.com
+#    - match: {}                          # everyone else: reads and learning, no writes
+
 # Who agents act for: off (claims trusted) | optional | required (proof via a signed token).
 principals:
   mode: "off"

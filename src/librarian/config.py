@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_core import PydanticUseDefault
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -201,6 +201,102 @@ class DriftSettings(BaseModel):
     recheck_hours: float = Field(default=24, ge=0)
 
 
+class ActorMatch(BaseModel):
+    """Which agents a rule is for. Every field given must match; `namespace`, `name`,
+    `atespace` and `actor` are glob patterns. An empty match is every agent.
+
+    `namespace`, `name` and `labels` describe the kagent Agent and need
+    `substrate.kagent_url`. `atespace` and `actor` describe the Substrate actor
+    itself, which is one agent session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: str | None = None
+    name: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict[str, str])
+    atespace: str | None = None
+    actor: str | None = None
+
+    @property
+    def needs_kagent(self) -> bool:
+        return self.namespace is not None or self.name is not None or bool(self.labels)
+
+
+class ActorRule(BaseModel):
+    """What the agents it matches may do: the same permissions a `callers` entry
+    gives an agent that has its own key."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    match: ActorMatch = Field(default_factory=ActorMatch)
+    # The caller name to record instead of `<namespace>/<name>` (kagent) or
+    # `<atespace>/<actor>`: e.g. to treat a team's agents as one caller.
+    agent: str | None = None
+    apis: list[str] = Field(default_factory=lambda: ["*"])
+    can_onboard: bool = True
+    write_apis: list[str] = Field(default_factory=list[str])  # empty: no writes
+    owner: str | None = None  # approves the agent's writes when no person is known
+    approval_wait_seconds: float | None = None
+
+
+class SubstrateSettings(BaseModel):
+    """Agents on Agent Substrate (and kagent) call librarian without a key of their
+    own: the egress gateway puts a signed actor JWT into each request, and librarian
+    trusts the cluster's issuer for it. Off until `issuer` is set."""
+
+    # The actor JWT issuer, e.g. https://idp.ate-system.svc (Substrate's default).
+    issuer: str | None = None
+    # The audience the tokens must be minted for: list it under `actorJwt.audiences`
+    # where the gateway is told to inject the token.
+    audience: str = "librarian"
+    jwks_url: str | None = None  # default: from the issuer's OIDC discovery document
+    # CA bundle for fetching the issuer's keys. The in-cluster issuer's certificate
+    # comes from the cluster signer `servicedns.podcert.ate.dev/identity`, not a
+    # public CA: project that ClusterTrustBundle into the pod and name the file here.
+    ca_file: Path | None = None
+    algorithms: list[str] = Field(default_factory=lambda: ["ES256", "RS256"])
+    leeway_seconds: int = 30
+    # kagent's controller, e.g. http://kagent-controller.kagent.svc:8083. An actor is
+    # one session; with this set librarian asks kagent for the Agent behind it, and
+    # rules, grants and the audit trail are about that Agent. The token's audiences
+    # must then also include `kagent-agent-info`.
+    kagent_url: str | None = None
+    kagent_cache_seconds: float = Field(default=60, ge=0, le=3600)
+    # First match wins. An agent no rule matches is refused.
+    rules: list[ActorRule] = Field(default_factory=list[ActorRule])
+
+    @property
+    def enabled(self) -> bool:
+        return self.issuer is not None
+
+    @model_validator(mode="after")
+    def _check(self) -> SubstrateSettings:
+        if self.issuer is None:
+            return self
+        if not self.issuer.startswith("https://"):
+            raise ValueError("substrate.issuer must be an https URL")
+        for url in (self.kagent_url,):
+            if url is not None and not url.startswith(("http://", "https://")):
+                raise ValueError("substrate.kagent_url must be an http(s) URL")
+        for index, rule in enumerate(self.rules):
+            if rule.match.needs_kagent and self.kagent_url is None:
+                raise ValueError(
+                    f"substrate.rules[{index}] matches on the kagent Agent (namespace, name or "
+                    "labels) but substrate.kagent_url is not set"
+                )
+            if rule.write_apis and not rule.owner:
+                logging.getLogger(__name__).warning(
+                    "substrate.rules[%d] lets agents ask for writes but names no owner: only "
+                    "the approver group can approve them",
+                    index,
+                )
+        if not self.rules:
+            logging.getLogger(__name__).warning(
+                "substrate.issuer is set but substrate.rules is empty: every agent is refused"
+            )
+        return self
+
+
 class CallerKey(BaseModel):
     """A calling agent and the secret reference holding its API key."""
 
@@ -358,6 +454,8 @@ class Settings(BaseSettings):
 
     # Caller authentication. Empty = open (local mode only).
     callers: list[CallerKey] = Field(default_factory=list[CallerKey])
+    # Callers that are agents on Agent Substrate / kagent, identified by actor JWT.
+    substrate: SubstrateSettings = Field(default_factory=SubstrateSettings)
 
     # OpenTelemetry (`otel` extra). Exporter endpoint/headers come from the standard
     # OTEL_EXPORTER_OTLP_* environment variables.

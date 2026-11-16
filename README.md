@@ -13,11 +13,12 @@ credential (once, out of band), and from then on serves every agent, without eve
 credential out.
 
 ```
- your agents ──A2A──► librarian ──(policy engine)──► Jira, GitHub, internal APIs, ...
-                         │
-                         ├── registry (git): what each API is and which operations are reads
-                         ├── secret store: credentials (agents only ever see references)
-                         └── planner (Pydantic AI, optional) ──► any model / LiteLLM
+ your agents ──A2A / MCP──► librarian ──(policy engine)──► Jira, GitHub, internal APIs, ...
+                               │
+                               ├── registry (its database): what each API is, and what people decided
+                               ├── secret store: credentials (agents only ever see references)
+                               ├── the record (GitHub, optional): a commit for every decision
+                               └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
 > Status: **alpha (v0.18)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
@@ -32,6 +33,12 @@ credential out.
   agent after that benefits.
 - **The LLM proposes, code decides.** The optional planner can suggest any call, but only the rule
   engine (no LLM) can approve it. No prompt can talk its way into a write.
+- **Decisions are made in one place.** What agents may do is decided by signed-in approvers on
+  librarian's own pages and stored in its database, in effect at once. GitHub receives a commit
+  for every decision and is never asked.
+- **Agents can run without any key.** On [Agent Substrate and kagent](docs/integrations.md#agent-substrate-and-kagent)
+  an agent's sandbox holds no credentials, not even one for librarian: the platform's gateway
+  signs each call, and librarian knows which agent is calling.
 - **Access is held three ways, and none of them by an agent.** A shared read-only key an
   approver adds once; a separate write credential, used only after a person approves the write;
   or, for APIs where what you see depends on who you are, each person's own OAuth sign-in,
@@ -64,7 +71,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 |---|---|
 | Try it on my laptop (10 minutes, Docker) | [docs/getting-started.md](docs/getting-started.md) |
 | Run it for my team (Kubernetes, step by step) | [docs/deploy.md](docs/deploy.md) (no internet exposure needed: [network](docs/deploy.md#network-what-must-reach-what)) |
-| Connect agents (LiteLLM, MCP clients, A2A) | [docs/integrations.md](docs/integrations.md) |
+| Connect agents (LiteLLM, kagent and Agent Substrate, MCP clients, A2A) | [docs/integrations.md](docs/integrations.md) |
 | Fix something | [docs/troubleshooting.md](docs/troubleshooting.md) |
 
 ```bash
@@ -188,6 +195,25 @@ callers:
 An agent only sees and uses the APIs its patterns allow, in `capabilities`, `execute` and `fetch`.
 
 With no callers configured the server is open: fine on a laptop, never in a shared deployment.
+
+Agents running on [Agent Substrate](https://github.com/agent-substrate/substrate) or kagent need
+no key at all. Their sandboxes hold no credentials; the platform's egress gateway puts a signed
+token naming the agent into each request, librarian verifies it against the cluster's issuer,
+and a rule says what that agent may do:
+
+```yaml
+substrate:
+  issuer: https://idp.ate-system.svc
+  kagent_url: http://kagent-controller.kagent.svc:8083
+  rules:
+    - match: {namespace: payments}
+      write_apis: [github]
+      owner: payments-leads@example.com
+    - match: {}                           # every other agent: reads and learning
+```
+
+See [integrations](docs/integrations.md#agent-substrate-and-kagent); the Helm chart sets it up
+with `substrate.enabled`.
 
 ## Observability
 
@@ -686,7 +712,12 @@ uv run pytest
   decision) and is not read back; `librarian registry restore` rebuilds a database from it.
   A verified API that changed at its source gets an approve-or-deny page for the update;
   any API can be approved or forgotten from the console; the chart's record no longer needs
-  git-sync (`githubApp.repo`). Pull requests opened by earlier versions are closed on start
+  git-sync (`githubApp.repo`). Pull requests opened by earlier versions are closed on start.
+  Agents on Agent Substrate and kagent call librarian with no key of their own: the platform's
+  egress gateway signs each request with the actor's identity, librarian verifies it against
+  the cluster's issuer, resolves the session to its kagent Agent, and applies the rule for
+  that agent (`substrate.rules`); the chart registers librarian as a `RemoteMCPServer`
+  (`substrate.enabled`). Tested on kagent 1.0.1 with Agent Substrate 1.0
 
 ### Next
 
@@ -698,7 +729,8 @@ uv run pytest
 ### Later
 
 - More secret stores: Vault, GCP Secret Manager, Azure Key Vault
-- kagent: a tested recipe for using librarian as a `RemoteMCPServer`
+- Through kagent: the person behind an agent as well as the agent (kagent sends one or the
+  other today), and waking a suspended agent when its write is approved
 - A community registry of reviewed, signed entries
 
 ## License

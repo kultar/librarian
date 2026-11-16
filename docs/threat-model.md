@@ -17,7 +17,7 @@ high-value target. This document lists what we defend against, how, and what is 
 | Operator (deploys, configures, owns the database and the registry directory) | Trusted |
 | Approver (approves learned APIs, enables writes, adds credentials, on the signed-in pages) | Trusted for those decisions |
 | The record repository on GitHub | **Not trusted as input**: written to, never read back |
-| Calling agent | **Untrusted input**, authenticated by key |
+| Calling agent | **Untrusted input**, authenticated by key, or by an Agent Substrate actor token |
 | API responses | **Untrusted input**, may contain prompt injection |
 | Downloaded OpenAPI specs / community registry entries | **Untrusted input** |
 | The planner LLM | **Untrusted**: treated as a suggestion engine |
@@ -26,10 +26,10 @@ high-value target. This document lists what we defend against, how, and what is 
 
 ### T1. Unauthorized or unintended writes
 - Reads and writes are separate paths. `execute` and `fetch` can never write; only the `write`
-  skill can, and only for operations a reviewer marked `writable: true` on a **verified** entry.
+  skill can, and only for operations an approver enabled (`writable: true`) on a **verified** entry.
   Auto-learned (provisional) entries can never be written to.
 - Writes use a **separate write credential** (`write_auth`); the read path never holds it.
-- **Automatic approval** is per operation, chosen by an approver (recorded in the reviewed
+- **Automatic approval** is per operation, chosen by an approver (recorded in the
   entry), capped per day, never for DELETE, still subject to every policy check and the write
   rate limit, audited on each use (and announced, unless `writes.announce_grants` or the
   grant's notices are off), and revocable with one click.
@@ -174,7 +174,7 @@ audited; and the operator, through the database, the config and the registry dir
   cannot embed credentials, file names must match ids, invalid files are skipped not fatal.
 - Hand-written entries: review them like code and run `librarian registry validate` in CI.
 
-- **APIs change under a reviewed entry.** Re-checks compare the source with the entry; an
+- **APIs change under an approved entry.** Re-checks compare the source with the entry; an
   operation whose HTTP method changed, or a writable one whose request changed, is suspended
   until an approver approves the update (or clears the suspension). Suspensions live in the
   state database, tied to the operation's definition.
@@ -194,6 +194,27 @@ audited; and the operator, through the database, the config and the registry dir
   stored with tasks. In `required` mode a claimed principal without a token is refused.
 - **Residual risk:** a token is a bearer credential; an agent holding a user's librarian-audience
   token can act as that user until it expires. Keep lifetimes short.
+- **Agents on Agent Substrate / kagent** are identified by an actor JWT that the platform's
+  egress gateway puts into the request; the agent never holds it. librarian checks it like a
+  principal token (signature against the cluster issuer's keys, issuer, expiry) and also that:
+  - its audience is librarian's, so a token an actor was given for another service, or one a
+    service received from an actor, cannot be replayed here;
+  - it names an actor: the same keys sign tokens for workers acting for an actor, which are
+    refused;
+  - with kagent, kagent still vouches for it: librarian exchanges the token for the Agent
+    behind the actor and repeats that every minute, so a deleted agent or an ended session
+    stops working within that minute although the token itself cannot be revoked.
+  What the agent may then do comes only from `substrate.rules` in librarian's config, never
+  from the token or from metadata on the Agent: whoever can edit Agents in a namespace gets
+  what the rule for that namespace allows, no more. A rule's field names are checked strictly,
+  because a misspelt `match` would otherwise match every agent.
+- **Residual risks there:** the token is a bearer credential valid for up to an hour (Substrate
+  has no revocation), so anything between the gateway and librarian that can read it can use
+  it: that hop is plain HTTP in-cluster unless a mesh encrypts it, so limit who can reach
+  librarian's Service. librarian never logs, stores or echoes the token. Trusting the issuer
+  means trusting the cluster's Substrate control plane: whoever can make it mint tokens, or
+  edit an actor's egress policy to request librarian's audience, can call librarian as that
+  actor (and gets only what the rules give that agent).
 
 ## Out of scope
 

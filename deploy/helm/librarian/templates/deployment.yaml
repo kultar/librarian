@@ -20,6 +20,13 @@
 {{- if and $git.enabled (not $git.repo) -}}
 {{- fail "registry.gitSync.repo is required when registry.gitSync.enabled is true" -}}
 {{- end -}}
+{{- $sub := .Values.substrate -}}
+{{- if and $sub.enabled (not (hasPrefix "https://" (toString $sub.issuer))) -}}
+{{- fail "substrate.issuer must be an https URL, e.g. https://idp.ate-system.svc" -}}
+{{- end -}}
+{{- if and $sub.enabled $sub.kagent.enabled (not $sub.kagent.url) -}}
+{{- fail "substrate.kagent.url is required when substrate.kagent.enabled is true (kagent's controller, e.g. http://kagent-controller.kagent.svc:8083)" -}}
+{{- end -}}
 {{- if and $proxy.enabled (not $proxy.existingSecret) -}}
 {{- fail "oauth2Proxy.existingSecret is required when oauth2Proxy.enabled is true" -}}
 {{- end -}}
@@ -129,6 +136,9 @@ spec:
             {{- if $app.enabled }}
             - {name: github-app, mountPath: /etc/librarian-github-app, readOnly: true}
             {{- end }}
+            {{- if and $sub.enabled $sub.trustBundle.enabled }}
+            - {name: substrate-ca, mountPath: /var/run/librarian/substrate, readOnly: true}
+            {{- end }}
         {{- if $git.enabled }}
         - name: git-sync
           image: {{ $git.image }}
@@ -207,6 +217,20 @@ spec:
         {{- if $git.enabled }}
         - name: git
           emptyDir: {}
+        {{- end }}
+        {{- if and $sub.enabled $sub.trustBundle.enabled }}
+        # The CA that signed the Substrate issuer's certificate, kept current by the kubelet.
+        - name: substrate-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: {{ $sub.trustBundle.signerName }}
+                  {{- with $sub.trustBundle.labelSelector }}
+                  labelSelector:
+                    matchLabels:
+                      {{- toYaml . | nindent 22 }}
+                  {{- end }}
+                  path: ca.crt
         {{- end }}
       {{- if .Values.topologySpreadConstraints }}
       topologySpreadConstraints:

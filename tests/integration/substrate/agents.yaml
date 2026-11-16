@@ -1,0 +1,74 @@
+# Three agents: one a rule admits for reads, one a rule admits for writes (by label),
+# and one no rule matches.
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata:
+  name: lib-reader
+  namespace: kagent
+spec:
+  harnessRef:
+    name: kagent-default
+  template:
+    inline:
+      modelConfig:
+        name: default-model-config
+      systemPrompt: |
+        You answer questions about web APIs by calling the librarian tools. Never guess:
+        call the tools. To use an API librarian does not know yet, first call `onboard`
+        with the API id and spec URL the user gives you, then `capabilities` to see its
+        operations, then `execute`. Report exactly what the tools returned, including
+        any error text.
+      tools:
+        - mcp:
+            server:
+              kind: RemoteMCPServer
+              name: librarian
+              namespace: librarian
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata:
+  name: lib-outsider
+  namespace: kagent
+spec:
+  harnessRef:
+    name: kagent-default
+  template:
+    inline:
+      modelConfig:
+        name: default-model-config
+      systemPrompt: |
+        You answer questions about web APIs by calling the librarian tools. If no
+        librarian tool is available to you, or a tool fails, say so and quote the error.
+      tools:
+        - mcp:
+            server:
+              kind: RemoteMCPServer
+              name: librarian
+              namespace: librarian
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata:
+  name: lib-writer
+  namespace: kagent
+  labels:
+    librarian-test/role: writer
+spec:
+  harnessRef:
+    name: kagent-default
+  template:
+    inline:
+      modelConfig:
+        name: default-model-config
+      systemPrompt: |
+        You change data in web APIs only through the librarian tools. Call the tool the
+        user names with exactly the arguments they give. Report exactly what the tool
+        returned (status, approval ids, messages, errors); never retry on your own and
+        never invent results.
+      tools:
+        - mcp:
+            server:
+              kind: RemoteMCPServer
+              name: librarian
+              namespace: librarian

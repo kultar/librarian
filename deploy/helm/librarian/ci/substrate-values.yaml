@@ -1,0 +1,11 @@
+# Regression check (ci.yml): agents on Agent Substrate / kagent.
+substrate:
+  enabled: true
+  rules:
+    - match: {namespace: payments}
+      write_apis: [github]
+      owner: payments-leads@example.com
+    - match: {}
+replicaCount: 2
+persistence:
+  enabled: false

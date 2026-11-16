@@ -23,7 +23,7 @@ This runs librarian and a **demo API** (an echo service standing in for an inter
 needs a key). The setup is in [`examples/quickstart`](../examples/quickstart):
 
 - `librarian.yaml`: one agent, `demo-agent`, with the key `demo-agent-key`.
-- `registry/demo.yaml`: the demo API, already reviewed. Normally librarian learns entries like
+- `registry/demo.yaml`: the demo API, already approved. Normally librarian learns entries like
   this on demand (step 2); this one is prewritten so steps 3 and 4 have something that needs a key.
 - `./ask`: sends requests to librarian as `demo-agent` (it wraps the A2A JSON-RPC call).
 
@@ -32,8 +32,8 @@ needs a key). The setup is in [`examples/quickstart`](../examples/quickstart):
 ```
 
 Open <http://localhost:8080/> in a browser: the console shows what librarian knows and what is
-waiting on you, and lets you block or forget an API, invalidate a key, or re-learn an API from
-a documentation URL. (The quick start serves it without sign-in; a shared deployment puts it behind
+waiting on you, and lets you approve, block or forget an API, decide what each operation is,
+invalidate a key, or re-learn an API from a documentation URL. (The quick start serves it without sign-in; a shared deployment puts it behind
 your identity provider.)
 
 ## 2. An agent needs an API librarian has never seen
@@ -49,10 +49,18 @@ from its OpenAPI spec, then reads from it:
 # ..."data": {"numAPIs": 2529.0}
 ```
 
-It was usable at once: learned APIs start as **provisional**, which allows reads (GET) only. An
-approver makes it verified with one click: librarian logged a review link for it, and the
-console (http://localhost:8080/) lists it under *Waiting*
-([docs/registry.md](registry.md)).
+It was usable at once: learned APIs start as **provisional**, which allows reads (GET) only.
+Anything more needs a person to approve the API. Approvers are asked (on Slack in production,
+in the log here), and the console lists it under *Waiting*:
+
+```bash
+docker compose logs librarian | grep -o 'http://localhost:8080/reviews/[^ ]*' | tail -1
+```
+
+Open the link and click **Approve**. The API is verified from that moment
+(`./ask '{"skill":"capabilities"}'` now says `"status": "verified"`); **Deny and forget** would
+drop it instead. The decision lives in librarian's database; in a deployment it is also
+written to a GitHub repository as a record ([docs/registry.md](registry.md)).
 
 No spec? Give it the documentation page instead (`"docs_url"` plus `"base_url"`), or just the
 `"base_url"`, and librarian finds the docs itself. That needs a model: see
@@ -102,7 +110,7 @@ The approval page shows exactly what will be sent and why. Click **Approve this 
 # "state": "TASK_STATE_COMPLETED", the demo API received {"text": "Looks good"}
 ```
 
-Writes only ever run on reviewed entries, for operations a reviewer enabled, with a separate
+Writes only ever run on approved entries, for operations an approver enabled, with a separate
 write key, after approval.
 
 ## 5. Connect a real agent
@@ -119,7 +127,8 @@ Then ask Claude Code something like *"use librarian to find how many APIs APIs.g
 Over MCP nothing blocks on a person: a write returns `pending_approval`, and librarian finishes
 it after approval (`write_status` reports the result).
 
-For agents behind the **LiteLLM** gateway, see [docs/integrations.md](integrations.md).
+For agents behind the **LiteLLM** gateway, or running on **kagent / Agent Substrate** (where
+they need no key at all), see [docs/integrations.md](integrations.md).
 
 ## Using a model
 

@@ -82,6 +82,23 @@ database defaults apply only when the user did not set them.
 {{- if .Values.otel.enabled -}}
 {{- $_ := set $c "otel_enabled" true -}}
 {{- end -}}
+{{- if .Values.substrate.enabled -}}
+{{- /* Agents on Agent Substrate / kagent: identified by the actor JWT the gateway injects. */ -}}
+{{- $s := .Values.substrate -}}
+{{- $substrate := deepCopy (get $c "substrate" | default dict) -}}
+{{- $_ := set $substrate "issuer" $s.issuer -}}
+{{- $_ := set $substrate "audience" $s.audience -}}
+{{- if $s.trustBundle.enabled -}}
+{{- $_ := set $substrate "ca_file" "/var/run/librarian/substrate/ca.crt" -}}
+{{- end -}}
+{{- if $s.kagent.enabled -}}
+{{- $_ := set $substrate "kagent_url" $s.kagent.url -}}
+{{- end -}}
+{{- if not (hasKey $substrate "rules") -}}
+{{- $_ := set $substrate "rules" $s.rules -}}
+{{- end -}}
+{{- $_ := set $c "substrate" $substrate -}}
+{{- end -}}
 {{- if .Values.githubApp.enabled -}}
 {{- /*
 The record: every approved decision is committed to this repository as the App. Without

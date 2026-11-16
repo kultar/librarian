@@ -47,6 +47,17 @@ jobs:
           echo "$out" | grep -q -- "--github-app-installation-id=987654321," || { echo "$out" | grep installation-id; exit 1; }
           echo "$out" | grep -q -- "--github-app-application-id=1234567," || { echo "$out" | grep application-id; exit 1; }
           echo "$out" | grep -q 'app_id: "1234567"' || { echo "$out" | grep app_id; exit 1; }
+      - name: Agents on Agent Substrate
+        run: |
+          out="$(helm template t deploy/helm/librarian -f deploy/helm/librarian/ci/substrate-values.yaml)"
+          echo "$out" | grep -q 'kind: RemoteMCPServer' || { echo "no RemoteMCPServer"; exit 1; }
+          echo "$out" | grep -q -- '- kagent-agent-info' || { echo "$out" | grep -A6 actorJwt; exit 1; }
+          echo "$out" | grep -q 'url: http://t-librarian.default.svc.cluster.local:8080/mcp' || { echo "$out" | grep 'url:'; exit 1; }
+          echo "$out" | grep -q 'ca_file: /var/run/librarian/substrate/ca.crt' || { echo "$out" | grep -A12 'substrate:'; exit 1; }
+          echo "$out" | grep -q 'signerName: servicedns.podcert.ate.dev/identity' || { echo "no trust bundle volume"; exit 1; }
+          plain="$(helm template t deploy/helm/librarian --set substrate.enabled=true,substrate.kagent.enabled=false)"
+          if echo "$plain" | grep -q 'RemoteMCPServer\|kagent_url'; then echo "kagent rendered while off"; exit 1; fi
+          if helm template t deploy/helm/librarian | grep -q 'substrate'; then echo "substrate rendered while off"; exit 1; fi
       - name: The record needs no git-sync
         run: |
           out="$(helm template t deploy/helm/librarian -f deploy/helm/librarian/ci/record-only-values.yaml)"

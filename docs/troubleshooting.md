@@ -189,6 +189,59 @@ the App: `librarian github-app init-repo --repo acme/api-registry --app-id ... -
 ruleset restricts creating the default branch; if it reports a rule violation, make the first
 commit as a person or exclude the App from the rule for a moment.
 
+## Agent Substrate and kagent
+
+An agent's call is refused before it reaches any API. kagent only shows that discovering the
+tools failed ("Forbidden", "Unauthorized") and runs the agent without them, so look in
+librarian's log, which says why: `refused a Substrate caller (HTTP 403): ...`. The reasons:
+
+**401 "actor token was not issued for librarian (audience 'librarian')".**
+The gateway minted the token for another audience. The `RemoteMCPServer` (or the actor's
+`EgressPolicy`) must list librarian's `substrate.audience` under `actorJwt.audiences`.
+
+**401 "actor token cannot be used to look up its agent: add 'kagent-agent-info' to the audiences".**
+With `substrate.kagent_url` set, the same token is shown to kagent to learn which Agent the actor
+is, and kagent only accepts tokens that carry that audience. The chart's `RemoteMCPServer`
+includes it; add it to one you wrote yourself.
+
+**401 "actor token is from an untrusted issuer".**
+`substrate.issuer` must equal the token's `iss` exactly: Substrate's `actorJWT.issuer`, by default
+`https://idp.<namespace Substrate is installed in>.svc`.
+
+**401 "kagent does not recognise this actor as a current agent session".**
+The session is obsolete or its Agent was deleted or recreated. A new session works.
+
+**403 "agent 'payments/release-notes' is not allowed to use librarian: no rule under
+substrate.rules matches it".**
+Add a rule for it, or a catch-all `- match: {}` as the last rule. The name in the message is what
+to match on (`namespace` / `name`).
+
+**503 "cannot verify actor tokens right now".**
+librarian could not fetch the issuer's signing keys. From librarian's pod,
+`https://idp.ate-system.svc/.well-known/openid-configuration` must answer, and its certificate
+must verify against `substrate.ca_file`. With the chart, check the pod has the `substrate-ca`
+volume and that a ClusterTrustBundle for the signer exists:
+`kubectl get clustertrustbundles -l podcert.ate.dev/canarying=live`.
+
+**503 "cannot look up the agent behind this actor right now".**
+librarian could not reach kagent's controller at `substrate.kagent_url` (default
+`http://kagent-controller.kagent.svc:8083`), or a NetworkPolicy drops the connection.
+
+**The agent has no librarian tools, and librarian's log shows no request from it at all.**
+The call never left the sandbox. The agent runtime's log (the worker pod, e.g.
+`kubectl -n kagent logs deploy/kagent-default`) says `failed to list MCP tools`:
+- `lookup librarian.librarian.svc ... server misbehaving`: the `RemoteMCPServer`'s URL uses a
+  short service name. A sandbox's DNS answers only for the exact hostnames in the actor's egress
+  policy, without search domains: use `<service>.<namespace>.svc.cluster.local` (the chart does,
+  since 0.20; set `substrate.clusterDomain` if your cluster's domain differs).
+- a timeout: raise the `RemoteMCPServer`'s `timeout` (kagent's default is 30 seconds).
+Also check the Agent's conditions (`kubectl describe agent <name>`): the `RemoteMCPServer` must be
+in a namespace kagent watches, and its `allowedNamespaces` must admit the agent's namespace. The
+agent discovers the tools at run time, so kagent's tool picker never lists them.
+
+**Calls work but everything is recorded as one caller per session, or grants never apply.**
+`substrate.kagent_url` is not set, so the caller is the actor (one session) instead of the Agent.
+
 ## Kubernetes
 
 **git-sync init container in `Init:CrashLoopBackOff`, printing its usage or
