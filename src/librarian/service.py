@@ -1037,13 +1037,23 @@ class Librarian:
         )
         entries = [e for e in entries if caller.may_use(e.id)]
 
-        def read_ops(entry: ApiEntry) -> list[Operation]:
-            reads = [
+        def reads(entry: ApiEntry) -> list[Operation]:
+            """The reads this caller can make there: its limits may leave some out."""
+            limits = caller.limits_for(entry.id)
+            return [
                 op
                 for op in entry.operations
-                if op.access is Access.READ and not self.observations.suspended(entry, op)
+                if op.access is Access.READ
+                and not self.observations.suspended(entry, op)
+                and (limits is None or limits.reaches(op))
             ]
-            return rank(entry, query, reads, limit=20) if query else reads[:50]
+
+        def shown(entry: ApiEntry) -> list[Operation]:
+            return rank(entry, query, reads(entry), limit=20) if query else reads(entry)[:50]
+
+        def limited(entry: ApiEntry) -> dict[str, Any]:
+            limits = caller.limits_for(entry.id)
+            return {"limits": limits.told()} if limits is not None else {}
 
         return [
             {
@@ -1053,11 +1063,12 @@ class Librarian:
                 "status": e.status.value,
                 "base_url": e.base_url,
                 "read_operations": [
-                    {"operation": op.id, "summary": op.summary[:160]} for op in read_ops(e)
+                    {"operation": op.id, "summary": op.summary[:160]} for op in shown(e)
                 ],
-                "total_read_operations": sum(1 for op in e.operations if op.access is Access.READ),
+                "total_read_operations": len(reads(e)),
                 "credential_ready": None if e.secret_ref is None else "unknown",
                 "learned_from": e.source.kind,
+                **limited(e),
             }
             for e in entries
         ]

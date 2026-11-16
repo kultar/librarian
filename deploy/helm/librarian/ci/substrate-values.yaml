@@ -5,6 +5,10 @@ substrate:
     - match: {namespace: payments}
       write_apis: [github]
       owner: payments-leads@example.com
+      limits:
+        github:
+          arguments: {owner: [acme], repo: ["payments-*"]}
+          allow_without: [meta_get]
     - match: {}
 replicaCount: 2
 persistence:

@@ -141,6 +141,7 @@ def build_agent(
             raise ModelRetry(f"unknown API {api!r}; use search_apis first")
         can_write = ctx.deps.caller.may_write(api) and entry.write_auth is not None
         observations = ctx.deps.executor.observations
+        limits = ctx.deps.caller.limits_for(api)
         usable = [
             op
             for op in entry.operations
@@ -149,6 +150,7 @@ def build_agent(
                 or (op.access is Access.WRITE and op.writable and can_write)
             )
             and not observations.suspended(entry, op)
+            and (limits is None or limits.reaches(op))
         ]
         chosen = rank(entry, filter_text, usable, limit=15) if filter_text.strip() else usable[:40]
         ops: list[dict[str, Any]] = []
@@ -188,6 +190,8 @@ def build_agent(
         }
         if len(usable) > len(ops) and not filter_text.strip():
             result["hint"] = "Only some operations are shown: call again with filter_text."
+        if limits is not None:
+            result["limits"] = limits.told()
         if entry.glossary:
             result["glossary"] = _glossary_excerpt(entry.glossary, filter_text)
         return result

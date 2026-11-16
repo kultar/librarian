@@ -225,7 +225,7 @@ no search domains, so `librarian.librarian.svc` does not resolve there.
 | `ca_file` | CA bundle for fetching the issuer's keys. The in-cluster issuer's certificate comes from the cluster signer `servicedns.podcert.ate.dev/identity`; the chart projects its ClusterTrustBundle |
 | `kagent_url` | kagent's controller. Set: callers are Agents (`namespace/name`), and tokens must also carry the audience `kagent-agent-info`. Unset: callers are actors |
 | `rules[].match` | `namespace`, `name` (globs) and `labels` of the Agent; `atespace` and `actor` (globs) of the actor. Every field given must match; `{}` matches everyone |
-| `rules[]` | `apis` (default all), `write_apis` (default none), `can_onboard`, `owner`, `agent` (a caller name to record instead), `approval_wait_seconds`: the same meaning as under `callers` |
+| `rules[]` | `apis` (default all), `write_apis` (default none), `can_onboard`, `owner`, `agent` (a caller name to record instead), `approval_wait_seconds`, `limits` (what the agents may do inside an API: [README](../README.md#limits-inside-an-api)): the same meaning as under `callers` |
 
 Agents with their own key (`callers`) keep working beside this.
 

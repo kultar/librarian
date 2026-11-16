@@ -265,6 +265,7 @@ class ActorAuthenticator:
             owner=rule.owner,
             approval_wait_seconds=rule.approval_wait_seconds,
             via=actor.via,
+            limits=dict(rule.limits),
         )
 
 

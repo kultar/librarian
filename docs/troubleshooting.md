@@ -14,6 +14,19 @@ never shared.
 **"caller ... is not allowed to use API ..." / "... may not write ..."**
 The caller's `apis` / `write_apis` patterns don't include that API.
 
+**"caller ... is limited on API ...: ..."**
+The agent's `limits` for that API (under `callers`, or the Substrate rule it matches) do not
+cover the call:
+- *key='OPS-9' is outside what it may use (PAY-\*)*: the argument's value matches none of the
+  patterns. Matching is exact and case-sensitive.
+- *the argument 'team' must be given*: a limited argument that the API treats as optional;
+  without it the answer would not be limited.
+- *the operation ... takes no such argument*: it takes none of the limited arguments, so it
+  cannot be held to them. If the agent should have it, name it under `allow_without`.
+- *it may not use the operation ...*: `operations` lists what it may use.
+
+`capabilities` shows an agent only the operations it can reach, with its limits.
+
 **"operation ... is not a read" / "is not enabled for writes"**
 Reads only run operations classified as reads (GET, or reviewed). Writes need a verified entry,
 `writable: true` on the operation, a `write_auth` credential, and the caller's `write_apis`.

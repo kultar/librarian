@@ -367,6 +367,10 @@ config:
       owner: platform-team@example.com
 ```
 
+An agent that should only touch part of an API gets `limits`: which operations it may use and
+which values its arguments may take, for example one GitHub organisation or one Jira project
+([README](../README.md#limits-inside-an-api)).
+
 Generate the key: `openssl rand -hex 32`. It goes in `librarian-env` as
 `LIBRARIAN_SECRET_LIBRARIAN_CALLERS_LITELLM_GATEWAY` (the `key_ref`, upper-cased, `/` and `-`
 become `_`), and the same value is configured on the caller's side (LiteLLM).

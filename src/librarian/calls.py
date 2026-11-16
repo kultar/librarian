@@ -6,11 +6,101 @@ from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from librarian.registry.models import EntryStatus
+from librarian.registry.models import EntryStatus, Operation
 
 ArgValue = str | int | float | bool | list[str] | list[int]
+
+
+class Limits(BaseModel):
+    """What an agent may do inside one API it is allowed to use.
+
+    `operations` names the operations it may call (glob patterns of operation ids;
+    empty: all of them).
+
+    `arguments` names arguments and the values they may take (glob patterns):
+    `{owner: [acme], repo: ["payments-*"]}` lets an agent use GitHub on those
+    repositories only. An operation may be called when it takes at least one of the
+    named arguments, and every one it takes is given with an allowed value. An operation
+    that takes none of them (a search, "who am I") cannot be limited this way: it is
+    refused, unless `allow_without` names it.
+
+    Matching is exact and case-sensitive, and only arguments are looked at: what a
+    request body says is not.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operations: tuple[str, ...] = ()
+    arguments: dict[str, tuple[str, ...]] = Field(default_factory=dict[str, tuple[str, ...]])
+    allow_without: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _says_something(self) -> Limits:
+        if not self.operations and not self.arguments:
+            raise ValueError("a limit names `operations` or `arguments` (or both)")
+        if self.allow_without and not self.arguments:
+            raise ValueError("`allow_without` is only meaningful together with `arguments`")
+        patterns = [*self.operations, *self.allow_without]
+        for name, values in self.arguments.items():
+            if not name or not values:
+                raise ValueError(f"argument {name!r} needs at least one allowed value")
+            patterns += values
+        if any(not pattern or len(pattern) > 500 for pattern in patterns):
+            raise ValueError("a pattern is empty or longer than 500 characters")
+        return self
+
+    def reaches(self, op: Operation) -> bool:
+        """Whether this operation can be called at all under these limits, with some
+        arguments (what an agent is shown as available)."""
+        if self.operations and not any(fnmatchcase(op.id, p) for p in self.operations):
+            return False
+        if not self.arguments:
+            return True
+        takes = {p.name for p in op.parameters}
+        return any(name in takes for name in self.arguments) or any(
+            fnmatchcase(op.id, p) for p in self.allow_without
+        )
+
+    def told(self) -> dict[str, Any]:
+        """These limits as an agent is told them, so it asks for what it may have."""
+        said: dict[str, Any] = {}
+        if self.operations:
+            said["operations"] = list(self.operations)
+        if self.arguments:
+            said["arguments"] = {name: list(values) for name, values in self.arguments.items()}
+            said["note"] = (
+                "Give these arguments with one of these values; operations that take none "
+                "of them are not available to you."
+            )
+        return said
+
+    def refusal(self, op: Operation, args: dict[str, ArgValue]) -> str | None:
+        """Why this call is outside the limits, or None when it is inside."""
+        if self.operations and not any(fnmatchcase(op.id, p) for p in self.operations):
+            return f"it may not use the operation {op.id!r} there"
+        if not self.arguments:
+            return None
+        takes = {p.name for p in op.parameters}
+        limited = [name for name in self.arguments if name in takes]
+        if not limited:
+            if any(fnmatchcase(op.id, p) for p in self.allow_without):
+                return None
+            names = " or ".join(repr(name) for name in self.arguments)
+            return (
+                f"it is limited there to calls that name {names}, and the operation "
+                f"{op.id!r} takes no such argument"
+            )
+        for name in limited:
+            if name not in args:
+                return f"the argument {name!r} must be given: its value is limited"
+            value = args[name]
+            for item in value if isinstance(value, list) else [value]:
+                if not any(fnmatchcase(str(item), p) for p in self.arguments[name]):
+                    allowed = ", ".join(self.arguments[name])
+                    return f"{name}={str(item)[:80]!r} is outside what it may use ({allowed})"
+        return None
 
 
 class Caller(BaseModel):
@@ -43,6 +133,9 @@ class Caller(BaseModel):
     # How the agent proved who it is, when not by its own key: the Agent Substrate
     # actor (one agent session) behind this call. Recorded with each call for audit.
     via: str | None = None
+    # What it may do inside an API it may use, by glob pattern of API id (the first
+    # that matches counts). No entry for an API: nothing is limited inside it.
+    limits: dict[str, Limits] = Field(default_factory=dict[str, Limits])
 
     def requesters(self) -> set[str]:
         """Humans who count as 'the requester' when approving this caller's writes.
@@ -60,6 +153,17 @@ class Caller(BaseModel):
 
     def may_write(self, api: str) -> bool:
         return self.may_use(api) and any(fnmatchcase(api, p) for p in self.write_apis)
+
+    def limits_for(self, api: str) -> Limits | None:
+        return next(
+            (limits for pattern, limits in self.limits.items() if fnmatchcase(api, pattern)), None
+        )
+
+    def outside_limits(self, api: str, op: Operation, args: dict[str, ArgValue]) -> str | None:
+        """Why this call is outside what the agent may do inside this API, or None."""
+        limits = self.limits_for(api)
+        why = limits.refusal(op, args) if limits is not None else None
+        return f"caller {self.agent!r} is limited on API {api!r}: {why}" if why else None
 
 
 class CallRequest(BaseModel):

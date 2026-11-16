@@ -687,6 +687,7 @@ def create_app(
             write_apis=tuple(c.write_apis),
             owner=c.owner,
             approval_wait_seconds=c.approval_wait_seconds,
+            limits=dict(c.limits),
         )
         for c in librarian.settings.callers
     }

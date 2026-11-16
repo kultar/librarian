@@ -409,6 +409,42 @@ gets a token that can write.
   installed, a role librarian may not assume) and no approver is asked for a key that would not
   help. A client secret or App key that is refused is asked for like any other key.
 
+## Limits inside an API
+
+`apis` and `write_apis` say which APIs an agent may use. `limits` says what it may do inside
+one: which operations, and which values its arguments may take.
+
+```yaml
+callers:                                   # the same under substrate.rules
+  - agent: release-notes
+    key_ref: librarian/callers/release-notes
+    apis: [github, jira]
+    write_apis: [github]
+    limits:
+      github:                              # an API id (a glob pattern)
+        arguments:
+          owner: [acme]                    # only acme's repositories...
+          repo: ["payments-*", docs]       # ...and only these (glob patterns)
+        allow_without: [meta_get]          # an operation that takes neither argument
+      jira:
+        operations: ["get*", "search*"]    # only these operations
+        arguments: {projectIdOrKey: [PAY]}
+```
+
+An operation may be called when it takes at least one of the limited arguments and every one
+it takes is given with an allowed value. An argument the API treats as optional must then be
+given: left out, the answer would cover everything. An operation that takes none of them (a
+search across the whole site, "who am I", GraphQL) cannot be held to anything, so it is
+refused unless `allow_without` names it. The policy engine decides this for reads, writes and
+the planner's calls alike; a write outside the limits is refused, not put to an approver, and
+no standing grant reaches past them. `capabilities` shows an agent only what it can reach,
+and tells it its limits.
+
+Matching is exact and case-sensitive, and only arguments are looked at: what a request
+body says (a pull request's `head`, a JQL query) is not. Use a credential that cannot do more
+where that matters; with a [GitHub App](#credentials-made-for-each-call) the token itself is
+for the one repository the call names.
+
 ## Verified principals
 
 By default the person an agent acts for (`principal`) is whatever the agent claims. Turn on
@@ -799,7 +835,10 @@ uv run pytest
   Credentials made for each call instead of stored: OAuth client credentials, GitHub App
   tokens (one repository, an hour, read-only for a read) and AWS request signing (librarian's
   own identity, or a role assumed for the API). An API's authentication can be described in
-  full in the console
+  full in the console.
+  Limits inside an API: an agent's rule can name the operations it may use and the values its
+  arguments may take (`limits`), enforced by the policy engine for reads, writes and planned
+  calls
 
 ### Next
 

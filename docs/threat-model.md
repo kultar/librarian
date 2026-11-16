@@ -45,6 +45,16 @@ high-value target. This document lists what we defend against, how, and what is 
   and after a restart (the key is indexed with the write in the database).
 - The planner can only *propose* writes; proposals go back to the calling agent.
 - Per-agent `write_apis` allowlists and a separate, lower write rate limit.
+- **Limits inside an API** (`limits` on a caller or a Substrate rule): the operations an agent
+  may use and the values its arguments may take, decided by the policy engine before anything
+  else about the operation. A call outside them is refused for reads and writes alike, is
+  never turned into a request for an approver, and is not covered by any grant. An operation
+  that takes none of the limited arguments is refused unless named, since it could not be
+  held to anything; a limited argument cannot be left out. **Residual risk:** only arguments
+  are looked at, exactly and case-sensitively. What a request body names (another repository
+  as a pull request's head, a query in a search body) is not, and an API that treats two
+  spellings as the same resource is not known to. A credential that cannot do more is the
+  stronger control where there is one.
 - With `principals.mode: optional` or `required`, only a **verified** principal (or the agent's
   configured owner) counts as the requester. With `principals.mode: off`, the requester is
   whatever the agent claims: a compromised agent colluding with an insider could name that
@@ -58,7 +68,7 @@ high-value target. This document lists what we defend against, how, and what is 
 - Tool results are truncated and labelled as untrusted in the planner instructions.
 - **Residual risk:** injected text could steer the planner to read *other*
   data the same caller is allowed to read and include it in the answer. Per-agent API allowlists
-  bound this to what the caller could already read through `execute`.
+  and limits inside an API bound this to what the caller could already read through `execute`.
 
 - **Documentation is input too.** When learning from docs, the model has no tools and only fills
   a fixed structure. Each operation must quote the page (checked against the fetched text, outside

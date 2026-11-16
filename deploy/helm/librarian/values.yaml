@@ -137,6 +137,8 @@ substrate:
   # - match: {namespace: payments}
   #   write_apis: [github]              # may ask for writes there; each still needs approval
   #   owner: payments-leads@example.com # approves them (no person is known through kagent)
+  #   limits:                           # what they may do inside an API (see the README)
+  #     github: {arguments: {owner: [acme], repo: ["payments-*"]}}
   # - match: {}                         # every other agent: reads and learning, no writes
   #   apis: ["*"]
 

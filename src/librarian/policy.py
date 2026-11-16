@@ -148,6 +148,9 @@ class PolicyEngine:
         op = entry.operation(request.operation)
         if op is None:
             return Decision.deny(f"unknown operation {request.operation!r} on {entry.id!r}")
+        outside = caller.outside_limits(entry.id, op, request.args)
+        if outside:
+            return Decision.deny(outside)
         if op.access is not Access.READ:
             return Decision.deny(f"operation {op.id!r} is not a read (access={op.access})")
         suspended = self.observations.suspended(entry, op)
@@ -195,6 +198,11 @@ class PolicyEngine:
         op = entry.operation(request.operation)
         if op is None:
             return Decision.deny(f"unknown operation {request.operation!r} on {entry.id!r}")
+        # Before anything an approver could be asked about: a call outside the agent's
+        # limits is refused, not turned into a request to enable it.
+        outside = caller.outside_limits(entry.id, op, request.args)
+        if outside:
+            return Decision.deny(outside)
         if not op.writable:
             return Decision.deny(
                 f"operation {op.id!r} is not enabled for writes",

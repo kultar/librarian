@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from pydantic_core import PydanticUseDefault
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from librarian.calls import Limits
 from librarian.net import NetworkPolicy, host_pattern_ok
 from librarian.registry.models import RESERVED_SECRET_PREFIX
 
@@ -237,6 +238,9 @@ class ActorRule(BaseModel):
     write_apis: list[str] = Field(default_factory=list[str])  # empty: no writes
     owner: str | None = None  # approves the agent's writes when no person is known
     approval_wait_seconds: float | None = None
+    # What these agents may do inside an API, by API id (a glob pattern): which
+    # operations, and which values of which arguments. See `librarian.calls.Limits`.
+    limits: dict[str, Limits] = Field(default_factory=dict[str, Limits])
 
 
 class SubstrateSettings(BaseModel):
@@ -315,6 +319,11 @@ class CallerKey(BaseModel):
     # How long this agent's write requests wait for approval; 0 returns "pending"
     # at once (autonomous agents poll the A2A task). None = the global default.
     approval_wait_seconds: float | None = None
+    # What this agent may do inside an API it may use, by API id (a glob pattern): which
+    # operations, and which values of which arguments, e.g.
+    #   limits: {github: {arguments: {owner: [acme], repo: ["payments-*"]}}}
+    # See `librarian.calls.Limits`.
+    limits: dict[str, Limits] = Field(default_factory=dict[str, Limits])
 
     @model_validator(mode="after")
     def _warn_unowned_writer(self) -> CallerKey:
