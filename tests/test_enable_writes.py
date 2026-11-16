@@ -27,8 +27,8 @@ from librarian.registry.models import BearerAuth
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian, WriteNotEnabled
 from librarian.web import credential_routes
-from tests.conftest import BASE, RecordingNotifier, Router
-from tests.test_console import DecisionPublisher, console, token
+from tests.conftest import BASE, RecordingNotifier, RecordPublisher, Router
+from tests.test_console import console, token
 from tests.test_notifiers_and_net import make_request
 from tests.test_web import themed
 from tests.test_writes import BOT, KIM
@@ -38,18 +38,6 @@ from tests.test_writes import BOT, KIM
 RENAME = WriteRequest(
     api="tracker", operation="renameProject", args={"p": "PAY"}, reason="rename for the new team"
 )
-
-
-class ProposalPublisher(DecisionPublisher):
-    """Keeps the proposed entries, not just their titles."""
-
-    def __init__(self) -> None:
-        super().__init__(open_for=set())
-        self.entries: list[tuple[Any, str]] = []
-
-    async def propose_update(self, entry: Any, title: str, body: str) -> str:
-        self.entries.append((entry, title))
-        return await super().propose_update(entry, title, body)
 
 
 @pytest.fixture(autouse=True)
@@ -117,7 +105,7 @@ async def test_reads_and_unknown_operations_are_still_plain_denials(librarian: L
 # -- enabling ----------------------------------------------------------------------------
 
 
-async def test_enable_proposes_the_change_and_asks_for_a_write_credential(
+async def test_enabling_takes_effect_at_once_and_asks_for_a_write_credential(
     librarian: Librarian,
     router: Router,
     notifier: RecordingNotifier,
@@ -125,8 +113,8 @@ async def test_enable_proposes_the_change_and_asks_for_a_write_credential(
     secrets_store: FileSecretStore,
 ) -> None:
     await without_write_credential(librarian)
-    pub = ProposalPublisher()
-    librarian.publisher = pub
+    record = RecordPublisher()
+    librarian.publisher = record
     router.add("GET", f"{BASE}/v1/me", lambda r: httpx.Response(200, json={"me": 1}))
     with pytest.raises(WriteNotEnabled) as info:
         await librarian.write(RENAME, KIM)
@@ -144,19 +132,23 @@ async def test_enable_proposes_the_change_and_asks_for_a_write_credential(
     assert "tracker/write" in page.text and "tracker/readonly" in page.text  # the key choice
     done = client.post(f"/enable/{asked.id}", data={"t": t, "action": "enable", "key": "dedicated"})
     assert done.status_code == 200
-    assert "Proposed for review; a write credential was asked for" in done.text
-    assert "pr/update" in done.text and "Add the write credential" in done.text
+    assert (
+        "In effect now; being written to the record; a write credential was asked for" in done.text
+    )
+    assert "Add the write credential" in done.text
 
-    # the proposal carries both changes; the live verified entry does not change
-    proposed, title = pub.entries[-1]
-    assert title == "Issue Tracker: enable writes for renameProject"
-    op = proposed.operation("renameProject")
-    assert op is not None and op.writable and proposed.write_secret_ref == "tracker/write"
-    assert "enabled writes for `renameProject`" in proposed.notes
-    assert "Reason given: rename for the new team" in proposed.notes
+    # the decision is the approver's click: the entry agents use changes with it
     live = librarian.registry.get("tracker")
-    assert live is not None and live.write_auth is None
-    assert not live.operation("renameProject").writable  # type: ignore[union-attr]
+    assert live is not None
+    op = live.operation("renameProject")
+    assert op is not None and op.writable and live.write_secret_ref == "tracker/write"
+    assert "enabled writes for `renameProject`" in live.notes
+    assert "Reason given: rename for the new team" in live.notes
+    # ...and it is written down outside the database, saying who decided
+    api, message = record.commits[-1]
+    assert api == "tracker" and message.startswith("tracker: enable writes for renameProject\n")
+    assert "Decided by link holder in librarian." in message
+    assert record.files["tracker"].write_secret_ref == "tracker/write"
 
     # the write key is asked for through the usual secure page, with write wording
     key = librarian.broker.pending_for("tracker", "write")
@@ -182,7 +174,7 @@ async def test_enable_proposes_the_change_and_asks_for_a_write_credential(
     assert tested and tested[-1].headers["authorization"] == "Bearer new-write-key"
 
     assert asked.state is EnableState.ENABLED and asked.decided_by == "link holder"
-    assert asked.review_url == "https://github.test/pr/update" and asked.key_request == key.id
+    assert asked.review_url is None and asked.key_request == key.id
     assert librarian.enablement.pending() == []
     events = [ev.event for ev in audit.events]
     assert "enable_write_enabled" in events and "credential_request" in events
@@ -193,7 +185,6 @@ async def test_denying_the_write_key_does_not_block_the_api(
     librarian: Librarian, router: Router
 ) -> None:
     await without_write_credential(librarian)
-    librarian.publisher = ProposalPublisher()
     with pytest.raises(WriteNotEnabled) as info:
         await librarian.write(RENAME, KIM)
     await librarian.enable_writes(info.value.request.id, "sam@x.test")
@@ -213,8 +204,6 @@ async def test_console_enables_an_operation_with_the_read_key(
 ) -> None:
     librarian.settings.approvers.console = "open"
     await without_write_credential(librarian)
-    pub = ProposalPublisher()
-    librarian.publisher = pub
     c = console(librarian)
     t = token(librarian)
     page = c.get("/apis/tracker").text
@@ -222,12 +211,13 @@ async def test_console_enables_an_operation_with_the_read_key(
     assert "/ops/addComment/enable" in page and "Add a write credential" in page
     assert "/ops/getIssue/enable" not in page
     done = c.post("/apis/tracker/ops/renameProject/enable", data={"t": t, "key": "read"})
-    assert done.status_code == 200 and "Proposed for review" in done.text
+    assert done.status_code == 200 and "In effect now." in done.text  # no record configured
     assert "write credential was asked" not in done.text
-    proposed, _ = pub.entries[-1]
-    op = proposed.operation("renameProject")
-    assert op is not None and op.writable and proposed.write_secret_ref == "tracker/readonly"
-    assert "Writes use the read credential `tracker/readonly` too" in proposed.notes
+    live = librarian.registry.get("tracker")
+    assert live is not None
+    op = live.operation("renameProject")
+    assert op is not None and op.writable and live.write_secret_ref == "tracker/readonly"
+    assert "Writes use the read credential `tracker/readonly` too" in live.notes
     assert librarian.broker.pending_for("tracker", "write") is None  # no key asked for
     assert audit.events[-1].event == "enable_write_enabled"
     request = next(iter(librarian.enablement._requests.values()))  # pyright: ignore[reportPrivateUsage]
@@ -417,8 +407,6 @@ async def test_one_request_covers_a_whole_flow_and_reports_its_status(
     with pytest.raises(LibrarianError, match="for this agent"):
         await librarian.enable_status(asked.id, Caller(agent="stranger"))
 
-    pub = ProposalPublisher()
-    librarian.publisher = pub
     client = enable_client(librarian)
     t = librarian.enablement.token_for(asked)
     page = client.get(f"/enable/{asked.id}?t={t}").text
@@ -429,28 +417,19 @@ async def test_one_request_covers_a_whole_flow_and_reports_its_status(
         data={"t": t, "action": "enable", "op": ["renameProject", "createTree"]},
     )
     assert done.status_code == 200 and "Writes enabled for renameProject and 1 more" in done.text
-    proposed, title = pub.entries[-1]
-    assert title == "Issue Tracker: enable writes for renameProject, createTree"
-    assert (
-        proposed.operation("renameProject").writable and proposed.operation("createTree").writable
-    )  # type: ignore[union-attr]
-    assert not proposed.operation("createCommit").writable  # type: ignore[union-attr]
-    assert "Left disabled: `createCommit`" in proposed.notes
+    live = librarian.registry.get("tracker")
+    assert live is not None
+    assert live.operation("renameProject").writable and live.operation("createTree").writable  # type: ignore[union-attr]
+    assert not live.operation("createCommit").writable  # type: ignore[union-attr]
+    assert "Left disabled: `createCommit`" in live.notes
     assert asked.enabled == ["renameProject", "createTree"]
-    status = await librarian.enable_status(asked.id, KIM)
-    assert (
-        status["state"] == "enabled" and "waiting for the review to be merged" in status["message"]
-    )
-    assert (
-        status["review_url"] == "https://github.test/pr/update" and status["live_operations"] == []
-    )
-    # once the proposal is merged (the registry syncs), the request is live
-    await librarian.registry.save(proposed)
+    # the agent that asked sees it live straight away: nothing to merge or sync
     status = await librarian.enable_status(asked.id, KIM)
     assert status["state"] == "live" and status["live_operations"] == [
         "renameProject",
         "createTree",
     ]
+    assert "review_url" not in status
     # the operation left disabled can be asked for again, without being declined
     with pytest.raises(WriteNotEnabled) as third:
         await librarian.write(

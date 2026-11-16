@@ -33,8 +33,9 @@ the request, or raise the budget while keeping it below the caller's own timeout
 
 **"operation ... is suspended until reviewed"**
 librarian held it back: it was learned from docs or model knowledge and kept failing, or the API
-changed under a reviewed entry. Fix the entry by pull request (or merge the update librarian
-proposed), or, after checking by hand, `librarian registry clear <api> <operation>`.
+changed under an approved entry. Approve the update librarian found (the console lists it
+under *Waiting*), or, after checking by hand, clear the suspension on the API's page or with
+`librarian registry clear <api> <operation>`.
 
 **A task stays in `TASK_STATE_AUTH_REQUIRED`.**
 It is waiting for a person: a key to add, or a write to approve. The link is in Slack (or in the
@@ -144,7 +145,34 @@ could ever approve: set `approvers.group`, or give the agent an owner who signs 
 `approvers.mode: token` (local mode): whoever has the link decides, so no name is known. In a
 deployment enable oauth2-proxy (`oauth2Proxy.enabled`), which records the signed-in person.
 
-## The registry repo (GitHub App)
+## The record repository (GitHub App)
+
+**A decision was made, but the repository has no commit for it.**
+The decision is in effect regardless: the database decides, the repository is only written to.
+The console's overview lists APIs whose record is behind, and the API's page says why and
+offers *Write it now*; librarian also retries by itself. The usual reasons:
+
+- *"takes no direct commits to main ... refused to merge"*: a rule requires pull requests and
+  also something the App cannot give (an approving review, a status check). Add the App to the
+  rule's bypass list, or merge the pull request librarian opened by hand.
+- *"Resource not accessible by integration"*: the App lacks **Contents: write** (and **Pull
+  requests: write** for the fallback), or is not installed on the repository.
+- GitHub was unreachable: nothing to do, the next retry writes it.
+
+**I edited a file in the repository (or merged a pull request there) and nothing changed.**
+By design since 0.20: librarian writes the record and never reads it back. Make the change in
+the console.
+
+**"<id>.yaml changed on disk, but decisions were made about this API in librarian".**
+A registry file differs from the database's entry and people have decided things about that API
+in librarian, so the database wins. If the file is what you want, forget the API in the console:
+the file is imported afresh. If the directory is a git-sync checkout of the record repository,
+switch `registry.gitSync` off: librarian's own commits arrive there a moment late.
+
+**After upgrading to 0.20 some APIs are missing.**
+The registry directory was not there when 0.20 first started (git-sync switched off in the same
+upgrade), so nothing was imported. The entries are still in the repository:
+`kubectl exec deploy/librarian -c librarian -- librarian registry restore --config /etc/librarian/config.yaml`.
 
 **`github-app create` says the account is not found, or the name is taken.**
 Check `--repo owner/name`; pick another name with `--name`.
@@ -153,8 +181,8 @@ Check `--repo owner/name`; pick another name with `--name`.
 Install it (github.com/apps/<app>/installations/new) on that repo. `librarian github-app check
 --repo ... --app-id ... --key-file ...` confirms access.
 
-**git-sync can't clone, or prints its usage; review pull requests fail with "not found".**
-`kubectl logs deploy/librarian -c git-sync`. The repo must exist **with at least one commit**
+**git-sync can't clone, or prints its usage; writing the record fails with "not found".**
+`kubectl logs deploy/librarian -c git-sync` (when `registry.gitSync` is on). The repo must exist **with at least one commit**
 (an empty repo has no branch) and the App must be installed on it. Give it its first commit as
 the App: `librarian github-app init-repo --repo acme/api-registry --app-id ... --key-file ...`
 (or `github-app create --init-repo` from the start). That creates `main`, so it works unless a

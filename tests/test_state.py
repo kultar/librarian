@@ -287,3 +287,36 @@ def test_psql_style_sslmode_is_translated_for_asyncpg() -> None:
     assert normalize_database_url(f"{pg}?ssl=require") == f"{pg}?ssl=require"
     other = "postgresql+psycopg://u:p@h/db?sslmode=require"  # not asyncpg: left alone
     assert normalize_database_url(other) == other
+
+
+async def test_replicas_creating_the_tables_at_the_same_moment_both_start() -> None:
+    """On an empty Postgres the loser of that race gets one of two errors; both mean
+    "the other replica is creating it", so the setup is tried again."""
+    from sqlalchemy.exc import IntegrityError, ProgrammingError
+
+    from librarian.state import retry_already_exists
+
+    for error in (
+        ProgrammingError("CREATE TABLE x", {}, Exception('relation "x" already exists')),
+        IntegrityError(
+            "CREATE TABLE x",
+            {},
+            Exception('duplicate key value violates unique constraint "pg_type_typname_nsp_index"'),
+        ),
+    ):
+        calls = 0
+
+        async def setup(error: Exception = error) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise error
+
+        await retry_already_exists(setup)
+        assert calls == 2
+
+    async def broken() -> None:
+        raise IntegrityError("INSERT", {}, Exception("duplicate key value in documents_pkey"))
+
+    with pytest.raises(IntegrityError):  # a real conflict in librarian's own data is not retried
+        await retry_already_exists(broken)

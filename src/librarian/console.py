@@ -28,10 +28,11 @@ from librarian.credentials import CredentialRequest, RequestState
 from librarian.enablement import EnableWriteRequest
 from librarian.oauth import ConsentRequest, OAuthError, authorize_url
 from librarian.opsearch import rank, tokens
+from librarian.record import RecordStatus
 from librarian.registry.models import Access, ApiEntry, EntryStatus, OAuth2UserAuth, Operation
 from librarian.registry.store import RegistryError
 from librarian.reviews import ReviewRequest
-from librarian.service import Librarian, LibrarianError
+from librarian.service import Applied, Librarian, LibrarianError
 from librarian.web import (
     approver_identity,
     expired,
@@ -150,6 +151,7 @@ def _search_form(action: str, query: str, placeholder: str) -> str:
 
 async def _pending(librarian: Librarian) -> Pending:
     await librarian.enablement.refresh()
+    await librarian.reviews.refresh()
     return (
         await _pending_credentials(librarian),
         librarian.approvals.pending(),
@@ -181,10 +183,14 @@ def _waiting_rows(
             f"<td><a href='{e(librarian.enablement.link(en))}'>Decide</a></td></tr>"
         )
     for r in reviews:
+        what = "Update to" if r.kind == "update" else "Review"
+        # A review's one-time link lapses after a week; the API's page still decides it.
+        lapsed = datetime.now(UTC) > r.expires_at
+        href = f"/apis/{r.api}" if lapsed else librarian.reviews.link(r)
         rows.append(
-            f"<tr><td>Review <b>{e(r.api_name)}</b>: {e(r.summary)}</td>"
+            f"<tr><td>{what} <b>{e(r.api_name)}</b>: {e(r.summary)}</td>"
             f"<td>{e(r.learned_by)}</td><td>{_when(r.created_at)}</td>"
-            f"<td><a href='{e(librarian.reviews.link(r))}'>Review</a></td></tr>"
+            f"<td><a href='{e(href)}'>Review</a></td></tr>"
         )
     for c in credentials:
         rows.append(
@@ -274,7 +280,14 @@ EVENT_LABELS = {
     "enable_write_expired": "Write enable lapsed",
     "writes_enabled": "Write key allowed",
     "slashes_allowed": "Slashes allowed",
-    "decisions_reapplied": "Decisions re-applied",
+    "decisions_reapplied": "Decisions applied",
+    "api_approved": "API approved",
+    "api_updated": "Update applied",
+    "recorded": "Written to the record",
+    "record_failed": "Record not written",
+    "record_requested": "Record asked for",
+    "old_proposals_closed": "Old pull requests closed",
+    "registry_restored": "Registry restored",
     "write_auto": "Write (automatic)",
     "write_auto_capped": "Automatic writes capped",
     "proposal_merge_failed": "Merge refused",
@@ -405,12 +418,36 @@ def _activity_page(
 {body}"""
 
 
+def _registry_problems(librarian: Librarian, unwritten: list[RecordStatus] | None) -> str:
+    """Registry files that could not be read or are being ignored, and decisions that
+    did not reach the external record."""
+    lines = [
+        f"<p class=err><code>{e(path)}</code>: {e(problem)}</p>"
+        for path, problem in librarian.registry.errors.items()
+    ]
+    lines += [
+        f"<p class=err><a href='/apis/{e(api_id)}'>{e(api_id)}</a>: {e(problem)}</p>"
+        for api_id, problem in librarian.registry.notices.items()
+    ]
+    failed = [s for s in unwritten or [] if s.state == "failed"]
+    if failed:
+        names = ", ".join(f"<a href='/apis/{e(s.api)}'>{e(s.api)}</a>" for s in failed[:8])
+        more = f" and {len(failed) - 8} more" if len(failed) > 8 else ""
+        lines.append(
+            f"<p class=err>Not written to the record: {names}{more}. The decisions are in "
+            f"effect; only the copy in the repository is behind ({e(failed[0].error or '')}). "
+            "librarian keeps trying.</p>"
+        )
+    return "".join(lines)
+
+
 def _dashboard(
     librarian: Librarian,
     pending: Pending,
     people: int | None,
     summary: dict[str, Any] | None = None,
     recent_events: list[AuditEvent] | None = None,
+    unwritten: list[RecordStatus] | None = None,
 ) -> str:
     credentials, approvals, reviews, consents, enables = pending
     entries = librarian.registry.all()
@@ -440,10 +477,7 @@ def _dashboard(
     )
     recent = sorted(entries, key=lambda x: x.updated_at or datetime.min.replace(tzinfo=UTC))
     recent = list(reversed(recent))[:8]
-    errors = "".join(
-        f"<p class=err><code>{e(path)}</code>: {e(problem)}</p>"
-        for path, problem in librarian.registry.errors.items()
-    )
+    errors = _registry_problems(librarian, unwritten)
     if entries:
         apis = API_TABLE_HEAD + _api_rows(librarian, recent) + "</table>"
         if len(entries) > 8:
@@ -475,10 +509,7 @@ def _apis_page(librarian: Librarian, query: str) -> str:
         entries = [
             x for x in entries if needle in f"{x.id} {x.name} {x.host} {x.description}".lower()
         ]
-    errors = "".join(
-        f"<p class=err><code>{e(path)}</code>: {e(problem)}</p>"
-        for path, problem in librarian.registry.errors.items()
-    )
+    errors = _registry_problems(librarian, None)
     if entries:
         table = API_TABLE_HEAD + _api_rows(librarian, entries) + "</table>"
     elif query:
@@ -487,7 +518,7 @@ def _apis_page(librarian: Librarian, query: str) -> str:
         table = "<p class=empty>No APIs yet. The first agent that needs one teaches it.</p>"
     count = _n(total, "entry", "entries")
     return f"""<div class=pagehead><h1>APIs</h1><span class=muted>{count}</span></div>
-<p class=lede>Every API librarian knows: reviewed ones and the ones learned on demand.</p>
+<p class=lede>Every API librarian knows: approved ones and the ones waiting for approval.</p>
 {_search_form("/apis", query, "Filter by name, id or host")}{errors}{table}"""
 
 
@@ -655,6 +686,7 @@ def _detail(
     connections: list[Any] | None = None,
     events: list[AuditEvent] | None = None,
     stale: list[EnableWriteRequest] | None = None,
+    record: RecordStatus | None = None,
 ) -> str:
     connections = connections or []
     source_url = f": <code>{e(entry.source.url)}</code>" if entry.source.url else ""
@@ -695,12 +727,14 @@ def _detail(
     if review is not None:
         rows.append(
             (
-                "Review",
-                f"open since {_when(review.created_at)}: "
-                f"<a href='{e(librarian.reviews.link(review))}'>Approve or deny</a> "
-                f"(<a href='{e(review.review_url)}'>the pull request</a>)",
+                "Update" if review.kind == "update" else "Review",
+                (f"{e(review.summary)}; " if review.kind == "update" else "")
+                + f"open since {_when(review.created_at)}: "
+                f"<a href='{e(librarian.reviews.link(review))}'>Approve or deny</a>",
             )
         )
+    if librarian.recorder.enabled and librarian.registry.approved(entry.id):
+        rows.append(("Record", _record_row(record)))
     rows = [r for r in rows if r[0] != "Status"]  # the header shows it
     details = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows)
     notes = f"<h2 id=notes>Notes</h2><pre>{e(entry.notes)}</pre>" if entry.notes else ""
@@ -732,7 +766,7 @@ def _detail(
                 "sends them a link.</p>"
             )
         people = f"<h2 id=people>Signed-in people</h2>{listing}"
-    cards, danger = _actions(librarian, entry, token, stale or [])
+    cards, danger = _actions(librarian, entry, token, stale or [], record)
     if events is None:
         activity = f"<h2 id=activity>Activity</h2>{NO_ACTIVITY_DB}"
     else:
@@ -843,33 +877,74 @@ def _operations(librarian: Librarian, entry: ApiEntry, token: str, query: str) -
     return "".join(parts)
 
 
+def _record_row(record: RecordStatus | None) -> str:
+    """Where the API's entry is in the external record, for the summary card."""
+    if record is None:
+        return "<span class=muted>no decision since librarian started keeping one</span>"
+    link = f"<a href='{e(record.url)}'>the last commit</a>" if record.url else "nothing yet"
+    if record.state == "failed":
+        return (
+            f"<span class=bad>not written: {e(record.error or 'unknown error')}</span> "
+            f"(tried {_when(record.updated_at)}; librarian keeps trying). Last written: {link}"
+        )
+    if record.state == "pending":
+        return f"being written now. Last written: {link}"
+    return f"written {_when(record.updated_at)}: {link}"
+
+
 def _actions(
-    librarian: Librarian, entry: ApiEntry, token: str, stale: list[EnableWriteRequest]
+    librarian: Librarian,
+    entry: ApiEntry,
+    token: str,
+    stale: list[EnableWriteRequest],
+    record: RecordStatus | None = None,
 ) -> tuple[str, str]:
     base = f"/apis/{entry.id}"
     cards: list[str] = []
+    if entry.status is EntryStatus.PROVISIONAL:
+        undecided = sum(1 for op in entry.operations if op.access is Access.UNKNOWN)
+        left = (
+            f" {_n(undecided, 'operation')} still need a decision; they stay refused until "
+            "someone decides them."
+            if undecided
+            else ""
+        )
+        cards.append(
+            "<div class=card><h2>Approve this API</h2><p class=muted>Nobody has approved it "
+            "yet: agents may only read from it. Approving makes it verified at once, on "
+            f"every replica.{left}</p>{_form(f'{base}/approve', token, 'Approve')}</div>"
+        )
     if stale:
         ops = sorted({name for r in stale for name in (r.enabled or r.operations)})
         listed = ", ".join(f"<code>{e(n)}</code>" for n in ops[:8])
         more = f" and {len(ops) - 8} more" if len(ops) > 8 else ""
         cards.append(
-            "<div class=card><h2>Enabled writes not live yet</h2><p class=muted>"
-            f"{_n(len(stale), 'enabled write request')} ({listed}{more}) are not in the live "
-            "entry: the proposal is waiting to be merged or the registry to sync. If the "
-            "proposal lost them (a later decision overwrote it), put them back and merge.</p>"
-            f"{_form(f'{base}/reapply', token, 'Re-apply and merge', 'quiet')}</div>"
+            "<div class=card><h2>Enabled writes not in effect</h2><p class=muted>"
+            f"{_n(len(stale), 'write request')} ({listed}{more}) were enabled before "
+            "librarian 0.20, when a decision waited for a pull request to be merged, and "
+            "theirs never was. Apply them now.</p>"
+            f"{_form(f'{base}/reapply', token, 'Apply', 'quiet')}</div>"
+        )
+    if record is not None and record.state == "failed":
+        cards.append(
+            "<div class=card><h2>Not in the record</h2><p class=muted>The last decision is "
+            "in effect, but writing it to the repository failed: "
+            f"<span class=bad>{e(record.error or 'unknown error')}</span>. librarian keeps "
+            f"trying; or try now.</p>{_form(f'{base}/record', token, 'Write it now', 'quiet')}"
+            "</div>"
         )
     if entry.source.kind in ("openapi", "docs"):
         cards.append(
             "<div class=card><h2>Re-check the source</h2><p class=muted>Re-read the spec or "
-            "documentation now and handle any change (new operations are proposed for review)."
+            "documentation now and handle any change (a change to an approved API waits "
+            "for an approver)."
             f"</p>{_form(f'{base}/recheck', token, 'Re-check now', 'quiet')}</div>"
         )
     if entry.status is EntryStatus.PROVISIONAL:
         cards.append(
             "<div class=card><h2>Re-learn from documentation</h2><p class=muted>When the "
             "model couldn't find or read the right documentation, give it the page (or a spec "
-            "URL). The entry is replaced and a new review pull request is opened.</p>"
+            "URL). The entry is replaced and approvers are asked to review it again.</p>"
             f"<form method=post action='{e(base)}/relearn'>"
             f"<input type=hidden name=t value='{e(token)}'>"
             "<label>Documentation URL<input name=docs_url placeholder='https://...' "
@@ -879,7 +954,7 @@ def _actions(
             f"<label>Base URL<input name=base_url value='{e(entry.base_url)}' required></label>"
             "<button>Re-learn</button></form></div>"
         )
-    if entry.status is EntryStatus.PROVISIONAL:
+    if entry.status is not EntryStatus.BLOCKED:
         current = e(entry.auth.type)
         options = "".join(
             f"<option value={v}{' selected' if v == entry.auth.type else ''}>{label}</option>"
@@ -894,8 +969,7 @@ def _actions(
         cards.append(
             f"<div class=card><h2>Authentication</h2><p class=muted>Now: <b>{current}</b>. "
             "Specs often declare none even when the API needs a key; choose what it really "
-            "uses and librarian asks for the key when it is first needed. Verified entries "
-            "change through review.</p>"
+            "uses and librarian asks for the key when it is first needed.</p>"
             f"<form method=post action='{e(base)}/auth'>"
             f"<input type=hidden name=t value='{e(token)}'>"
             f"<label>Scheme<select name=scheme>{options}</select></label>"
@@ -911,7 +985,7 @@ def _actions(
             "<div class=card><h2>Slashes in path arguments</h2><p class=muted>"
             f"{_n(len(candidates), 'path parameter')} look like file paths or refs, which "
             f"contain '/': {names}{more}. Allowing it lets agents pass such values; empty, "
-            "'.' and '..' segments stay refused. Verified entries change through review.</p>"
+            "'.' and '..' segments stay refused.</p>"
             f"{_form(f'{base}/slashes', token, 'Allow slashes', 'quiet')}</div>"
         )
     if entry.status is EntryStatus.BLOCKED:
@@ -919,10 +993,11 @@ def _actions(
             "<div class=card><h2>Re-learn</h2><p class=muted>Unblock this API to re-learn it."
             "</p></div>"
         )
-    else:
+    elif entry.status is EntryStatus.VERIFIED:
         cards.append(
-            "<div class=card><h2>Re-learn</h2><p class=muted>Verified entries change through "
-            "the registry repo.</p></div>"
+            "<div class=card><h2>Re-learn</h2><p class=muted>An approved API follows its "
+            "source: re-check it, and approve the update. To start over, forget it and let "
+            "an agent teach it again.</p></div>"
         )
     zone: list[str] = []
     if entry.status is EntryStatus.BLOCKED:
@@ -942,10 +1017,10 @@ def _actions(
             "provider as well.</p>"
             + _form(f"{base}/invalidate", token, "Invalidate the credential", "deny")
         )
-    if librarian.registry.reviewed(entry.id) is None:
+    if librarian.registry.can_forget(entry.id):
         zone.append(
-            "<p class=muted>Forget: drop this learned API altogether. The next agent that "
-            "needs it teaches it again.</p>"
+            "<p class=muted>Forget: drop this API altogether, with every decision made "
+            "about it. The next agent that needs it teaches it again.</p>"
             + _form(f"{base}/forget", token, "Forget this API", "deny")
         )
     if entry.per_person:
@@ -1079,7 +1154,8 @@ def console_routes(librarian: Librarian) -> list[Route]:
         if librarian.state is not None:
             summary = await librarian.state.audit_summary(datetime.now(UTC) - timedelta(days=7))
             recent = await librarian.state.recent_audit(limit=8)
-        body = _dashboard(librarian, pending, people, summary, recent)
+        unwritten = await librarian.recorder.unwritten() if librarian.recorder.enabled else None
+        body = _dashboard(librarian, pending, people, summary, recent, unwritten)
         return page("librarian", body, kind="console", active="overview")
 
     async def activity(request: Request) -> Response:
@@ -1182,7 +1258,11 @@ def console_routes(librarian: Librarian) -> list[Route]:
             else None
         )
         stale = await librarian.unapplied_enables(entry)
-        body = _detail(librarian, entry, token_for(identity), query, connections, events, stale)
+        await librarian.reviews.refresh()
+        record = await librarian.recorder.status(entry.id) if librarian.recorder.enabled else None
+        body = _detail(
+            librarian, entry, token_for(identity), query, connections, events, stale, record
+        )
         return page(entry.name, body, kind="console", active="apis")
 
     def back(api_id: str) -> str:
@@ -1252,14 +1332,8 @@ def console_routes(librarian: Librarian) -> list[Route]:
         if action == "forget":
             report = await librarian.forget(api_id, identity)
             what = [f"{e(api_id)} is gone."]
-            if report.closed:
-                links = ", ".join(f"<a href='{e(u)}'>{e(u)}</a>" for u in report.closed)
-                what.append(f"Closed its review: {links}.")
-            if report.review_error:
-                what.append(
-                    f"<span class=bad>Its review could not be closed: "
-                    f"{e(report.review_error)}. Close it by hand.</span>"
-                )
+            if report.recorded:
+                what.append("Its file is being removed from the record.")
             if report.cancelled:
                 what.append(f"{report.cancelled} waiting request(s) denied.")
             return notice("ok", "Forgotten", " ".join(what) + " <a href='/'>Back</a>.")
@@ -1277,14 +1351,33 @@ def console_routes(librarian: Librarian) -> list[Route]:
             key_name = str(form.get("key_name", "")).strip() or None
             if scheme not in ("none", "bearer", "basic", "api_key_header", "api_key_query"):
                 return notice("bad", "Unknown scheme", f"No such scheme.{back(api_id)}", 400)
-            updated, link = await librarian.set_auth(api_id, scheme, key_name, identity)
-            review = f" Review: <a href='{e(link)}'>{e(link)}</a>." if link else ""
+            updated, applied = await librarian.set_auth(api_id, scheme, key_name, identity)
             return notice(
                 "ok",
                 "Authentication set",
                 f"{e(api_id)} now uses {e(updated.auth.type)}; a key is asked for when it is "
-                f"first needed.{review}{back(api_id)}",
+                f"first needed. {_applied_text(applied)}{back(api_id)}",
             )
+        if action == "approve":
+            updated, applied = await librarian.approve_api(api_id, identity)
+            return notice(
+                "ok",
+                "Approved",
+                f"{e(updated.name)} is verified. {_applied_text(applied)}{back(api_id)}",
+            )
+        if action == "record":
+            status = await librarian.record_now(api_id, identity)
+            if status is None or status.state == "failed":
+                why = e(status.error or "") if status else ""
+                return notice(
+                    "bad",
+                    "Not written",
+                    f"The record could not be written: {why}. The decision itself is in "
+                    f"effect.{back(api_id)}",
+                    502,
+                )
+            link = f" <a href='{e(status.url)}'>The commit</a>." if status.url else ""
+            return notice("ok", "Written to the record", f"{e(api_id)}.{link}{back(api_id)}")
         if action == "recheck":
             report = await librarian.recheck(api_id)
             what = e(report.detail or ", ".join(report.actions) or report.status)
@@ -1307,10 +1400,7 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 name=entry.name if entry else None,
                 caller=Caller(agent="console", principal=identity, authenticated=True),
             )
-            review = ""
-            if result.review_url:
-                url = e(result.review_url)
-                review = f" Review: <a href='{url}'>{url}</a>."
+            review = " Approvers were asked to review it." if result.review else ""
             return notice(
                 "ok",
                 "Re-learned",
@@ -1335,7 +1425,7 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 # credential is asked for.
                 key = str(form.get("key", "dedicated"))
                 try:
-                    done, link = await librarian.enable_operation(
+                    done = await librarian.enable_operation(
                         api_id, op_id, identity, key, approval=choice, cap=cap
                     )
                 except LookupError:
@@ -1343,46 +1433,35 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 return notice(
                     "ok",
                     f"Writes enabled for {op_id}",
-                    _enabled_text(librarian, done, link) + back(api_id),
+                    _enabled_text(librarian, done) + back(api_id),
                 )
-            updated, proposal = await librarian.set_operation_access(
-                api_id, op_id, choice, identity, cap
-            )
-            return notice(
-                "ok",
-                f"{op_id} decided",
-                f"{_proposal_text(updated, proposal)}{back(api_id)}",
-            )
+            _, applied = await librarian.set_operation_access(api_id, op_id, choice, identity, cap)
+            return notice("ok", f"{op_id} decided", f"{_applied_text(applied)}{back(api_id)}")
         if action == "slashes":
-            updated, proposal, names = await librarian.allow_slashes(api_id, identity)
+            _, applied, names = await librarian.allow_slashes(api_id, identity)
             return notice(
                 "ok",
                 "Slashes allowed",
-                f"{e(', '.join(names))}. {_proposal_text(updated, proposal)}{back(api_id)}",
+                f"{e(', '.join(names))}. {_applied_text(applied)}{back(api_id)}",
             )
         if action == "reapply":
-            stale, proposal = await librarian.reapply_decisions(api_id, identity)
-            entry = librarian.registry.get(api_id)
+            stale, applied = await librarian.reapply_decisions(api_id, identity)
             ops = sorted({n for r in stale for n in (r.enabled or r.operations)})
             return notice(
-                "ok",
-                "Re-applied",
-                f"{e(', '.join(ops))}. "
-                + (_proposal_text(entry, proposal) if entry else e(proposal.note))
-                + back(api_id),
+                "ok", "Applied", f"{e(', '.join(ops))}. {_applied_text(applied)}{back(api_id)}"
             )
         if action == "enable":
             form = await request.form()
             op_id = request.path_params["op_id"]
             key = str(form.get("key", "dedicated"))
             try:
-                done, link = await librarian.enable_operation(api_id, op_id, identity, key)
+                done = await librarian.enable_operation(api_id, op_id, identity, key)
             except LookupError:
                 return notice("note", "Already decided", "Someone else got there first.", 409)
             return notice(
                 "ok",
                 f"Writes enabled for {op_id}",
-                _enabled_text(librarian, done, link) + back(api_id),
+                _enabled_text(librarian, done) + back(api_id),
             )
         if action in ("disconnect-all", "check-signins"):
             entry = librarian.registry.get(api_id)
@@ -1503,17 +1582,24 @@ def console_routes(librarian: Librarian) -> list[Route]:
     ]
 
 
-# -- the review page: approve or deny a learned API ----------------------------------------
+# -- the review page: approve or deny a learned API, or an update to an approved one ---------
 
 
-def _review_body(librarian: Librarian, review: ReviewRequest, token: str, error: str | None) -> str:
-    entry = librarian.registry.get(review.api)
+def _review_body(
+    librarian: Librarian,
+    review: ReviewRequest,
+    token: str,
+    error: str | None,
+    proposed: ApiEntry | None = None,
+) -> str:
+    """`proposed`: for an update, the entry as it would be once approved."""
+    update = review.kind == "update"
+    entry = proposed if update and proposed is not None else librarian.registry.get(review.api)
     rows = [
         ("Site", e(review.host)),
-        ("Learned by", e(review.learned_by)),
+        ("Noticed by" if update else "Learned by", e(review.learned_by)),
         ("What", e(review.summary)),
         ("Authentication", e(review.auth)),
-        ("Pull request", f"<a href='{e(review.review_url)}'>{e(review.review_url)}</a>"),
     ]
     if entry is not None and entry.credential.create_url:
         rows.append(
@@ -1558,23 +1644,45 @@ def _review_body(librarian: Librarian, review: ReviewRequest, token: str, error:
     operations = ""
     if entry is not None:
         operations = (
-            f"<h2>Operations</h2>{_operations(librarian, entry, '', '')}"
+            f"<h2>Operations{' after the update' if update else ''}</h2>"
+            f"{_operations(librarian, entry, '', '')}"
             f"<p class=muted><a href='/apis/{e(entry.id)}'>More in the console</a></p>"
         )
     else:
         operations = "<p class=err>This API is no longer in the registry.</p>"
+    record = (
+        " The decision is also written to the record repository."
+        if librarian.recorder.enabled
+        else ""
+    )
+    if update:
+        changes = "".join(f"<li>{e(c)}</li>" for c in review.changes[:200])
+        return f"""<h1>{e(review.api_name)} changed at its source</h1>
+<p class=lede>librarian re-read the API's spec or documentation and found changes. The entry
+agents use stays as it is until someone decides; approving applies the update at once, keeping
+the decisions made about operations that are still the same request.</p>{err}
+<div class=card><dl>{details}</dl>{warnings}</div>
+<h2>What changed</h2><ul>{changes}</ul>
+<form method=post>{hidden}<input type=hidden name=action value=approve>
+{decisions}
+<div class=card><h2>Approve</h2><p class=muted>Applies the update now, with the decisions
+above.{record}</p><button>Approve the update</button></div></form>
+{operations}
+<div class=zone><h2>Deny</h2><p class=muted>Keeps the entry as it is. Operations that were
+suspended because of the change stay suspended until someone clears them in the console.</p>
+<form method=post>{hidden}<input type=hidden name=action value=deny>
+<button class=deny>Keep the entry as it is</button></form></div>"""
     return f"""<h1>Review {e(review.api_name)}</h1>
-<p class=lede>{e(review.learned_by)} taught librarian this API. Approving merges the proposal as
-the App and the API becomes verified once the registry syncs; denying closes it and forgets the
-API.</p>{err}
+<p class=lede>{e(review.learned_by)} taught librarian this API. Until someone approves it,
+agents may only read from it. Approving makes it verified at once; denying forgets the API.</p>{err}
 <div class=card><dl>{details}</dl>{warnings}</div>
 <form method=post>{hidden}<input type=hidden name=action value=approve>
 {decisions}
-<div class=card><h2>Approve</h2><p class=muted>Merges the pull request now, with the decisions
-above.</p><button>Approve and merge</button></div></form>
+<div class=card><h2>Approve</h2><p class=muted>Makes the API verified now, with the decisions
+above.{record}</p><button>Approve</button></div></form>
 {operations}
-<div class=zone><h2>Deny</h2><p class=muted>Closes the pull request and forgets the API. The next
-agent that needs it would teach it again.</p>
+<div class=zone><h2>Deny</h2><p class=muted>Forgets the API. The next agent that needs it would
+teach it again.</p>
 <form method=post>{hidden}<input type=hidden name=action value=deny>
 <button class=deny>Deny and forget</button></form></div>"""
 
@@ -1591,12 +1699,18 @@ def review_routes(librarian: Librarian) -> list[Route]:
             return None, None, notice("bad", "Not allowed", e(problem or ""), 403)
         return review, identity, None
 
+    async def proposed(review: ReviewRequest) -> ApiEntry | None:
+        if review.kind != "update":
+            return None
+        pending = await librarian.pending_update(review.api)
+        return pending[0] if pending else None
+
     async def show(request: Request) -> Response:
         token = request.query_params.get("t", "")
         review, _, denied = await authorized(request, token)
         if denied is not None or review is None:
             return denied or notice("bad", "Error", "Something went wrong.", 400)
-        body = _review_body(librarian, review, token, None)
+        body = _review_body(librarian, review, token, None, await proposed(review))
         return page(f"Review: {review.api_name}", body, kind="review")
 
     async def submit(request: Request) -> Response:
@@ -1609,32 +1723,24 @@ def review_routes(librarian: Librarian) -> list[Route]:
         try:
             if action == "deny":
                 done = await librarian.deny_review(review.id, identity)
-                return notice("bad", "Denied", f"{e(done.note or 'closed')}.")
+                return notice("bad", "Denied", f"{e((done.note or 'denied').capitalize())}.")
             if action == "approve":
                 decisions = {
                     key.removeprefix("decide_"): str(value)
                     for key, value in form.items()
                     if key.startswith("decide_") and str(value) in ("read", "write", "exclude")
                 }
-                done, problem = await librarian.approve_review(review.id, identity, decisions)
-                if problem:
-                    body = _review_body(
-                        librarian,
-                        done,
-                        token,
-                        f"{problem}. The review stays open: merge it on GitHub, then it is done.",
-                    )
-                    return page(f"Review: {review.api_name}", body, 502, kind="review")
+                done = await librarian.approve_review(review.id, identity, decisions)
                 return notice(
                     "ok",
                     "Approved",
-                    f"{e(done.note or 'merged')}. "
-                    f"<a href='{e(done.review_url)}'>The pull request</a>.",
+                    f"{e(review.api_name)}: {e(done.note or 'approved')}. "
+                    f"<a href='/apis/{e(review.api)}'>The API in the console</a>.",
                 )
         except LookupError:
             return notice("note", "Already decided", "Someone else got there first.", 409)
         except (LibrarianError, RegistryError) as exc:
-            body = _review_body(librarian, review, token, str(exc))
+            body = _review_body(librarian, review, token, str(exc), await proposed(review))
             return page(f"Review: {review.api_name}", body, 400, kind="review")
         return notice("bad", "Unknown action", "No such action.", 400)
 
@@ -1654,25 +1760,13 @@ def _int_field(value: Any, default: int) -> int:
         return default
 
 
-def _proposal_text(entry: ApiEntry, proposal: Any) -> str:
+def _applied_text(applied: Applied) -> str:
     """What happened to a console decision, for the notice."""
-    if entry.status is EntryStatus.PROVISIONAL:
-        text = "Applied now."
-        if proposal.link:
-            text += (
-                f" Carried into the review: <a href='{e(proposal.link)}'>{e(proposal.link)}</a>."
-            )
-        return text
-    text = e(proposal.note.capitalize()) + "."
-    if proposal.link:
-        text += f" Proposal: <a href='{e(proposal.link)}'>{e(proposal.link)}</a>."
-    return text
+    return e(applied.note.capitalize()) + "."
 
 
-def _enabled_text(librarian: Librarian, done: EnableWriteRequest, link: str | None) -> str:
+def _enabled_text(librarian: Librarian, done: EnableWriteRequest) -> str:
     text = e((done.note or "enabled").capitalize()) + "."
-    if link:
-        text += f" Review: <a href='{e(link)}'>{e(link)}</a>."
     if done.key_request:
         key = librarian.broker.get(done.key_request)
         if key is not None:
@@ -1763,8 +1857,8 @@ def _enable_body(
         else f"Enable writes for {e(request.operation)}"
     )
     return f"""<h1>{who} wants to write to {e(request.api_name)}</h1>
-<p class=lede>Enabling carries {what} into the entry's review
-proposal (approve or deny, as always); every write still needs a person's approval or a grant.
+<p class=lede>Enabling makes {what} writable at once; every write still
+needs a person's approval or a grant (unless you choose automatic approval below).
 Declining keeps it refused and quiet for a week.</p>{err}
 <div class=card><dl>{details}</dl></div>
 <form method=post>{hidden}<input type=hidden name=action value=enable>
@@ -1814,7 +1908,7 @@ def enable_routes(librarian: Librarian) -> list[Route]:
                 key = str(form.get("key", "dedicated"))
                 ticked = [str(v) for v in form.getlist("op")] if asked.others else None
                 approval = "auto" if str(form.get("approval", "each")) == "auto" else "each"
-                done, link = await librarian.enable_writes(
+                done = await librarian.enable_writes(
                     asked.id,
                     identity,
                     key,
@@ -1826,7 +1920,7 @@ def enable_routes(librarian: Librarian) -> list[Route]:
                     "ok",
                     f"Writes enabled for {done.enabled[0] if done.enabled else done.operation}"
                     + (f" and {len(done.enabled) - 1} more" if len(done.enabled) > 1 else ""),
-                    _enabled_text(librarian, done, link),
+                    _enabled_text(librarian, done),
                 )
         except LookupError:
             return notice("note", "Already decided", "Someone else got there first.", 409)
@@ -1872,8 +1966,8 @@ def auto_routes(librarian: Librarian) -> list[Route]:
         )
         body = f"""<h1>Require approval again for {e(op.id)}</h1>
 <p class=lede>{e(op.method)} <code>{e(op.path)}</code> on {e(entry.name)} is {e(state)}.
-Putting approval back means every write to it waits for a person (or a grant) from now on;
-the change lands in the entry's review and is merged.</p>
+Putting approval back means every write to it waits for a person (or a grant) from now
+on.</p>
 <form method=post><input type=hidden name=t value='{e(token)}'>
 <button class=deny>Require approval again</button></form>
 <p class=muted><a href='/apis/{e(entry.id)}'>The API in the console</a></p>"""
@@ -1885,15 +1979,13 @@ the change lands in the entry's review and is merged.</p>
         if denied is not None or op is None or entry is None or identity is None:
             return denied or notice("bad", "Error", "Something went wrong.", 400)
         try:
-            updated, proposal = await librarian.set_operation_access(
-                entry.id, op.id, "write", identity
-            )
+            _, applied = await librarian.set_operation_access(entry.id, op.id, "write", identity)
         except (LibrarianError, RegistryError) as exc:
             return notice("bad", "Could not do that", e(str(exc)), 400)
         return notice(
             "ok",
             f"{op.id} needs approval again",
-            _proposal_text(updated, proposal) + f" <a href='/apis/{e(entry.id)}'>The API</a>.",
+            _applied_text(applied) + f" <a href='/apis/{e(entry.id)}'>The API</a>.",
         )
 
     return [

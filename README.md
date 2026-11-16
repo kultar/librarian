@@ -76,8 +76,8 @@ docker pull ghcr.io/kultar/librarian:0.19.1
 
 1. An agent asks for data from an API librarian doesn't know yet.
 2. librarian learns it: from its OpenAPI spec, else its documentation (found by itself if
-   needed), else the model's knowledge. The API is usable for reads at once, and a pull request
-   is opened on your registry repo for a person to review.
+   needed), else the model's knowledge. The API is usable for reads at once, and approvers are
+   asked to review it: approving makes it verified, there and then.
 3. If the API needs a key, the agent's task waits and approvers get a Slack card. Someone follows
    the link, signs in and adds the key (it goes straight to your secret store), and the task
    carries on by itself. If the API needs the *person's own* sign-in (OAuth), the person
@@ -86,9 +86,16 @@ docker pull ghcr.io/kultar/librarian:0.19.1
 4. Writes wait for a person's approval every time, unless a narrow, expiring grant covers them
    or an approver chose automatic approval for that operation (capped per day, never DELETE).
    A write nobody has enabled yet is not refused silently: approvers are asked to enable it,
-   from Slack or the console, and their decision is merged into the registry at once.
+   from Slack or the console, and their decision is in effect at once.
 
 Nothing is set up per API in advance: the registry fills itself as agents need things.
+
+**Where decisions live.** librarian's database is the source of truth: every API it knows and
+every decision a person made about it (approved, writes enabled, blocked) is saved there and is
+in effect on every replica the moment it is made. So that this also lives somewhere outside the
+database, librarian can write each approved entry and each later decision to a GitHub
+repository, one commit per decision, saying who decided ([the record](#the-registry)).
+GitHub is written to, never asked: nothing merged or edited there changes what agents may do.
 
 ## Skills (A2A)
 
@@ -152,11 +159,12 @@ internal_hosts: ["*.internal.example.com", "jira.corp"]   # or LIBRARIAN_INTERNA
 
 A matching host may resolve to private addresses (never loopback or link-local, i.e. cloud
 metadata), with the same DNS pinning as public hosts; everything else stays public-only. The
-review PR and the audit log say when an API was learned under one of these patterns.
+review page and the audit log say when an API was learned under one of these patterns.
 `allow_private_networks: true` allows everything and is for a laptop.
 
-**State.** Credential requests, approvals, A2A tasks and APIs learned on demand are stored in
-SQLite by default (`.librarian/librarian.db`), so they survive restarts. For several replicas use
+**State.** The registry (every API and the decisions made about it), credential requests,
+approvals and A2A tasks are stored in SQLite by default (`.librarian/librarian.db`), so they
+survive restarts. For several replicas use
 Postgres (`database_url: postgresql+asyncpg://...`, the `postgres` extra; in the image) and
 `secrets_backend: aws`: then every replica shares everything, an API learned through one is usable
 through the others at once, and pods need no volume. Set `replicas` (the Helm chart does) and
@@ -165,9 +173,7 @@ too, so every replica enforces the same limit together.
 
 **Writes and plain-language requests.** `fetch_timeout_seconds` (100) stops a plain-language
 request and returns what it has, marked partial, before the caller's own timeout;
-`max_calls_per_fetch` (8) caps its API calls. `publish.merge_console_decisions` (true) merges a
-decision made in the console or on an enable page as the App at once; off, a person merges on
-GitHub.
+`max_calls_per_fetch` (8) caps its API calls.
 
 **Caller authentication.** List agents and the secret holding each one's key:
 
@@ -227,8 +233,8 @@ from, in order of preference:
 
 Search results are untrusted (anyone can publish "Acme API docs"), so sources are ranked:
 the API's own domain first, then well-known docs hosts (GitHub, ReadMe, GitBook, ...);
-other sites are skipped unless `learning.search.allow_third_party: true`. The review PR says
-how the docs were found and how far they are trusted.
+other sites are skipped unless `learning.search.allow_third_party: true`. The entry's notes
+(shown on the review page) say how the docs were found and how far they are trusted.
 
 ```yaml
 learning:
@@ -243,11 +249,11 @@ needs the Anthropic API format (`model_api: anthropic`); with the OpenAI formats
 refused or silently dropped by the gateway, and librarian reports that instead of guessing.
 
 **Specs that declare no authentication** are common even for APIs that need a key (GitHub's
-does). librarian then asks the model what the API really uses and writes it into the proposed
-entry, for approval. Approvers never edit YAML: the review pull request is approve or deny, and
-anything that needs a person's choice (the authentication, when the model can't tell) is a
-choice in the console. If such an API answers 401 later, librarian infers the authentication
-then and asks for a key; a verified entry gets an update proposal instead.
+does). librarian then asks the model what the API really uses and writes it into the entry,
+for approval. Approvers never edit YAML: the review is approve or deny, and anything that needs
+a person's choice (the authentication, when the model can't tell) is a choice in the console.
+If such an API answers 401 later, librarian infers the authentication then and asks for a key;
+for a verified entry it tells the approvers what it thinks, and they choose in the console.
 
 Documentation is untrusted, so the model never decides anything that matters: it has no tools;
 the API host is always the `base_url` you gave (never one from the docs); read vs write is decided
@@ -265,12 +271,14 @@ spec or docs. A new model read only happens when the docs' text actually changed
 
 | Change | Provisional entry | Verified entry |
 |---|---|---|
-| New operations, optional parameters | updated, re-proposed | proposed for review |
-| Removed operation, new required parameter, moved path | updated, re-proposed | callers warned; writes **suspended**; proposed |
-| HTTP method changed (a read may now change data) | updated, re-proposed | **suspended**; proposed |
+| New operations, optional parameters | updated | an update waits for an approver |
+| Removed operation, new required parameter, moved path | updated | callers warned; writes **suspended**; an update waits |
+| HTTP method changed (a read may now change data) | updated | **suspended**; an update waits |
 
-Verified entries are never changed automatically. The proposal PR keeps reviewed decisions
-(writes enabled, reviewed reads, pagination); merging it lifts the suspensions it addresses.
+Verified entries are never changed automatically. Approvers get a card and a page listing what
+changed; approving applies the update, keeping the decisions people made (writes enabled,
+reviewed reads, pagination) wherever the operation is still the same request, and lifts the
+suspensions it addresses. Denying keeps the entry as it is.
 
 Calls also watch for change: `Deprecation`/`Sunset` headers, repeated 404/405/410 responses, and
 responses that lose most of the fields seen before are reported to the API's owners (once), and
@@ -347,9 +355,9 @@ agent gets a token for librarian on a user's behalf is covered in
 
 Every API learned on demand gets a **review card**: what was learned, the authentication it
 will use, anything to check, and a **Review** button that opens a signed-in page where an
-approver sees the proposal, decides any operations that need it (read, write or exclude), and
-**approves** (the pull request is merged as the App and the API becomes verified) or **denies**
-(it is closed and the API forgotten). The card is updated with the outcome and who decided.
+approver sees what was learned, decides any operations that need it (read, write or exclude),
+and **approves** (the API is verified at once, on every replica) or **denies** (the API is
+forgotten). The card is updated with the outcome and who decided.
 Approvers also get one card per API that needs a key (deduplicated, with a live "waiting"
 count) and a **Review request** button that opens the secure page: *add a key*, *use an existing secret*, or *deny*. The card
 updates in place and the outcome is posted in the thread. The key itself never goes through Slack.
@@ -379,7 +387,7 @@ No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 </p>
 
 <table align="center"><tr>
-<td><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/review.png" alt="The review page for a learned API: the proposal, operations that need a decision, approve and merge, or deny" width="380"></td>
+<td><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/review.png" alt="The review page for a learned API: what was learned, operations that need a decision, approve or deny" width="380"></td>
 <td><img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/approve-write.png" alt="A write approval page: method, path, arguments and body, approve once, allow similar, or deny" width="300"></td>
 </tr><tr>
 <td align="center"><em>Approving a learned API, from the Slack card.</em></td>
@@ -390,22 +398,22 @@ No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 
 The pages listener's root (`/`) is a console for the people who run librarian, with pages for
 the overview, the APIs (status, host, operations and where they were learned from), what is
-waiting on a person (keys to add, writes to approve or enable, proposals to review, sign-ins), the
+waiting on a person (keys to add, writes to approve or enable, learned APIs and updates to review, sign-ins), the
 standing grants, the people signed in to per-person APIs, each person's own sign-ins, and
 **activity**: what agents did in the last seven days (reads, writes, denials, plain-language
 requests answered from a recipe versus by the model, bytes fetched), the busiest APIs, and the
 recent events for the whole deployment or one API. Activity needs the database; it keeps
 `audit_retention_days` (30) of events, while the audit stream keeps everything. The console shows credential
 *references* only, never values. From there a signed-in approver can **revoke a grant**,
-**block** or **unblock** an API, **forget** a learned one (its open review is closed as the App, and whatever waited on a
-person for it is cancelled), **invalidate a credential** (the next call asks for a fresh key), **re-learn** a provisional API from a documentation or spec URL you
+**approve** a learned API, **block** or **unblock** one, **forget** one (its open review is closed, whatever waited on a
+person for it is cancelled, and its file leaves the record), **invalidate a credential** (the next call asks for a fresh key), **re-learn** a provisional API from a documentation or spec URL you
 give it, **choose its authentication** when the spec and the model couldn't tell, **change any
 operation's decision** (read, write approved each time, write approved automatically with a daily
 cap, or exclude; enabling writes asks for a write credential when the entry has none),
-**allow slashes** in path arguments that are file paths or refs, **re-apply** enabled writes a
-proposal lost, **re-check** its source, and **clear a suspension**. A decision on a verified
-entry lands in the entry's proposal and is merged as the App at once; the live entry follows
-when the registry syncs. Large APIs are shown by group (the spec's tags), with the
+**allow slashes** in path arguments that are file paths or refs, **re-check** its source, and
+**clear a suspension**. Every decision is saved to the database and in effect at once; the
+API's page shows where it was written to the record, and offers to try again when GitHub
+refused. Large APIs are shown by group (the spec's tags), with the
 operations that need attention first and a search box. Every action is recorded in the
 audit log with who did it. The console follows the approval pages' sign-in
 (`approvers.mode: trusted_header` behind your auth proxy); `approvers.console: open` serves it
@@ -426,26 +434,24 @@ enabled, or on an API with no write credential, the refusal is not silent. libra
 *enable-write request* per operation (shared by every agent and replica that asks), tells the
 approvers (a Slack card, and the console's waiting list) and answers the agent with
 `write_not_enabled` (MCP) or a rejection saying approvers were asked (A2A). An approver follows
-the link and **enables** or **declines**. Enable carries the change into the entry's review
-proposal, for the usual approve or deny; if the API has no write credential, the approver chooses
+the link and **enables** or **declines**. Enabling takes effect at once; if the API has no
+write credential, the approver chooses
 a dedicated `<api>/write` credential (asked for through the secure key page, with the least
 permission those writes need, inferred by the model when one is configured) or reuses the read
 key. Decline keeps the operation refused and quiet for a week. The console's API page also offers
 *Enable writes* on any write operation that is not enabled, without waiting for an agent to ask.
-A decision an approver makes in the console or on an enable page is the approval: on a verified
-entry it lands in the entry's proposal and is merged as the App right away (turn
-`publish.merge_console_decisions` off to merge on GitHub instead); the live entry follows once the
-registry syncs.
+A decision an approver makes in the console or on an enable page is the approval: it is saved to
+the database, so the agent's next try goes through (to the usual per-write approval).
 A flow that needs several operations (create a blob, a tree, a commit, a ref) names the rest in
 `also_needs`, so one request and one approver action cover them all; `enable_status` tells the
-agent where the request stands (pending, enabled and waiting for the merge, live, declined until a
-date). Nobody edits YAML.
+agent where the request stands (pending, enabled and waiting for the write credential, live,
+declined until a date). Nobody edits YAML.
 
 **Automatic approval.** When enabling writes (on the enable page, or with the per-operation
 *Change* control on the console's API page) an approver can choose *approve writes automatically*:
 from then on a write to that operation runs right after the policy checks, with no card, up to a
 daily cap (default 100; then a person is asked again). It is recorded on the operation
-(`approval: auto`, `auto_limit_per_day`), goes through the same proposal and merge, is audited as
+(`approval: auto`, `auto_limit_per_day`), is in effect at once like any decision, is audited as
 `write_auto` (the console's Activity page lists them) and logged; `writes.announce_auto: true`
 also posts each one to the channel as an FYI with a *Require approval again* link (off by
 default: it gets noisy). The same link is on the console's API page, where the *Change* control
@@ -455,7 +461,7 @@ always. The *Change* control also flips any decided operation: read, write, auto
 
 **Path arguments with slashes.** A path argument may not contain `/` unless the parameter is marked
 `allow_slash: true` (inferred when the API is learned for parameters that are file paths or git
-refs, such as GitHub's `path`, `ref` and `branch`; the proposal shows it). Even then, empty, `.`
+refs, such as GitHub's `path`, `ref` and `branch`; the entry shows it). Even then, empty, `.`
 and `..` segments, a leading or trailing slash and encoded slashes are refused. The console's API
 page offers *Allow slashes* for parameters that look like paths, which lands in the entry's review.
 
@@ -503,21 +509,23 @@ list` manage it all; revoking is the kill switch.
 
 ## The registry
 
-One YAML file per API, normally in a git repo you review by pull request. Onboarded entries start
-as **provisional**:
+One entry per API, kept in librarian's database. Onboarded entries start as **provisional**:
 
 - GET/HEAD operations are reads and usable immediately.
 - POST operations that look like searches are marked `unknown` and blocked until a human sets
   `access: read` + `read_basis: reviewed` **and** the entry is `verified`. Nobody edits that by
-  hand: the console lists these operations under *Needs attention* with a read / write /
-  exclude choice, and the decision is carried into the entry's open review pull request.
-- Everything else is a write: refused unless a reviewer enables it (see [Writes](#writes)).
+  hand: the review page and the console list these operations with a read / write / exclude
+  choice.
+- Everything else is a write: refused unless an approver enables it (see [Writes](#writes)).
 
-**Review loop.** With `publish.type: github`, every learned API is also opened as a pull request
-against your registry repo, with a review checklist and the operations that need a decision. Run a
-[git-sync](https://github.com/kubernetes/git-sync) sidecar (or any process that updates the
-registry directory) and merged changes such as `status: verified` are picked up automatically:
-the registry hot-reloads when files change.
+An approver makes it **verified** on the review page or in the console. That, and every later
+decision, is a write to the database: in effect at once, on every replica, with no pull request
+to merge and nothing to sync.
+
+**The record.** With `publish.type: github`, librarian also writes what was decided to a
+repository you own: one YAML file per approved API, one commit per decision, each saying what
+was decided and by whom. It is there so the registry lives somewhere besides the database (a
+history you can read, a copy you can restore from); it is not where anything is approved.
 
 ```yaml
 publish:
@@ -530,9 +538,26 @@ publish:
   # or token: via LIBRARIAN_PUBLISH__TOKEN (contents:write + pull_requests:write)
 ```
 
+- **Written, never read.** A change made in the repository changes nothing in librarian. Only
+  `librarian registry restore` reads it, on purpose: it brings the record's entries into an
+  empty (or new) database (`--replace` to overwrite what the database has).
+- **After the decision, in the background.** A decision does not wait for GitHub. If the write
+  fails, the decision stands; the console shows which APIs are behind and why, librarian keeps
+  trying (with a growing pause), and the API's page has *Write it now*.
+- **Commits to the base branch.** Where a rule only lets changes in through pull requests,
+  librarian opens one and merges it as the App in the same step; let the App bypass the rule if
+  merging needs a review.
+- **Not everything.** APIs nobody approved yet are not written; nor are names librarian looked
+  up with a credential (the glossary).
+
 `librarian github-app create --repo acme/api-registry` creates that GitHub App in one step:
 one click on GitHub, install it on the repo, and it saves the key and prints the settings.
-The same App lets git-sync read a private registry repo (see the Helm chart README).
+
+**Files.** YAML files in `registry_dir` are a way in for entries you write by hand (and the
+whole registry when there is no database, `database_url: null`). With a database a new file
+is imported into it, and an edited file is imported again as long as nobody has decided anything
+about that API in librarian; after that the database's entry wins and the console says the file
+is being ignored.
 
 When learning an API, the librarian also looks for a cheap "who am I" read (`/me`, `/myself`,
 `/user`, ...) and uses it to test every new credential.
@@ -654,10 +679,19 @@ uv run pytest
   the channel post on each use of a standing grant, and the Grants page turns notices off per
   grant
 
+- **v0.20**: the database decides. Approving a learned API, enabling writes and every other
+  decision is a database write, in effect on every replica at once: no pull request to merge,
+  no registry sync to wait for. GitHub becomes the record: each approved entry and decision is
+  committed there afterwards (in the background, retried, never blocking or undoing a
+  decision) and is not read back; `librarian registry restore` rebuilds a database from it.
+  A verified API that changed at its source gets an approve-or-deny page for the update;
+  any API can be approved or forgotten from the console; the chart's record no longer needs
+  git-sync (`githubApp.repo`). Pull requests opened by earlier versions are closed on start
+
 ### Next
 
-- Console actions answer at once; the proposal, the model's credential guidance and the Slack
-  updates finish in the background, with the outcome shown on the API page
+- Console actions answer at once everywhere: writing the record already happens in the
+  background (0.20); the model's credential guidance and the Slack updates should too
 - Verify the SearXNG and Brave documentation-search providers and the Google and Microsoft
   sign-in providers live
 

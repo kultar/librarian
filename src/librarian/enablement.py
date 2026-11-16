@@ -60,7 +60,9 @@ class EnableWriteRequest(BaseModel):
     expires_at: datetime
     decided_by: str | None = None
     note: str | None = None
-    review_url: str | None = None  # the proposal carrying the change, once enabled
+    # Before 0.20: the pull request the decision went into. Still set on a request
+    # whose pull request was never merged (see `Librarian.unapplied_enables`).
+    review_url: str | None = None
     key_request: str | None = None  # the credential request for the write key, if asked
     channel: str | None = None
     approver_group: str | None = None
@@ -309,6 +311,14 @@ class EnableWriteBroker:
         )
         await self.notifier.enable_closed(request)
         return request
+
+    async def mark_applied(self, request: EnableWriteRequest, note: str) -> None:
+        """A request enabled before 0.20 (into a pull request that was never merged)
+        was put into effect from the console."""
+        request.review_url = None
+        request.note = note
+        self._requests[request.id] = request
+        await self._save(request)
 
     async def sweep(self) -> None:
         """Expire stale requests and forget lapsed declines; call periodically."""

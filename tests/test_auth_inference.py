@@ -65,11 +65,11 @@ async def test_spec_without_auth_gets_the_models_answer_for_approval(
     assert "inferred from the model's knowledge" in entry.notes
     assert entry.credential.validation_operation == "getUser"  # tests new keys
     assert prompts and "Hub" in prompts[0]
-    learned = notifier.learned[-1]
-    assert learned["api"] == "hub" and learned["learned_by"] == "kim@x.test"
-    assert "auth: bearer (hub/readonly)" in learned["summary"]
-    assert "2 operations" in learned["summary"] and learned["warnings"] == []
-    assert learned["link"] is None and learned["error"] is None  # no publisher in tests
+    kind, review, link = notifier.reviews[-1]
+    assert kind == "opened" and review.api == "hub" and review.learned_by == "kim@x.test"
+    assert review.auth == "bearer (hub/readonly)"
+    assert "2 operations" in review.summary and review.warnings == []
+    assert link  # approvers decide on the review page, whatever else is configured
 
 
 async def test_spec_without_auth_warns_when_nobody_can_tell(
@@ -79,17 +79,17 @@ async def test_spec_without_auth_warns_when_nobody_can_tell(
     librarian.extractor = None  # no model configured
     outcome = await librarian.onboard("hub", spec_url="https://api.hub.test/openapi.json")
     assert isinstance(outcome.entry.auth, NoAuth)
-    assert any("no model" in w for w in notifier.learned[-1]["warnings"])
+    assert any("no model" in w for w in notifier.reviews[-1][1].warnings)
     model, _ = extractor_model(lambda prompt: {"auth": "unknown", "operations": []})
     librarian.extractor = build_extractor(model)
     outcome = await librarian.onboard("hub2", spec_url="https://api.hub.test/openapi.json")
     assert isinstance(outcome.entry.auth, NoAuth)
-    assert any("could not tell" in w for w in notifier.learned[-1]["warnings"])
+    assert any("could not tell" in w for w in notifier.reviews[-1][1].warnings)
     model, _ = extractor_model(lambda prompt: {"auth": "none", "operations": []})
     librarian.extractor = build_extractor(model)
     outcome = await librarian.onboard("hub3", spec_url="https://api.hub.test/openapi.json")
     assert isinstance(outcome.entry.auth, NoAuth)
-    assert notifier.learned[-1]["warnings"] == [] and "model agrees" in outcome.entry.notes
+    assert notifier.reviews[-1][1].warnings == [] and "model agrees" in outcome.entry.notes
 
 
 async def test_401_on_a_no_auth_api_infers_the_scheme_and_asks_for_a_key(
@@ -151,9 +151,18 @@ async def test_console_lets_a_person_choose_the_authentication(
     assert audit.events[-1].event == "auth_set" and audit.events[-1].detail == "api_key_header"
     assert c.post("/apis/status/auth", data={"t": t, "scheme": "magic"}).status_code == 400
     assert c.post("/apis/status/auth", data={"t": t, "scheme": "api_key_header"}).status_code == 400
-    assert c.post("/apis/tracker/auth", data={"t": t, "scheme": "bearer"}).status_code == 400
+    # an approved API's authentication is the approvers' call too: in effect at once
+    changed = c.post(
+        "/apis/tracker/auth", data={"t": t, "scheme": "api_key_header", "key_name": "X-Token"}
+    )
+    assert changed.status_code == 200 and "In effect now." in changed.text
     tracker = librarian.registry.get("tracker")
     assert tracker is not None and tracker.status is EntryStatus.VERIFIED
+    assert isinstance(tracker.auth, ApiKeyAuth) and tracker.auth.name == "X-Token"
+    assert "chosen by someone (console open)" in tracker.notes
+    # ...but not while it is blocked
+    await librarian.block("tracker", "sam")
+    assert c.post("/apis/tracker/auth", data={"t": t, "scheme": "bearer"}).status_code == 400
     back = c.post("/apis/status/auth", data={"t": t, "scheme": "none"})
     assert back.status_code == 200
     entry = librarian.registry.get("status")

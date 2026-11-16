@@ -6,7 +6,7 @@ page is the chart reference.
 
 ```bash
 # from the published chart (same version as the image; every release pushes it)
-helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.18.1 \
+helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.19.1 \
   -n librarian --create-namespace --set publicUrl=https://librarian.example.com
 # or from a checkout
 helm install librarian ./deploy/helm/librarian -n librarian --create-namespace \
@@ -20,8 +20,8 @@ helm install librarian ./deploy/helm/librarian -n librarian --create-namespace \
 agents ──A2A────► │ librarian :8080 (A2A)                                  │
                   │           :8081 (pages, 127.0.0.1 when proxy enabled)  │
 people ──HTTPS──► │ oauth2-proxy :4180 ──► 127.0.0.1:8081                  │  (optional)
-                  │ git-sync ──► /git (reviewed registry)                  │  (optional)
-                  └── /data (PVC): SQLite, file secrets, registry overlay ─┘
+                  │ git-sync ──► /git (hand-written entries to import)     │  (optional)
+                  └── /data (PVC): SQLite, file secrets ───────────────────┘
 ```
 
 - **Agents** call the A2A port through the Service (`http://<release>.<ns>.svc:8080`), which is
@@ -29,17 +29,19 @@ people ──HTTPS──► │ oauth2-proxy :4180 ──► 127.0.0.1:8081     
 - **People** open approval links at `publicUrl`, served through **oauth2-proxy** when enabled.
   The pages listener then binds to `127.0.0.1`, so identity headers can only come from the proxy,
   and the A2A port does not serve the pages at all.
-- **Registry**: with `registry.gitSync`, your reviewed registry repo is pulled continuously and
-  hot-reloaded; the librarian's own changes (learned APIs, blocks) go to an overlay on the PVC.
+- **Registry**: lives in the database (SQLite on the PVC, or Postgres), and so does every
+  approval: decisions take effect at once, on every replica. With `githubApp`, each approved
+  decision is also committed to a repository you own (the record); librarian never reads it
+  back. `registry.gitSync` is only for importing entries you write by hand and keep in git.
 
 ## Production checklist
 
 | | Values |
 |---|---|
 | Approver sign-in | `oauth2Proxy.enabled=true`, `oauth2Proxy.existingSecret`, `oauth2Proxy.oidcIssuerUrl`, `oauth2Proxy.approverGroup`, `ingress.pages` |
-| Reviewed registry | `registry.gitSync.enabled=true`, `registry.gitSync.repo`, `.path` |
+| Hand-written entries from git (optional) | `registry.gitSync.enabled=true`, `registry.gitSync.repo`, `.path`: new files are imported into the database |
 | The console at the pages host's root | on by default for signed-in approvers (`config.approvers.console`: `signed_in`, `open`, `off`) |
-| Registry repo access (GitHub App) | `githubApp.enabled=true`, `githubApp.appId`, `githubApp.installationId`, `githubApp.secretName` (see below) |
+| The record on GitHub | `githubApp.enabled=true`, `githubApp.repo`, `githubApp.appId`, `githubApp.installationId`, `githubApp.secretName` (see below) |
 | Probes | `probes.startup` (default: 10 s period, 60 failures, so a large registry can finish parsing before liveness applies), `probes.readiness`, `probes.liveness`; each takes Kubernetes probe fields |
 | Automatic writes in the channel | `config.writes.announce_auto: true` posts each automatically approved write to Slack with a one-click way back; off by default, every one is in the audit log regardless |
 | Grant uses in the channel | `config.writes.announce_grants: false` stops the post made each time a standing grant is used (a grant covering a multi-step flow posts one per step); on by default. Every use stays in the audit log and on the console's Activity page, and the Grants page can turn notices off per grant |
@@ -51,10 +53,11 @@ people ──HTTPS──► │ oauth2-proxy :4180 ──► 127.0.0.1:8081     
 | Model for `fetch` | `config.model`, optionally `config.model_base_url` (LiteLLM), key via `envFrom` |
 | Telemetry | `otel.enabled=true`, `otel.endpoint` |
 
-### GitHub App for the registry repo
+### GitHub App for the record
 
-One GitHub App, owned by your organization, lets git-sync read the (private) registry repo and
-lets librarian open review pull requests on it. Its tokens are minted per use, last under an
+Approvals are made in librarian and stored in its database. One GitHub App, owned by your
+organization, lets librarian commit each approved decision to a (private) repository as well,
+so the registry also lives outside the database. Its tokens are minted per use, last under an
 hour, and cover only that repo. Create it in one step:
 
 ```bash
@@ -63,22 +66,26 @@ uvx --from librarian-a2a librarian github-app create --repo acme/api-registry \
   --key-file ~/.config/librarian/github-app.pem --init-repo
 # opens GitHub: click "Create", then install it on acme/api-registry only. Saves the private
 # key to --key-file (keep it outside any repo) and prints the values below. --init-repo gives an
-# empty repo its first commit as the App (git-sync and pull requests need a branch).
+# empty repo its first commit as the App (commits need a branch).
 
 kubectl -n librarian create secret generic librarian-github-app \
   --from-file=private-key.pem=$HOME/.config/librarian/github-app.pem
 ```
 
 ```yaml
-registry:
-  gitSync: {enabled: true, repo: https://github.com/acme/api-registry.git}
-githubApp: {enabled: true, appId: "123456", installationId: "7890123", secretName: librarian-github-app}
+githubApp: {enabled: true, repo: acme/api-registry, appId: "123456", installationId: "7890123", secretName: librarian-github-app}
 ```
 
-The chart mounts the key into git-sync and librarian, and points librarian's review pull
-requests at the same repo. `librarian github-app check --repo ... --app-id ... --key-file ...`
-verifies the App can reach the repo. To keep the key in AWS Secrets Manager instead, sync it
-into that Secret with ExternalSecrets.
+The chart mounts the key into librarian and points its record at that repo.
+`librarian github-app check --repo ... --app-id ... --key-file ...` verifies the App can reach
+the repo. To keep the key in AWS Secrets Manager instead, sync it into that Secret with
+ExternalSecrets.
+
+**Upgrading a release from before 0.20** (`registry.gitSync` + `githubApp`, where merging a
+pull request was the approval): upgrade with the values unchanged, so the first start imports
+the reviewed entries into the database; then set `githubApp.repo` and drop `registry.gitSync`.
+With `githubApp.repo` unset the chart keeps the old layout (the record goes to the git-sync
+repository, `path` and `ref`). See [docs/registry.md](../../../docs/registry.md#upgrading-from-019-or-earlier).
 
 Example secret for the environment:
 
@@ -104,6 +111,6 @@ oauth2-proxy's `--oidc-groups-claim`) for `approverGroup` and group approval to 
 ## Tested
 
 The chart is exercised on a local kind cluster with git-sync and oauth2-proxy enabled: helm test,
-onboarding into the overlay (surviving pod replacement), A2A port refusing the pages even with
+onboarding (surviving pod replacement), A2A port refusing the pages even with
 forged identity headers, proxy redirecting unauthenticated browsers to sign-in, and the pages
 listener unreachable from other pods.

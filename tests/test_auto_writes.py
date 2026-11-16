@@ -20,10 +20,9 @@ from librarian.registry.models import Access, ApiEntry, Operation
 from librarian.registry.store import dump_entry
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian, WriteNotEnabled
-from tests.conftest import BASE, RecordingNotifier, Router
+from tests.conftest import BASE, RecordingNotifier, RecordPublisher, Router
 from tests.test_console import console, token
 from tests.test_enable_writes import enable_client, without_write_credential
-from tests.test_proposals import HeadPublisher
 from tests.test_writes import BOT, KIM, comment
 
 
@@ -115,8 +114,8 @@ async def test_the_fyi_link_puts_approval_back_with_one_click(
 ) -> None:
     await make_auto(librarian)
     librarian.settings.writes.announce_auto = True
-    pub = HeadPublisher()
-    librarian.publisher = pub
+    record = RecordPublisher()
+    librarian.publisher = record
     await librarian.write(comment(), KIM)
     _, (_, _, _, link) = notifier.write_events[-1]
     client = TestClient(Starlette(routes=auto_routes(librarian)))
@@ -126,18 +125,20 @@ async def test_the_fyi_link_puts_approval_back_with_one_click(
     assert client.get("/auto/tracker/addComment?t=nope").status_code == 404
     tok = path.split("t=")[1]
     done = client.post("/auto/tracker/addComment", data={"t": tok})
-    assert done.status_code == 200 and "needs approval again" in done.text and "Merged" in done.text
-    assert pub.head is not None and pub.head.operation("addComment").approval == "each"  # type: ignore[union-attr]
-    assert pub.merged == ["tracker"]
-    assert "approved each time" in pub.head.notes
+    assert done.status_code == 200 and "needs approval again" in done.text
+    assert "In effect now" in done.text
+    live = librarian.registry.get("tracker")
+    assert live is not None and live.operation("addComment").approval == "each"  # type: ignore[union-attr]
+    assert "approved each time" in live.notes
+    assert record.files["tracker"].operation("addComment").approval == "each"  # type: ignore[union-attr]
+    # the very next write waits for a person again
+    assert isinstance(await librarian.request_write(comment(), KIM), WriteApproval)
 
 
 async def test_console_switches_approval_per_operation(
     librarian: Librarian, audit: MemoryAuditSink
 ) -> None:
     librarian.settings.approvers.console = "open"
-    pub = HeadPublisher()
-    librarian.publisher = pub
     c = console(librarian)
     t = token(librarian)
     page = c.get("/apis/tracker").text
@@ -146,17 +147,21 @@ async def test_console_switches_approval_per_operation(
     done = c.post(
         "/apis/tracker/ops/addComment/access", data={"t": t, "choice": "auto", "cap": "25"}
     )
-    assert done.status_code == 200 and "Merged" in done.text
-    op = pub.head.operation("addComment")  # type: ignore[union-attr]
+    assert done.status_code == 200 and "In effect now" in done.text
+    live = librarian.registry.get("tracker")
+    assert live is not None
+    op = live.operation("addComment")
     assert op is not None and op.writable and op.approval == "auto" and op.auto_limit_per_day == 25
-    assert "approved automatically (up to 25/day)" in pub.head.notes  # type: ignore[union-attr]
-    assert "approval: auto" in dump_entry(pub.head)  # type: ignore[arg-type]
+    assert "approved automatically (up to 25/day)" in live.notes
+    assert "approval: auto" in dump_entry(live)
     bad = c.post("/apis/tracker/ops/deleteIssue/access", data={"t": t, "choice": "auto"})
     assert bad.status_code == 400 and "never approved automatically" in bad.text
     # a read decision can be changed too, and writes disabled
     back = c.post("/apis/tracker/ops/getIssue/access", data={"t": t, "choice": "exclude"})
     assert back.status_code == 200
-    excluded = pub.head.operation("getIssue")  # type: ignore[union-attr]
+    live = librarian.registry.get("tracker")
+    assert live is not None
+    excluded = live.operation("getIssue")
     assert excluded is not None and excluded.access is Access.WRITE and not excluded.writable
     assert audit.events[-1].event == "operation_access_set" and audit.events[-1].detail == "exclude"
 
@@ -166,7 +171,6 @@ async def test_console_write_choice_on_an_entry_without_a_write_key_asks_for_one
 ) -> None:
     librarian.settings.approvers.console = "open"
     await without_write_credential(librarian)
-    librarian.publisher = HeadPublisher()
     c = console(librarian)
     done = c.post(
         "/apis/tracker/ops/renameProject/access",
@@ -175,7 +179,7 @@ async def test_console_write_choice_on_an_entry_without_a_write_key_asks_for_one
     assert done.status_code == 200 and "Add the write credential" in done.text
     key = librarian.broker.pending_for("tracker", "write")
     assert key is not None and key.secret_ref == "tracker/write"
-    head = librarian.publisher.head  # type: ignore[attr-defined]
+    head = librarian.registry.get("tracker")
     assert head is not None
     op = head.operation("renameProject")
     assert op is not None
@@ -191,8 +195,6 @@ async def test_enable_page_offers_automatic_approval_for_the_flow(librarian: Lib
     await librarian.registry.save(
         entry.model_copy(update={"operations": [*entry.operations, purge]})
     )
-    pub = HeadPublisher()
-    librarian.publisher = pub
     flow = WriteRequest(api="tracker", operation="renameProject", args={"p": "PAY"}, reason="r")
     with pytest.raises(WriteNotEnabled) as info:
         await librarian.write(flow.model_copy(update={"also_needs": ["purge"]}), KIM)
@@ -214,7 +216,7 @@ async def test_enable_page_offers_automatic_approval_for_the_flow(librarian: Lib
         },
     )
     assert done.status_code == 200
-    head = pub.head
+    head = librarian.registry.get("tracker")
     assert head is not None
     rename, purge_op = head.operation("renameProject"), head.operation("purge")
     assert rename is not None and rename.writable and rename.approval == "auto"

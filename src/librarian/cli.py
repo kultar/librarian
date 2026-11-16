@@ -121,10 +121,8 @@ def learn(
                 "Operations are unconfirmed until a real call succeeds; ones that keep "
                 "failing are suspended."
             )
-        if outcome.review_url:
-            typer.echo(f"Review: {outcome.review_url}")
-        if outcome.review_error:
-            typer.echo(f"Warning: {outcome.review_error}", err=True)
+        if outcome.review:
+            typer.echo("Approvers were asked to approve it (see the console).")
 
     _run(run())
 
@@ -213,7 +211,7 @@ def discover(api: str, config: ConfigOption = None) -> None:
 
 
 github_app_cli = typer.Typer(
-    help="Set up the GitHub App librarian uses for the registry repo.", no_args_is_help=True
+    help="Set up the GitHub App librarian writes its record with.", no_args_is_help=True
 )
 app.add_typer(github_app_cli, name="github-app")
 
@@ -242,7 +240,7 @@ def github_app_create(
         ),
     ] = None,
 ) -> None:
-    """Create a GitHub App for the registry repo in one step (GitHub's manifest flow)."""
+    """Create a GitHub App for the record repository in one step (GitHub's manifest flow)."""
     import webbrowser
 
     import httpx
@@ -304,11 +302,11 @@ def github_app_create(
             f"  publish:\n    type: github\n    repo: {repo}\n    github_app:\n"
             f'      app_id: "{created.app_id}"\n      installation_id: {installation}\n'
             f"      private_key_file: {key_file}\n"
-            "\nHelm (git-sync reads the registry with the same App):\n"
+            "\nHelm:\n"
             "  kubectl create secret generic librarian-github-app "
             f"--from-file=private-key.pem={key_file}\n"
-            f'  githubApp: {{appId: "{created.app_id}", installationId: "{installation}", '
-            "secretName: librarian-github-app}"
+            f'  githubApp: {{enabled: true, repo: {repo}, appId: "{created.app_id}", '
+            f'installationId: "{installation}", secretName: librarian-github-app}}'
         )
 
     _run(run())
@@ -320,10 +318,10 @@ def github_app_init_repo(
     app_id: Annotated[str, typer.Option(help="The App's id")],
     key_file: Annotated[Path, typer.Option(help="The App's private key file", exists=True)],
 ) -> None:
-    """Make the first commit (a README) in an empty registry repo, as the App.
+    """Make the first commit (a README) in an empty record repository, as the App.
 
-    git-sync and review pull requests need a branch to exist. Creates `main`, so it works
-    unless a ruleset restricts creating the default branch."""
+    Commits need a branch to exist. Creates `main`, so it works unless a ruleset restricts
+    creating the default branch."""
     import httpx
 
     from librarian.github_app import GitHubAppAuth, GitHubAppError, init_repo
@@ -350,7 +348,7 @@ def github_app_check(
     app_id: Annotated[str, typer.Option(help="The App's id")],
     key_file: Annotated[Path, typer.Option(help="The App's private key file", exists=True)],
 ) -> None:
-    """Check the App can mint a token and read the registry repo."""
+    """Check the App can mint a token and reach the record repository."""
     import httpx
 
     from librarian.github_app import GitHubAppAuth, GitHubAppError
@@ -434,8 +432,8 @@ def registry_recheck(
                     typer.echo(f"    [{change.severity}] {change.detail}")
                 for action in report.actions:
                     typer.echo(f"    -> {action}")
-                if report.review_url:
-                    typer.echo(f"    review: {report.review_url}")
+                if report.review:
+                    typer.echo("    an approver decides on the update (see the console)")
         finally:
             await librarian.aclose()
 
@@ -496,7 +494,7 @@ def registry_list(config: ConfigOption = None) -> None:
 @registry_app.command("validate")
 def registry_validate(config: ConfigOption = None) -> None:
     """Validate every registry file; exits non-zero on errors (use in CI). Files only:
-    APIs learned on demand are in the database until their review is merged."""
+    APIs learned on demand are in the database."""
     librarian = Librarian(_settings(config))
     librarian.load()
     errors = librarian.registry.errors
@@ -504,6 +502,44 @@ def registry_validate(config: ConfigOption = None) -> None:
         typer.echo(f"{name}: {error}", err=True)
     typer.echo(f"{len(librarian.registry.all())} valid, {len(errors)} invalid")
     raise typer.Exit(code=1 if errors else 0)
+
+
+@registry_app.command("restore")
+def registry_restore(
+    replace: Annotated[
+        bool,
+        typer.Option(
+            "--replace", help="Also overwrite APIs the database already has with the record's"
+        ),
+    ] = False,
+    by: Annotated[str, typer.Option(help="Who is restoring (for the audit log)")] = "cli",
+    config: ConfigOption = None,
+) -> None:
+    """Bring the entries in the external record (the repository under `publish`) into
+    the database: after losing the database, or when moving to a new one.
+
+    This is the only time the record is read. APIs the database already has are left
+    alone unless --replace."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        await librarian.start()
+        try:
+            report = await librarian.restore_from_record(by, replace=replace)
+        finally:
+            await librarian.aclose()
+        for api_id in report["restored"]:
+            typer.echo(f"restored {api_id}")
+        for api_id in report["kept"]:
+            typer.echo(f"kept     {api_id} (already in the database)")
+        for name, error in report["unreadable"].items():
+            typer.echo(f"UNREADABLE {name}: {error}", err=True)
+        typer.echo(
+            f"{len(report['restored'])} restored, {len(report['kept'])} kept, "
+            f"{len(report['unreadable'])} unreadable"
+        )
+
+    _run(run())
 
 
 def _where(path: Path) -> str:

@@ -89,3 +89,35 @@ def test_learn_then_list_in_a_fresh_folder_with_defaults(
     listed = runner.invoke(app, ["registry", "list"])
     assert listed.exit_code == 0, listed.output
     assert "jira" in listed.output and "provisional" in listed.output
+
+
+def test_registry_restore_rebuilds_an_empty_database_from_the_record(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from librarian import service as service_module
+    from librarian.registry.models import ApiEntry
+    from tests.conftest import TRACKER, RecordPublisher
+
+    record = RecordPublisher()
+    record.files["tracker"] = ApiEntry.model_validate(TRACKER)
+    record.unreadable = {"broken.yaml": "expected a mapping at the top level"}
+
+    def configured(settings: object) -> RecordPublisher | None:
+        return record if use_record else None
+
+    use_record = True
+    monkeypatch.setattr(service_module, "_default_publisher", configured)
+    runner = CliRunner()
+    assert runner.invoke(app, ["registry", "list"]).output.strip() == ""  # an empty database
+    restored = runner.invoke(app, ["registry", "restore", "--by", "ops@x.test"])
+    assert restored.exit_code == 0, restored.output
+    assert "restored tracker" in restored.output and "UNREADABLE broken.yaml" in restored.output
+    assert "1 restored, 0 kept, 1 unreadable" in restored.output
+    assert "tracker" in runner.invoke(app, ["registry", "list"]).output
+    again = runner.invoke(app, ["registry", "restore"])
+    assert "kept     tracker (already in the database)" in again.output
+    assert "0 restored, 1 kept" in again.output
+    # without a record configured there is nothing to restore from
+    use_record = False
+    none = runner.invoke(app, ["registry", "restore"])
+    assert none.exit_code == 1 and "no external record is configured" in none.output

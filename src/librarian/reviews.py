@@ -1,20 +1,22 @@
-"""Reviews of learned APIs: the approve-or-deny step, from Slack or the console.
+"""Reviews: the approve-or-deny step for what librarian learned.
 
-When librarian learns an API and opens a review pull request, it also opens a
-*review request*: a card for approvers with a one-time link to a page where they
-see what librarian proposes (the operations, the authentication it will use, the
-operations that still need a decision) and approve or deny. Approve merges the
-pull request as the App; deny closes it and drops the API. Nobody edits YAML.
+When librarian learns an API it opens a *review request*: a card for approvers with a
+one-time link to a page where they see what librarian proposes (the operations, the
+authentication it will use, the operations that still need a decision) and approve or
+deny. Approving makes the API verified, in librarian's database and at once; denying
+drops it. A verified API that changed at its source gets the same step for the update
+(`kind: update`): approve applies it, deny keeps the entry as it is. Nobody edits YAML.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import uuid
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -32,17 +34,21 @@ class ReviewRequest(BaseModel):
     api: str
     api_name: str
     host: str
-    review_url: str  # the pull request
+    # learned: a new API awaits approval. update: a verified API changed at its source.
+    kind: Literal["learned", "update"] = "learned"
+    # Before 0.20: the pull request whose merge was the approval. Empty since.
+    review_url: str = ""
     learned_by: str
     summary: str  # "12 operations (10 reads, 2 need review) from an OpenAPI spec"
     auth: str  # "bearer (github/readonly), inferred from the model's knowledge" or "none"
     warnings: list[str] = Field(default_factory=list[str])
+    changes: list[str] = Field(default_factory=list[str])  # update: what changed
     needs_review: list[str] = Field(default_factory=list[str])  # operation ids
     state: ReviewState = ReviewState.PENDING
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     expires_at: datetime
     decided_by: str | None = None
-    note: str | None = None  # what happened ("merged", "closed and forgotten", ...)
+    note: str | None = None  # what happened ("verified", "the API was forgotten", ...)
     channel: str | None = None
     approver_group: str | None = None
     notifier_ref: dict[str, str] = Field(default_factory=dict[str, str])
@@ -86,11 +92,21 @@ class ReviewBroker:
         self._signing_key = key
 
     async def restore(self) -> None:
+        await self.refresh()
+
+    async def refresh(self) -> None:
+        """Pick up reviews opened or decided on other replicas: the console's waiting
+        list is where people find them."""
         if self.store is None:
             return
+        pending: dict[str, ReviewRequest] = {}
         for data in await self.store.list_docs("review", ReviewState.PENDING.value):
             review = ReviewRequest.model_validate_json(data)
-            self._reviews[review.id] = review
+            pending[review.id] = review
+        for review_id, review in list(self._reviews.items()):
+            if review.state is ReviewState.PENDING and review_id not in pending:
+                del self._reviews[review_id]  # decided on another replica
+        self._reviews.update(pending)
 
     async def _save(self, review: ReviewRequest) -> None:
         if self.store is not None:
@@ -138,26 +154,32 @@ class ReviewBroker:
         api: str,
         api_name: str,
         host: str,
-        review_url: str,
         learned_by: str,
         summary: str,
         auth: str,
         warnings: list[str],
         needs_review: list[str],
+        kind: Literal["learned", "update"] = "learned",
+        changes: list[str] | None = None,
         channel: str | None = None,
         approver_group: str | None = None,
     ) -> ReviewRequest:
-        """Open the approve-or-deny step for a learned API and tell the approvers."""
+        """Open the approve-or-deny step (a learned API, or an update to a verified
+        one) and tell the approvers."""
+        await self.refresh()
         existing = self.pending_for(api)
-        if existing is not None:  # re-learned while a review was open: supersede it
+        if existing is not None:  # learned or changed again while one was open
             existing.state = ReviewState.DENIED
-            existing.note = "superseded by a newer proposal"
+            existing.note = "superseded by a newer review"
             await self._save(existing)
+            with contextlib.suppress(Exception):  # the old card is cosmetic
+                await self.notifier.review_closed(existing)
         review = ReviewRequest(
             api=api,
             api_name=api_name,
             host=host,
-            review_url=review_url,
+            kind=kind,
+            changes=changes or [],
             learned_by=learned_by,
             summary=summary,
             auth=auth,
@@ -188,7 +210,7 @@ class ReviewBroker:
                 principal=by,
                 api=review.api,
                 detail=note,
-                extra={"review_url": review.review_url},
+                extra={"kind": review.kind},
             )
         )
         await self.notifier.review_closed(review)

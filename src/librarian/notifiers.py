@@ -80,30 +80,6 @@ class WebhookNotifier(Notifier):
             "api.changed", {"api": api, "title": title, "details": details, "link": link}
         )
 
-    async def api_learned(
-        self,
-        api: str,
-        name: str,
-        learned_by: str,
-        summary: str,
-        link: str | None,
-        channel: str | None,
-        warnings: list[str],
-        error: str | None = None,
-    ) -> None:
-        await self._post_write(
-            "api.learned",
-            {
-                "api": api,
-                "name": name,
-                "learned_by": learned_by,
-                "summary": summary,
-                "link": link,
-                "warnings": warnings,
-                "error": error,
-            },
-        )
-
     async def review_opened(self, review: Any, link: str) -> None:
         await self._post_write(
             "review.opened", {"review": review.model_dump(mode="json"), "link": link}
@@ -355,32 +331,13 @@ class SlackNotifier(Notifier):
             "chat.postMessage", {"channel": channel or self.default_channel, "text": text}
         )
 
-    async def api_learned(
-        self,
-        api: str,
-        name: str,
-        learned_by: str,
-        summary: str,
-        link: str | None,
-        channel: str | None,
-        warnings: list[str],
-        error: str | None = None,
-    ) -> None:
-        await self._call(
-            "chat.postMessage",
-            {
-                "channel": channel or self.default_channel,
-                "text": api_learned_text(api, name, learned_by, summary, link, warnings, error),
-            },
-        )
-
     async def review_opened(self, review: Any, link: str) -> None:
         self._links[review.id] = link
         data = await self._call(
             "chat.postMessage",
             {
                 "channel": review.channel or self.default_channel,
-                "text": f"New API to review: {review.api_name}",
+                "text": review_title(review),
                 "blocks": review_blocks(review, link),
             },
         )
@@ -566,15 +523,22 @@ def review_outcome_text(review: Any) -> str:
     return f"{icon} {review.api_name} review {review.state}{who}{note}"
 
 
+def review_title(review: Any) -> str:
+    if getattr(review, "kind", "learned") == "update":
+        return f"{review.api_name} changed at its source: review the update"
+    return f"New API to review: {review.api_name}"
+
+
 def review_blocks(review: Any, link: str | None) -> list[dict[str, Any]]:
-    """Block Kit card for a learned API awaiting approval."""
+    """Block Kit card for a learned API (or an update to a verified one) awaiting
+    approval."""
     pending = str(review.state) == "pending"
-    title = (
-        f":books: New API to review: {review.api_name}" if pending else review_outcome_text(review)
-    )
+    update = getattr(review, "kind", "learned") == "update"
+    icon = ":warning:" if update else ":books:"
+    title = f"{icon} {review_title(review)}" if pending else review_outcome_text(review)
     fields = [
         f"*Site:*\n{review.host}",
-        f"*Learned by:*\n{review.learned_by}",
+        f"*Noticed by:*\n{review.learned_by}" if update else f"*Learned by:*\n{review.learned_by}",
         f"*What:*\n{review.summary}",
         f"*Authentication:*\n{review.auth}",
     ]
@@ -584,6 +548,11 @@ def review_blocks(review: Any, link: str | None) -> list[dict[str, Any]]:
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}},
         {"type": "section", "fields": [{"type": "mrkdwn", "text": f} for f in fields[:10]]},
     ]
+    changes = list(getattr(review, "changes", []))
+    if changes:
+        shown = "\n".join(f"• {c}" for c in changes[:8])
+        more = f"\n• ... and {len(changes) - 8} more" if len(changes) > 8 else ""
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": shown + more}})
     for warning in list(review.warnings)[:3]:
         blocks.append(
             {"type": "context", "elements": [{"type": "mrkdwn", "text": f":warning: {warning}"}]}
@@ -596,8 +565,12 @@ def review_blocks(review: Any, link: str | None) -> list[dict[str, Any]]:
                 "text": {
                     "type": "mrkdwn",
                     "text": (f"{group} " if group else "")
-                    + "Approve merges the proposal as the App and the API becomes verified; "
-                    "deny closes it and drops the API.",
+                    + (
+                        "Approve applies the update; deny keeps the entry as it is "
+                        "(operations suspended meanwhile stay suspended)."
+                        if update
+                        else "Approve makes the API verified, at once; deny drops it."
+                    ),
                 },
                 "accessory": {
                     "type": "button",
@@ -607,31 +580,7 @@ def review_blocks(review: Any, link: str | None) -> list[dict[str, Any]]:
                 },
             }
         )
-    blocks.append(
-        {
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"<{review.review_url}|The pull request>"}],
-        }
-    )
     return blocks
-
-
-def api_learned_text(
-    api: str,
-    name: str,
-    learned_by: str,
-    summary: str,
-    link: str | None,
-    warnings: list[str],
-    error: str | None,
-) -> str:
-    lines = [f":books: *{name}* (`{api}`) learned by {learned_by}: {summary}"]
-    lines += [f":warning: {w}" for w in warnings]
-    if link:
-        lines.append(f"<{link}|Review the entry> (merging it makes the API verified)")
-    if error:
-        lines.append(f":x: No review was opened: {error}. The entry is usable as provisional.")
-    return "\n".join(lines)
 
 
 def _api_changed_text(api: str, title: str, details: list[str], link: str | None) -> str:

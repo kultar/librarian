@@ -206,7 +206,7 @@ def build_mcp(librarian: Librarian) -> MCPServer:
     @server.tool(annotations=read_only)
     async def enable_status(ctx: Context, enable_request: str) -> dict[str, Any]:
         """Where a `write_not_enabled` request stands: pending (approvers asked), enabled
-        (waiting for the review to merge, and maybe for a write credential), live (in
+        (decided; waiting for a write credential), live (in
         effect: retry the write), declined until a date, or expired."""
         try:
             return await librarian.enable_status(enable_request, _caller(ctx))
@@ -224,7 +224,7 @@ def build_mcp(librarian: Librarian) -> MCPServer:
     ) -> dict[str, Any]:
         """Teach the librarian a new API: from its OpenAPI spec, by auto-discovery under
         base_url, or from documentation pages (docs_url + base_url) when it has no spec.
-        The API becomes usable read-only at once and is proposed for review."""
+        The API becomes usable read-only at once; approvers are asked to approve it."""
         try:
             outcome = await librarian.onboard(
                 api,
@@ -242,7 +242,7 @@ def build_mcp(librarian: Librarian) -> MCPServer:
             "read_operations": outcome.read_operations,
             "needs_review": outcome.needs_review,
             "learned_from": outcome.entry.source.kind,
-            "review_url": outcome.review_url,
+            "review": "approvers were asked to approve it" if outcome.review else None,
         }
 
     return server

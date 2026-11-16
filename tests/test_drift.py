@@ -14,10 +14,11 @@ from librarian.calls import Caller, CallRequest, WriteRequest
 from librarian.drift import diff, proposed_update
 from librarian.executor import PolicyDenied
 from librarian.openapi import entry_from_spec
-from librarian.registry.models import ApiEntry, BearerAuth, EntryStatus
+from librarian.registry.models import Access, ApiEntry, BearerAuth, EntryStatus
+from librarian.reviews import ReviewState
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian, WriteRefused
-from tests.conftest import RecordingNotifier, Router
+from tests.conftest import RecordingNotifier, RecordPublisher, Router
 
 HOST = "https://items.example.test"
 SPEC_URL = f"{HOST}/openapi.json"
@@ -63,32 +64,6 @@ class Spec:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=self.current)
-
-
-class Proposals:
-    def __init__(self) -> None:
-        self.published: list[ApiEntry] = []
-        self.updates: list[tuple[ApiEntry, str, str]] = []
-
-    async def publish(self, entry: ApiEntry, learned_by: str) -> str:
-        self.published.append(entry)
-        return "https://github.test/acme/registry/pull/1"
-
-    async def propose_update(self, entry: ApiEntry, title: str, body: str) -> str:
-        self.updates.append((entry, title, body))
-        return "https://github.test/acme/registry/pull/2"
-
-    async def withdraw(self, api_id: str, reason: str) -> list[str]:
-        return []
-
-    async def comment(self, api_id: str, text: str) -> list[str]:
-        return []
-
-    async def refresh(self, entry: ApiEntry, note: str, change: Any = None) -> str | None:
-        return None
-
-    async def merge(self, api_id: str, by: str) -> str | None:
-        return None
 
 
 @pytest.fixture
@@ -140,27 +115,32 @@ def test_generated_ids_that_change_are_not_reported_as_changes() -> None:
     assert diff(old, entry_from_spec(renamed, api_id="items", spec_url=SPEC_URL)) == []
 
 
-async def test_verified_entry_changes_are_held_back_and_proposed(
+async def changed_items(librarian: Librarian, spec: Spec) -> ApiEntry:
+    """A verified API whose source just changed: re-checked, so an update waits."""
+    entry = await save_items(librarian, EntryStatus.VERIFIED)
+    assert (await librarian.recheck("items")).status == "unchanged"
+    spec.current = V2
+    return entry
+
+
+async def test_verified_entry_changes_are_held_back_until_an_approver_decides(
     librarian: Librarian,
     spec: Spec,
     router: Router,
     notifier: RecordingNotifier,
     secrets_store: FileSecretStore,
 ) -> None:
-    proposals = Proposals()
-    librarian.publisher = proposals
-    librarian.settings.notifier.slack.approver_group = "S0APIOWNERS"
-    entry = await save_items(librarian, EntryStatus.VERIFIED)
-    assert (await librarian.recheck("items")).status == "unchanged"
+    from tests.test_reviews import pages
 
-    spec.current = V2
+    record = RecordPublisher()
+    librarian.publisher = record
+    entry = await changed_items(librarian, spec)
     report = await librarian.recheck("items")
     assert report.status == "changed"
-    assert report.review_url == "https://github.test/acme/registry/pull/2"
 
-    # The reviewed entry itself is untouched...
+    # The approved entry itself is untouched...
     assert librarian.registry.get("items") == entry
-    # ...but the risky operations are held back until a human looks.
+    # ...but the risky operations are held back until a person looks.
     obs = librarian.observations
     assert obs.suspended(entry, op_of(entry, "archiveInfo")) is not None  # method changed
     assert obs.suspended(entry, op_of(entry, "addNote")) is not None  # writable + breaking
@@ -178,48 +158,91 @@ async def test_verified_entry_changes_are_held_back_and_proposed(
     old = await librarian.execute(CallRequest(api="items", operation="oldThing"), AGENT)
     assert any("no longer in the source" in w for w in old.warnings)
 
-    # The owners hear about it, with the review link, and the approver group is pinged.
-    assert notifier.changes[-1]["link"] == report.review_url
-    assert notifier.changes[-1]["group"] == "S0APIOWNERS"
-    assert any("[safety]" in d for d in notifier.changes[-1]["details"])
+    # The approvers get one card for it, with the worst change first and what was done.
+    kind, review, link = notifier.reviews[-1]
+    assert kind == "opened" and review.kind == "update" and report.review == review.id
+    assert notifier.changes == []  # no second notice beside the card
+    assert review.changes[0].startswith("[safety]") and len(review.changes) == 4
+    assert any("suspended archiveInfo" in w for w in review.warnings)
+    assert "the worst is safety" in review.summary
+    assert record.commits == []  # nothing is decided yet, so nothing is written down
+    assert link
+    path = link.removeprefix("https://librarian.example.test")
+    page = pages(librarian).get(path)
+    assert page.status_code == 200 and "Items changed at its source" in page.text
+    assert "method changed GET -&gt; POST" in page.text and "Approve the update" in page.text
 
-    # The proposal keeps the reviewed decisions and leaves the rest to the reviewer.
-    proposal, title, body = proposals.updates[-1]
-    assert proposal.status is EntryStatus.VERIFIED
-    assert "safety" in title and "method changed GET -> POST" in body
+    # What approving would do keeps the decisions people made and leaves the rest to them.
+    pending = await librarian.pending_update("items")
+    assert pending is not None
+    proposal, changes = pending
+    assert proposal.status is EntryStatus.VERIFIED and len(changes) == 4
     assert op_of(proposal, "archiveInfo").method == "POST"
     assert op_of(proposal, "archiveInfo").writable is False
     assert op_of(proposal, "addNote").writable is True  # same request, still enabled
     assert "author" in {p.name for p in op_of(proposal, "addNote").parameters}
-    assert op_of(proposal, "oldThing").suspended is not None  # kept for the reviewer
+    assert op_of(proposal, "oldThing").suspended is not None  # kept for the approver
     assert op_of(proposal, "newThing").writable is False
 
     # Nothing new to say the second time round.
     assert (await librarian.recheck("items")).status == "unchanged"
 
-    # Merging the proposal (a new definition) lifts the suspensions it addresses.
-    await librarian.registry.save(proposal)
-    merged = librarian.registry.get("items")
-    assert merged is not None
-    assert obs.suspended(merged, op_of(merged, "addNote")) is None
-    assert obs.suspended(merged, op_of(merged, "archiveInfo")) is None
-    assert obs.suspended(merged, op_of(merged, "oldThing")) is not None  # until deleted
+    # A decision made while the update waits is not lost when it is approved.
+    await librarian.set_operation_access("items", "listItems", "exclude", "sam@x.test")
+    done = pages(librarian).post(
+        f"/reviews/{review.id}", data={"t": link.split("t=")[1], "action": "approve"}
+    )
+    assert done.status_code == 200 and "the update was applied" in done.text
+    updated = librarian.registry.get("items")
+    assert updated is not None and updated.status is EntryStatus.VERIFIED
+    assert op_of(updated, "archiveInfo").method == "POST"
+    assert op_of(updated, "addNote").writable is True
+    assert op_of(updated, "newThing").writable is False
+    assert op_of(updated, "listItems").access is Access.WRITE  # sam's exclusion survived
+    assert not op_of(updated, "listItems").writable
+    assert "link holder approved an update from the API's source (4 change(s))" in updated.notes
+    # The new definitions lift the suspensions they address.
+    assert obs.suspended(updated, op_of(updated, "addNote")) is None
+    assert obs.suspended(updated, op_of(updated, "archiveInfo")) is None
+    assert op_of(updated, "oldThing").suspended is not None  # until someone removes it
+    assert review.state is ReviewState.APPROVED
+    assert await librarian.pending_update("items") is None
+    api, message = record.commits[-1]
+    assert api == "items" and message.startswith("items: updated from its source\n")
+    assert "method changed GET -> POST" in message
+    assert op_of(record.files["items"], "archiveInfo").method == "POST"
+
+
+async def test_denying_an_update_keeps_the_entry_and_the_suspensions(
+    librarian: Librarian, spec: Spec, notifier: RecordingNotifier
+) -> None:
+    entry = await changed_items(librarian, spec)
+    await librarian.recheck("items")
+    _, review, _ = notifier.reviews[-1]
+    done = await librarian.deny_review(review.id, "sam@x.test")
+    assert done.state is ReviewState.DENIED and done.note == "the entry stays as it is"
+    assert librarian.registry.get("items") == entry  # not forgotten, not changed
+    assert librarian.observations.suspended(entry, op_of(entry, "archiveInfo")) is not None
+    assert await librarian.pending_update("items") is None
+    with pytest.raises(LookupError):
+        await librarian.approve_review(review.id, "sam@x.test", {})
 
 
 async def test_provisional_entries_simply_follow_the_source(
-    librarian: Librarian, spec: Spec
+    librarian: Librarian, spec: Spec, notifier: RecordingNotifier
 ) -> None:
-    proposals = Proposals()
-    librarian.publisher = proposals
     await save_items(librarian, EntryStatus.PROVISIONAL)
     spec.current = V2
     report = await librarian.recheck("items")
-    assert report.status == "changed"
+    assert report.status == "changed" and report.review is None
     updated = librarian.registry.get("items")
     assert updated is not None and updated.status is EntryStatus.PROVISIONAL
     ids = {o.id for o in updated.operations}
     assert "newThing" in ids and "oldThing" not in ids
-    assert proposals.published and not proposals.updates
+    # nobody approved it yet, so there is no update to approve: the owners are told
+    assert not notifier.reviews
+    assert notifier.changes[-1]["link"] == "https://librarian.example.test/apis/items"
+    assert any("[safety]" in d for d in notifier.changes[-1]["details"])
 
 
 async def test_recheck_reports_source_errors_and_skips_manual_entries(

@@ -1,0 +1,11 @@
+# Regression check (ci.yml): the record needs no git-sync. librarian writes to the repository
+# as the App and reads nothing back from it.
+githubApp:
+  enabled: true
+  repo: acme/api-registry
+  appId: 1234567
+  installationId: 987654321
+  secretName: librarian-github-app
+replicaCount: 2
+persistence:
+  enabled: false

@@ -2,8 +2,7 @@
 host: 0.0.0.0
 port: 8080
 public_url: http://localhost:8080        # where your browser opens approval links
-registry_dir: /registry                  # reviewed entries (here: the demo API)
-registry_overlay_dir: /data/registry     # APIs librarian learns on demand
+registry_dir: /registry                  # hand-written entries (the demo API), imported at start
 secrets_dir: /data/secrets               # keys people add (one owner-only file each)
 database_url: sqlite+aiosqlite:////data/librarian.db
 allow_private_networks: true             # the demo API is on the compose network (local only!)

@@ -5,8 +5,8 @@ same source, sort the differences by risk, and build what a reviewer should see.
 - breaking  removed operations, new required parameters, moved paths: calls will fail
 - safety    an operation's HTTP method changed: what was a read may now change data
 
-Verified entries are never changed here. The service suspends risky operations
-(observations) and proposes the update for review; see `Librarian.recheck`.
+Approved entries are never changed here. The service suspends risky operations
+(observations) and asks an approver to approve the update; see `Librarian.recheck`.
 """
 
 from __future__ import annotations
@@ -107,9 +107,9 @@ def worst(changes: list[Change]) -> Severity | None:
 
 
 def proposed_update(current: ApiEntry, fresh: ApiEntry, changes: list[Change]) -> ApiEntry:
-    """What a reviewer is asked to merge for a verified entry.
+    """What an approver is asked to approve for a verified entry.
 
-    Reviewed decisions are kept wherever the operation is still the same request:
+    Decisions people made are kept wherever the operation is still the same request:
     write enablement, reviewed reads, pagination. Removed operations are kept but
     suspended, so references to them (discovery, credential tests) stay valid and the
     reviewer decides. New operations arrive disabled for writes.
@@ -170,31 +170,3 @@ def _dumpable(values: dict[str, object]) -> dict[str, object]:
     for key, value in values.items():
         out[key] = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
     return out
-
-
-def review_body(entry: ApiEntry, changes: list[Change], actions: list[str]) -> str:
-    rows = sorted(changes, key=lambda c: -_RANK[c.severity])
-    lines = [
-        f"librarian noticed that **{entry.name}** (`{entry.id}`) changed at its source "
-        f"({entry.source.url or entry.source.kind}).",
-        "",
-        "| Severity | Change |",
-        "|---|---|",
-        *[f"| {c.severity} | {c.detail} |" for c in rows[:100]],
-    ]
-    if len(rows) > 100:
-        lines.append(f"| | ... and {len(rows) - 100} more |")
-    if actions:
-        lines += ["", "### Already done (until this is reviewed)", *[f"- {a}" for a in actions]]
-    lines += [
-        "",
-        "### Review checklist",
-        "- [ ] Operations whose method changed are still classified correctly",
-        "- [ ] Write enablement still makes sense for changed operations",
-        "- [ ] Delete operations marked `suspended` if the API really removed them",
-        "",
-        "Merging this clears the suspensions for the operations it changes.",
-        "",
-        "_Opened automatically by librarian._",
-    ]
-    return "\n".join(lines)

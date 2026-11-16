@@ -79,7 +79,9 @@ class GitHubAppSettings(BaseModel):
 
 
 class PublishSettings(BaseModel):
-    """Where learned entries are proposed for human review."""
+    """The external record: a git repository that receives every approved entry and
+    every later decision as a commit. librarian's database decides; the repository is
+    written to, never read back (except by `librarian registry restore`)."""
 
     type: Literal["none", "github"] = "none"
     repo: str | None = None  # owner/name
@@ -88,10 +90,6 @@ class PublishSettings(BaseModel):
     token: SecretStr | None = None  # needs contents:write + pull_requests:write on the repo
     github_app: GitHubAppSettings | None = None  # instead of token (recommended)
     api_url: str = "https://api.github.com"
-    # A decision an approver makes in the console or on an enable page IS the approval:
-    # the proposal it lands in is merged as the App right away (verified entries only;
-    # a learned API's own review still needs its approve step). Off: merge on GitHub.
-    merge_console_decisions: bool = True
 
 
 class IssuerSettings(BaseModel):
@@ -261,9 +259,11 @@ class Settings(BaseSettings):
     pages_host: str = "127.0.0.1"
     pages_port: int | None = None
 
+    # YAML entries written by hand. With a database they are imported into it (the
+    # database is the registry); without one they are the registry.
     registry_dir: Path = Path("registry")
-    # Where the librarian writes its own registry changes when registry_dir is
-    # managed elsewhere (e.g. a git-sync checkout). None = write into registry_dir.
+    # Without a database only: where librarian writes its own registry changes when
+    # registry_dir is managed elsewhere. None = write into registry_dir.
     registry_overlay_dir: Path | None = None
     # Where credentials live: "file" (secrets_dir) or "aws" (Secrets Manager, `aws`
     # extra). Environment variables (LIBRARIAN_SECRET_*) are always consulted last.

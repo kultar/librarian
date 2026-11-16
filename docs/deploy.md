@@ -4,16 +4,17 @@ This is the full setup, in order. Each step says what it is for, so you can skip
 need. Try [getting started](getting-started.md) on a laptop first if you haven't.
 
 **What you end up with.** An empty registry that fills itself: when an agent needs an API,
-librarian learns it, opens a pull request so a person can review it, and asks on Slack for any key
-it needs. Nothing is set up per API in advance.
+librarian learns it, asks your approvers to review it, and asks on Slack for any key it needs.
+Approvals are made on librarian's own signed-in pages and live in its database; a GitHub
+repository receives a copy of every decision. Nothing is set up per API in advance.
 
 ```
 agents / LiteLLM ──A2A or MCP──► librarian ──► the APIs your agents need
                                    │
        approvers (browser) ──SSO──►├─ approval pages (oauth2-proxy)
        Slack ◄─────────────────────┤  "a key is needed" / "approve this write"
-       GitHub registry repo ◄──────┤  review PRs for learned APIs; git-sync pulls what's merged
-       Postgres ◄──────────────────┤  requests, approvals, tasks (shared by replicas)
+       Postgres ◄──────────────────┤  the registry, decisions, requests, tasks (the source of truth)
+       GitHub record repo ◄────────┤  a commit for every approved decision (written, never read)
        Secrets Manager ◄───────────┘  the keys people add (agents never see them)
 ```
 
@@ -27,8 +28,8 @@ You need:
 | An HTTPS hostname for the approval pages, and an ingress | people open approval links in a browser |
 | An OIDC identity provider (Okta, Entra ID, Google, Keycloak, ...) | approvers sign in; approvals record who decided |
 | A Slack workspace where you can install apps | where approvers are asked |
-| A GitHub organization where you can create an App and a repo | the reviewed registry |
-| PostgreSQL | shared state for all replicas (requests, approvals, learned APIs) |
+| PostgreSQL | the source of truth, shared by all replicas: the registry, every decision, requests |
+| A GitHub organization where you can create an App and a repo *(optional, recommended)* | the record: a copy of every approved decision outside the database |
 | AWS Secrets Manager *(optional)* | where keys are stored; without it they go to files on the pod's volume (one replica only) |
 | A model, directly or through LiteLLM *(optional)* | plain-language requests, and learning APIs that have no spec |
 
@@ -84,7 +85,7 @@ publicUrl: https://librarian.internal.example.com
 | To | Why |
 |---|---|
 | `slack.com` | posting and updating cards |
-| `api.github.com`, `github.com` | review pull requests (librarian), pulling the registry (git-sync) |
+| `api.github.com` | writing the record (and `github.com` for git-sync, if you import hand-written entries) |
 | AWS Secrets Manager and STS in your region | keys, and assuming the pod's role |
 | your identity provider (OIDC issuer) | sign-in for the approval pages (oauth2-proxy) |
 | your model or LiteLLM | `fetch`, learning APIs without a spec |
@@ -96,10 +97,13 @@ refused unless the host matches a pattern in `config.internal_hosts` (see step 9
 `allow_private_networks` is set; restrict egress further with your cluster's network policies
 or egress proxy if you need to.
 
-## 1. The registry repo and its GitHub App
+## 1. The record repository and its GitHub App
 
-The registry is a git repo with one YAML file per API. librarian proposes new entries there as
-pull requests; people review and merge; git-sync pulls the merged result into the pod.
+The registry itself lives in Postgres, and that is where approvals are made. This step gives it
+a second home: a git repo to which librarian commits one YAML file per approved API and one
+commit per decision, saying who decided what. You get a readable history and a copy to restore
+from; librarian never reads it back, so nothing merged there changes what agents may do. Skip
+this step and everything still works, with the database as the only copy.
 
 1. Create a **private** repo, e.g. `acme/api-registry`. Keep it private: it is a map of your
    APIs. It can start empty; step 2 gives it its first commit.
@@ -118,9 +122,8 @@ pull requests; people review and merge; git-sync pulls the merged result into th
    whatever repo you run it from) and prints the App id and installation id.
 
    `--init-repo` creates `main` with a README **as the App** if the repo has no commits yet
-   (an empty repo has no branch, so git-sync and review pull requests would fail). It works as
-   long as no ruleset restricts creating the default branch; afterwards branch rules apply as
-   usual and librarian works through pull requests. If it fails with a rule violation, make the
+   (an empty repo has no branch to commit to). It works as
+   long as no ruleset restricts creating the default branch. If it fails with a rule violation, make the
    first commit as a person, or exclude the App from the rule for a moment. For an App created
    earlier: `librarian github-app init-repo --repo ... --app-id ... --key-file ...`.
 3. Store the key in the cluster:
@@ -133,9 +136,12 @@ pull requests; people review and merge; git-sync pulls the merged result into th
    Then delete the local copy, or keep it in your password manager. (Using ExternalSecrets? Put
    the key in your secret store and sync it into a Secret with this name and key.)
 
-**Branch protection** on `main` ("pull requests only, one approving review, code owners") is
-fine: librarian only ever pushes `librarian/*` branches and opens pull requests, so leave those
-branches unprotected. A code-owner rule does nothing until the repo has a `CODEOWNERS` file.
+**Branch rules.** librarian commits to `main` directly. If a rule there only lets changes in
+through pull requests, librarian opens one from a `librarian/record-...` branch and merges it as
+the App in the same step: leave `librarian/*` branches unprotected, and put the App on the
+rule's bypass list if merging needs an approving review or a check (nobody is meant to review
+these: the decision was already made, by a signed-in approver, in librarian). If GitHub refuses
+anyway, decisions are unaffected; the console shows which APIs are not written yet and why.
 
 ## 2. Slack
 
@@ -155,7 +161,8 @@ branches unprotected. A code-owner rule does nothing until the repo has a `CODEO
 
 Approval links open librarian's pages through oauth2-proxy, so every decision records a real
 person, and only members of your approver group can add keys, approve writes, or approve a
-learned API's review (which merges its pull request as the App).
+learned API. These pages are where approval happens, so the approver group is the control on
+what agents may do: keep it to the people who should decide that.
 
 1. In your identity provider, create an OIDC web application:
    - redirect URI: `https://librarian.example.com/oauth2/callback` (your pages hostname)
@@ -292,6 +299,11 @@ endpoint: replicas read each other's writes straight away (approvals, newly lear
 "run exactly once" relies on conditional updates. The load is small. A writer failover or
 restart costs a reconnect, not failed requests.
 
+This database is the source of truth for what agents may do: the registry, and every approval
+and decision. Back it up like any database you care about. The record repository (step 1) is
+the copy outside it: after losing the database, `librarian registry restore` brings the
+approved entries back (pending requests and grants are not in the record).
+
 ## 6. A model (optional)
 
 Needed for plain-language requests (`fetch`) and for learning APIs that have no OpenAPI spec.
@@ -369,7 +381,7 @@ image:
 
 replicaCount: 2                          # needs steps 4 and 5; see "Replicas" below
 persistence:
-  enabled: false                         # everything lives in Postgres, Secrets Manager, git
+  enabled: false                         # everything lives in Postgres and Secrets Manager
 publicUrl: https://librarian.example.com # the approval pages' address
 
 envFrom:
@@ -379,13 +391,9 @@ serviceAccount:
   annotations:
     eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/librarian
 
-registry:
-  gitSync:
-    enabled: true
-    repo: https://github.com/acme/api-registry.git
-    path: registry                       # folder in the repo for the YAML files
-githubApp:
+githubApp:                               # the record (step 1); leave out to keep no copy
   enabled: true
+  repo: acme/api-registry
   appId: "<printed by github-app create>"
   installationId: "<printed by github-app create>"
   secretName: librarian-github-app
@@ -461,11 +469,12 @@ export LIBRARIAN_URL=http://localhost:8080 LIBRARIAN_KEY=<caller key>
 ./examples/quickstart/ask '{"skill":"onboard","api":"apisguru","spec_url":"https://api.apis.guru/v2/openapi.yaml"}'
 ```
 
-- the reply includes a `review_url`: a pull request on your registry repo, opened by your App
+- the reply says approvers were asked to approve it, and a review card appears in Slack
 - `./examples/quickstart/ask '{"skill":"execute","api":"apisguru","operation":"getMetrics"}'`
-  returns data
-- after merging the pull request, `curl localhost:8080/healthz` shows `"apis": 1` within a minute
-  (git-sync)
+  returns data (reads work before approval)
+- open the card's **Review** link (or the console at `publicUrl`, under *Waiting*), sign in and
+  approve: the API is verified at once, and a commit for it appears in your record repository
+  a moment later
 
 The first API that needs a key will post a card in your Slack channel; follow its link, sign in,
 and add the key. That is the whole loop.
@@ -479,9 +488,9 @@ and add the key. That is the whole loop.
 ## Replicas
 
 Run two or more for production. Everything a replica needs is shared: requests, approvals, tasks,
-APIs learned on demand and what librarian has observed live in **Postgres**; keys in **Secrets
-Manager**; the reviewed registry in **git** (each pod pulls it). An API learned through one
-replica is usable through the others immediately. So replicas need no volume:
+the registry, every decision and what librarian has observed live in **Postgres**; keys in
+**Secrets Manager**. An API learned or approved through one replica is in effect on the others
+immediately. So replicas need no volume:
 `persistence.enabled: false`.
 
 With `replicaCount` above 1 the chart passes the count to librarian, which refuses to start
@@ -495,7 +504,14 @@ Rate limits are shared: with Postgres, `rate_limit_per_minute` is one limit acro
 
 - **Upgrades**: bump `image.tag`, then `helm upgrade librarian oci://ghcr.io/kultar/charts/librarian
   --version <same> -n librarian -f values.yaml`.
-  State is in Postgres and Secrets Manager; the registry is in git.
+  State is in Postgres and Secrets Manager.
+- **Upgrading from 0.19 or earlier**: approvals moved from the GitHub repository into the
+  database. Upgrade with your values unchanged (git-sync still on): the first start imports
+  every reviewed entry into the database and closes the review pull requests librarian had
+  left open (what they asked for is in the console). Check the console lists your APIs, then
+  set `githubApp.repo` and remove `registry.gitSync`: the repository keeps receiving every
+  decision, as commits. Details and what to do if the files were already gone:
+  [registry](registry.md#upgrading-from-019-or-earlier).
 - **Turning things on later**: writes per agent (`write_apis`; the operations themselves are
   enabled from the Slack card or the console when an agent first asks), standing grants
   (`config.writes.grants`; approvers also create them from the approval page, capped by

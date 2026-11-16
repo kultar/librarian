@@ -2,7 +2,8 @@
 
 An App is owned by the organization, not a person, and its access tokens are minted
 per use and expire within the hour. librarian asks for tokens limited to the one
-registry repository and to the two permissions it needs (contents, pull requests).
+repository it writes its record to and to the two permissions it needs (contents; pull
+requests, for branches that take no direct commits).
 
 `create_app` runs GitHub's manifest flow: GitHub creates the App from a manifest after
 one click, then hands its credentials to a one-time local callback. The private key is
@@ -116,19 +117,22 @@ class GitHubAppAuth:
             return self._token
 
 
-FIRST_README = """# API registry
+FIRST_README = """# API registry: the record
 
-One YAML file per API, reviewed by pull request. librarian opens a pull request here for every
-API it learns; merging it marks the entry `verified`.
+librarian writes this repository. Every API an approver approved has a YAML file here, and
+every later decision about it is a commit saying what was decided and by whom.
+
+Approvals are made in librarian (its signed-in pages) and stored in its database. This is a
+copy for people to read and to restore from: librarian does not read it back, so editing or
+merging something here changes nothing.
 """
 
 
 async def init_repo(auth: GitHubAppAuth, *, readme: str = FIRST_README) -> bool:
-    """Give an empty registry repo its first commit (a README) as the App, so git-sync and
-    review pull requests have a branch to work with. Returns False if it already had one.
+    """Give an empty record repo its first commit (a README) as the App, so there is a
+    branch to commit to. Returns False if it already had one.
 
-    Creates the default branch, so it works unless a ruleset restricts creating it; once the
-    branch exists, branch rules apply as usual (librarian only opens pull requests)."""
+    Creates the default branch, so it works unless a ruleset restricts creating it."""
     headers = {
         "Authorization": f"Bearer {await auth.token()}",
         "Accept": "application/vnd.github+json",
@@ -161,8 +165,8 @@ def manifest(name: str, redirect_url: str, callback_url: str | None = None) -> d
     data: dict[str, Any] = {
         "name": name,
         "url": "https://github.com/kultar/librarian",
-        "description": "librarian: opens pull requests for APIs it learned, and reads the "
-        "reviewed registry.",
+        "description": "librarian: writes the record of approved APIs and decisions to "
+        "this repository.",
         "redirect_url": redirect_url,
         "public": False,
         "default_permissions": {**PERMISSIONS, "metadata": "read"},

@@ -47,6 +47,14 @@ jobs:
           echo "$out" | grep -q -- "--github-app-installation-id=987654321," || { echo "$out" | grep installation-id; exit 1; }
           echo "$out" | grep -q -- "--github-app-application-id=1234567," || { echo "$out" | grep application-id; exit 1; }
           echo "$out" | grep -q 'app_id: "1234567"' || { echo "$out" | grep app_id; exit 1; }
+      - name: The record needs no git-sync
+        run: |
+          out="$(helm template t deploy/helm/librarian -f deploy/helm/librarian/ci/record-only-values.yaml)"
+          echo "$out" | grep -q 'repo: acme/api-registry' || { echo "$out" | grep -A8 publish; exit 1; }
+          if echo "$out" | grep -q 'git-sync'; then echo "git-sync rendered without registry.gitSync"; exit 1; fi
+          if helm template t deploy/helm/librarian --set githubApp.enabled=true,githubApp.appId=1,githubApp.installationId=2,githubApp.secretName=s 2>/dev/null; then
+            echo "githubApp without a repo must be refused"; exit 1
+          fi
 
   docker:
     runs-on: ubuntu-latest

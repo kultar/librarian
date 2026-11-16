@@ -1,6 +1,7 @@
-"""Opening a real review pull request (GitHub publisher), then cleaning up.
+"""Writing the external record to a real repository (GitHub publisher), then cleaning up.
 
-Needs a throwaway repo with a `main` branch and a token that can push and open PRs:
+Needs a throwaway repo with a `main` branch and a token that can write contents (and
+open and merge pull requests, when `main` only takes those):
     LIBRARIAN_INTEGRATION=1 LIBRARIAN_GITHUB_REPO=owner/repo GITHUB_TOKEN=... \\
         uv run pytest tests/integration/test_github.py -v
 """
@@ -18,6 +19,7 @@ import yaml
 
 from librarian.openapi import entry_from_spec
 from librarian.publish import GitHubPublisher
+from librarian.registry.models import EntryStatus
 from tests.test_openapi import SPEC
 
 REPO = os.environ.get("LIBRARIAN_GITHUB_REPO", "")
@@ -30,30 +32,46 @@ API = "https://api.github.com"
 HEADERS = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json"}
 
 
-async def test_learned_api_becomes_a_reviewable_pull_request() -> None:
+async def test_a_decision_is_written_to_the_repository_and_can_be_read_back() -> None:
     api_id = f"it-{uuid.uuid4().hex[:8]}"
+    path = f"registry/{api_id}.yaml"
     entry = entry_from_spec(SPEC, api_id=api_id, spec_url="https://example.test/spec.json")
-    url = await GitHubPublisher(REPO, TOKEN).publish(entry, "integration-test")
-    number = int(url.rstrip("/").rsplit("/", 1)[1])
+    entry = entry.model_copy(update={"status": EntryStatus.VERIFIED})
+    publisher = GitHubPublisher(REPO, TOKEN)
+    message = f"{api_id}: approved (integration test)\n\nDecided by integration-test in librarian."
     async with httpx.AsyncClient(headers=HEADERS, timeout=30) as gh:
+
+        async def history() -> list[dict[str, Any]]:
+            found = await gh.get(f"{API}/repos/{REPO}/commits", params={"path": path})
+            return list(found.json())
+
         try:
-            pr: dict[str, Any] = (await gh.get(f"{API}/repos/{REPO}/pulls/{number}")).json()
-            assert pr["state"] == "open" and pr["base"]["ref"] == "main"
-            assert "Review checklist" in pr["body"]
-            assert "searchForIssuesUsingJqlPost" in pr["body"]  # flagged for a human decision
-            files = (await gh.get(f"{API}/repos/{REPO}/pulls/{number}/files")).json()
-            assert [f["filename"] for f in files] == [f"registry/{api_id}.yaml"]
-            content = (
-                await gh.get(
-                    f"{API}/repos/{REPO}/contents/registry/{api_id}.yaml",
-                    params={"ref": pr["head"]["ref"]},
-                )
-            ).json()
+            url = await publisher.record(entry, message)
+            assert url.startswith("https://github.com/")
+            content = (await gh.get(f"{API}/repos/{REPO}/contents/{path}")).json()
             data = yaml.safe_load(base64.b64decode(content["content"]))
-            assert data["id"] == api_id and data["status"] == "provisional"
+            assert data["id"] == api_id and data["status"] == "verified"
+            commits = await history()
+            assert len(commits) == 1
+            assert commits[0]["commit"]["message"].startswith(f"{api_id}: approved")
+
+            # What the record already says is not committed again.
+            again = await publisher.record(entry, "nothing new")
+            assert again.endswith(path) and len(await history()) == 1
+
+            # A later decision replaces the file, in one more commit.
+            changed = entry.model_copy(update={"description": "Changed by a later decision"})
+            await publisher.record(changed, f"{api_id}: a later decision")
+            assert len(await history()) == 2
+
+            entries, unreadable = await publisher.read_all()
+            mine = next(e for e in entries if e.id == api_id)
+            assert mine.description == "Changed by a later decision"
+            assert f"{api_id}.yaml" not in unreadable
         finally:
-            await gh.patch(f"{API}/repos/{REPO}/pulls/{number}", json={"state": "closed"})
-            prefix = f"heads/librarian/onboard-{api_id}"
-            refs = (await gh.get(f"{API}/repos/{REPO}/git/matching-refs/{prefix}")).json()
-            for ref in refs:
-                await gh.delete(f"{API}/repos/{REPO}/git/{ref['ref']}")
+            await publisher.remove(api_id, f"{api_id}: forgotten (integration test)")
+        gone = await gh.get(f"{API}/repos/{REPO}/contents/{path}")
+        assert gone.status_code == 404
+        assert await publisher.remove(api_id, "again") is None
+        left = await gh.get(f"{API}/repos/{REPO}/pulls", params={"state": "open"})
+        assert not [p for p in left.json() if api_id in p["head"]["ref"]]

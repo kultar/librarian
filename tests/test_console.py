@@ -17,7 +17,7 @@ from librarian.console import console_routes
 from librarian.registry.models import EntryStatus
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian
-from tests.conftest import BASE, Router
+from tests.conftest import BASE, RecordPublisher, Router
 from tests.test_web import themed
 from tests.test_writes import KIM, comment
 
@@ -123,10 +123,11 @@ async def test_block_unblock_and_forget(
     assert "Unblock" in c.get("/apis/tracker").text
     assert c.post("/apis/tracker/unblock", data={"t": t}).status_code == 200
     tracker = librarian.registry.get("tracker")
-    assert tracker is not None and tracker.status is EntryStatus.VERIFIED  # as reviewed
-    # a reviewed entry cannot be forgotten from the console
+    assert tracker is not None and tracker.status is EntryStatus.VERIFIED  # as it was
+    # without a database the files are the registry: a file there is removed by hand
     refused = c.post("/apis/tracker/forget", data={"t": t})
-    assert refused.status_code == 400 and "registry repo" in refused.text
+    assert refused.status_code == 400 and "delete the file" in refused.text
+    assert "Forget this API" not in c.get("/apis/tracker").text
     assert librarian.registry.get("tracker") is not None
     # a learned entry (overlay file) can
     from librarian import service as service_module
@@ -139,26 +140,27 @@ async def test_block_unblock_and_forget(
     librarian.registry.overlay = tmp_path / "overlay"
     await librarian.onboard("learned", spec_url="https://x.example/spec.json")
     assert "Forget this API" in c.get("/apis/learned").text
-    # forgetting also drops what was observed, denies what waited, and closes the review
-    from tests.test_publish import FakeGitHub, publisher
-
+    # forgetting also drops what was observed, denies what waited (its review too) and
+    # takes an approved API's file out of the record
+    record = RecordPublisher()
+    librarian.publisher = record
+    assert librarian.reviews.pending_for("learned") is not None
+    assert c.post("/apis/learned/approve", data={"t": t}).status_code == 200
+    assert "learned" in record.files
     learned = librarian.registry.get("learned")
     assert learned is not None
     await librarian.observations.suspend(learned, learned.operations[0], "gone")
     await librarian.broker.open(learned, Caller(agent="agent-a"), "missing")
-    fake = FakeGitHub()
-    fake.open_pulls[0]["head"]["ref"] = "librarian/onboard-learned-20261012"
-    librarian.publisher = publisher(fake)
     done = c.post("/apis/learned/forget", data={"t": t})
-    assert done.status_code == 200 and "pull/7" in done.text and "1 waiting" in done.text
+    assert done.status_code == 200 and "1 waiting" in done.text
+    assert "removed from the record" in done.text
     assert librarian.registry.get("learned") is None
     assert not (tmp_path / "overlay" / "learned.yaml").exists()
     assert ("learned", learned.operations[0].id) not in librarian.observations._items  # pyright: ignore[reportPrivateUsage]
     assert librarian.broker.pending_for("learned") is None
-    assert [p["number"] for p in fake.open_pulls] == [8]
-    event = audit.events[-1]
-    assert event.event == "api_forgotten"
-    assert event.extra["closed_reviews"] == ["https://github.com/acme/registry/pull/7"]
+    assert "learned" not in record.files and record.commits[-1][1].startswith("learned: forgot")
+    event = next(ev for ev in reversed(audit.events) if ev.event == "api_forgotten")
+    assert event.extra["recorded"] is True
     assert event.extra["cancelled"] == 1 and event.extra["observations"] == 1
 
 
@@ -212,7 +214,7 @@ async def test_relearn_from_a_given_source_and_recheck(
     report = c.post("/apis/status/recheck", data={"t": t})
     assert report.status_code == 200 and "Re-check:" in report.text
     # verified entries are not re-learned from the console
-    assert "registry repo" in c.get("/apis/tracker").text
+    assert "An approved API follows its source" in c.get("/apis/tracker").text
     refused = c.post("/apis/tracker/relearn", data={"t": t, "spec_url": "https://x/spec.json"})
     assert refused.status_code == 400
 
@@ -292,45 +294,14 @@ async def test_large_apis_are_grouped_searchable_and_flag_attention(librarian: L
     assert "No API matches" in c.get("/apis?q=zzz").text
 
 
-class DecisionPublisher:
-    """Records what the console carried into reviews."""
-
-    def __init__(self, open_for: set[str]) -> None:
-        self.open_for = open_for
-        self.refreshed: list[tuple[str, str]] = []
-        self.proposed: list[tuple[str, str]] = []
-
-    async def publish(self, entry: Any, learned_by: str) -> str:
-        return "https://github.test/pr/new"
-
-    async def propose_update(self, entry: Any, title: str, body: str) -> str:
-        self.proposed.append((entry.id, title))
-        return "https://github.test/pr/update"
-
-    async def withdraw(self, api_id: str, reason: str) -> list[str]:
-        return []
-
-    async def comment(self, api_id: str, text: str) -> list[str]:
-        return []
-
-    async def refresh(self, entry: Any, note: str, change: Any = None) -> str | None:
-        if entry.id in self.open_for:
-            self.refreshed.append((entry.id, note))
-            return "https://github.test/pr/open"
-        return None
-
-    async def merge(self, api_id: str, by: str) -> str | None:
-        return "https://github.test/pr/open" if api_id in self.open_for else None
-
-
 async def test_needs_review_operations_are_decided_in_the_console(
     librarian: Librarian, audit: MemoryAuditSink
 ) -> None:
     from librarian.registry.models import Access, ApiEntry, ReadBasis
 
     librarian.settings.approvers.console = "open"
-    pub = DecisionPublisher(open_for={"learned"})
-    librarian.publisher = pub
+    record = RecordPublisher()
+    librarian.publisher = record
     ops = [
         {"id": "search", "method": "POST", "path": "/search", "access": "unknown"},
         {"id": "bulk", "method": "POST", "path": "/bulk", "access": "unknown"},
@@ -350,7 +321,7 @@ async def test_needs_review_operations_are_decided_in_the_console(
     page = c.get("/apis/learned").text
     assert page.count("Decide</button>") == 3 and "exclude: agents may not call it" in page
     done = c.post("/apis/learned/ops/search/access", data={"t": t, "choice": "read"})
-    assert done.status_code == 200 and "Applied now" in done.text and "pr/open" in done.text
+    assert done.status_code == 200 and "In effect now." in done.text
     assert (
         c.post("/apis/learned/ops/bulk/access", data={"t": t, "choice": "write"}).status_code == 200
     )
@@ -365,7 +336,7 @@ async def test_needs_review_operations_are_decided_in_the_console(
     assert bulk and bulk.access is Access.WRITE and bulk.writable
     assert purge and purge.access is Access.WRITE and not purge.writable
     assert "marked `search` as read" in entry.notes
-    assert [r[0] for r in pub.refreshed] == ["learned"] * 3 and pub.proposed == []  # one PR
+    assert record.commits == []  # nobody approved the API yet: nothing to write down
     assert audit.events[-1].event == "operation_access_set" and audit.events[-1].detail == "exclude"
     assert "Decide</button>" not in c.get("/apis/learned").text  # nothing left to decide
     assert (
@@ -375,7 +346,7 @@ async def test_needs_review_operations_are_decided_in_the_console(
     assert (
         c.post("/apis/learned/ops/nope/access", data={"t": t, "choice": "read"}).status_code == 400
     )
-    # a verified entry is only proposed: the live entry does not change
+    # a decision on an approved entry is in effect at once too, and is written down
     tracker = librarian.registry.get("tracker")
     assert tracker is not None
     unknown = tracker.operations[0].model_copy(
@@ -385,12 +356,16 @@ async def test_needs_review_operations_are_decided_in_the_console(
         tracker.model_copy(update={"operations": [*tracker.operations, unknown]})
     )
     done = c.post("/apis/tracker/ops/mystery/access", data={"t": t, "choice": "read"})
-    assert done.status_code == 200 and "Proposed for review" in done.text
+    assert done.status_code == 200
+    assert "In effect now; being written to the record." in done.text
     tracker = librarian.registry.get("tracker")
     assert tracker is not None
     mystery = tracker.operation("mystery")
-    assert mystery is not None and mystery.access is Access.UNKNOWN  # unchanged until merged
-    assert pub.proposed == [("tracker", "Issue Tracker: mystery is read")]
+    assert mystery is not None and mystery.access is Access.READ
+    api, message = record.commits[-1]
+    assert api == "tracker" and message.startswith("tracker: mystery is read\n")
+    assert "Decided by someone (console open) in librarian." in message
+    assert record.files["tracker"].operation("mystery").access is Access.READ  # type: ignore[union-attr]
 
 
 async def test_console_pages_have_navigation_and_scoping(librarian: Librarian) -> None:

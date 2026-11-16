@@ -7,7 +7,7 @@ import json
 import logging
 import secrets as pysecrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -49,7 +49,7 @@ from librarian.docs import (
     extract_from_knowledge,
     extract_write_guidance,
 )
-from librarian.drift import Change, diff, proposed_update, review_body, worst
+from librarian.drift import Change, diff, proposed_update, worst
 from librarian.enablement import EnableState, EnableWriteBroker, EnableWriteRequest
 from librarian.executor import CredentialMissing, Executor, PolicyDenied
 from librarian.finddocs import (
@@ -76,10 +76,10 @@ from librarian.openapi import (
 from librarian.opsearch import rank
 from librarian.planner import FetchAnswer, FetchOutcome, Planner
 from librarian.policy import PolicyEngine
-from librarian.publish import Change as EntryChange
 from librarian.publish import GitHubPublisher, Publisher, PublishError
 from librarian.recipes import Recipe, recipe_summary
 from librarian.recipes import learn as learn_recipe
+from librarian.record import Recorder, RecordStatus
 from librarian.registry.models import (
     Access,
     ApiEntry,
@@ -94,7 +94,7 @@ from librarian.registry.models import (
     ReadBasis,
     looks_like_path,
 )
-from librarian.registry.store import Registry
+from librarian.registry.store import Registry, RegistryError
 from librarian.reviews import ReviewBroker, ReviewRequest, ReviewState
 from librarian.secrets import (
     AwsSecretsManagerStore,
@@ -111,6 +111,12 @@ log = logging.getLogger(__name__)
 SYSTEM_CALLER = Caller(agent="librarian", authenticated=True)
 
 AuthRequiredHook = Callable[[CredentialRequest | ConsentRequest], Awaitable[None]]
+
+EntryChange = Callable[[ApiEntry], ApiEntry]
+"""A decision as a function of the entry: applied to the entry as the database has it
+at that moment, so a decision made on another replica a moment earlier is kept."""
+
+UPDATE_KIND = "source-update"  # the freshly learned entry a pending update review is about
 
 
 class LibrarianError(Exception):
@@ -170,24 +176,16 @@ class WriteNotEnabled(WriteRefused):
 
 
 @dataclass
-class Proposal:
-    """What happened to a decision on a verified entry: the proposal it went into,
-    whether it was merged (console decisions are, unless configured otherwise) and why
-    not, when GitHub refused."""
+class Applied:
+    """What happened to a decision. It is saved in the database, so it is in effect on
+    every replica now; `recorded` says whether it is also being written to the external
+    record (an approved API, with a record configured)."""
 
-    link: str | None
-    merged: bool = False
-    problem: str | None = None
+    recorded: bool = False
 
     @property
     def note(self) -> str:
-        if self.link is None:
-            return "no review could be opened (no registry publisher); the entry is unchanged"
-        if self.merged:
-            return "merged; live once the registry syncs"
-        if self.problem:
-            return f"proposed; GitHub refused the merge ({self.problem}); merge it on GitHub"
-        return "proposed for review"
+        return "in effect now" + ("; being written to the record" if self.recorded else "")
 
 
 @dataclass
@@ -208,8 +206,7 @@ class OnboardResult:
     path: Path
     read_operations: int
     needs_review: int
-    review_url: str | None = None
-    review_error: str | None = None
+    review: str | None = None  # the review request approvers were sent, when one opened
 
 
 _FINDING_TITLES = {
@@ -231,8 +228,7 @@ SOURCE_LABELS = {
 class ForgetReport:
     """What forgetting an API did besides dropping the entry."""
 
-    closed: list[str] = field(default_factory=list[str])  # review proposals closed
-    review_error: str | None = None  # why they could not be closed
+    recorded: bool = False  # its file is being removed from the external record
     cancelled: int = 0  # credential requests and write approvals denied
     observations: int = 0  # operations whose observations were dropped
 
@@ -243,7 +239,7 @@ class RecheckReport:
     status: str  # unchanged | changed | skipped | error
     changes: list[Change] = field(default_factory=list[Change])
     actions: list[str] = field(default_factory=list[str])
-    review_url: str | None = None
+    review: str | None = None  # the update review opened for a verified entry
     detail: str | None = None
 
 
@@ -367,7 +363,13 @@ class Librarian:
                 for i, g in enumerate(settings.writes.grants)
             ],
         )
-        self.publisher = publisher if publisher is not None else _default_publisher(settings)
+        self.recorder = Recorder(
+            self.registry,
+            self.audit,
+            publisher=publisher if publisher is not None else _default_publisher(settings),
+            store=self.state,
+        )
+        self._updates: dict[str, ApiEntry] = {}  # pending source updates, without a database
         self.recipes: dict[str, Recipe] = {}
         self._background: set[asyncio.Task[None]] = set()
         self._auto_uses: dict[tuple[str, str, int], int] = {}  # without a database
@@ -419,6 +421,15 @@ class Librarian:
         )
         self._last_recheck_bucket = -1
 
+    @property
+    def publisher(self) -> Publisher | None:
+        """Where decisions are written down (the external record); None: nowhere."""
+        return self.recorder.publisher
+
+    @publisher.setter
+    def publisher(self, value: Publisher | None) -> None:
+        self.recorder.publisher = value
+
     def load(self) -> None:
         self.registry.load()
 
@@ -428,6 +439,8 @@ class Librarian:
         if self.state is not None:
             await self.state.initialize()
             await self.registry.refresh_stored(force=True)
+            # The database is the registry: files are only a way in.
+            await self.registry.import_files()
             await self.observations.load()
             restored = await self.broker.restore()
             if restored:
@@ -451,6 +464,42 @@ class Librarian:
         self.enablement.set_signing_key(key)
         await self.reviews.restore()
         await self.enablement.restore()
+        if self.publisher is not None:
+            self._spawn(self._close_old_proposals())
+
+    def _spawn(self, work: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(work)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _close_old_proposals(self) -> None:
+        """Before 0.20 an approval was a merged pull request. Those still open would
+        suggest GitHub decides; it no longer does, so close them. What they asked for
+        is in the console: learned APIs wait for approval there, and write requests
+        that were enabled but never merged can be applied from the API's page."""
+        publisher = self.publisher
+        if publisher is None:
+            return
+        try:
+            closed = await publisher.close_proposals(
+                "librarian now approves in its own database (0.20): this pull request is "
+                "no longer how the change is approved, so it is closed. Nothing is lost: "
+                "the review continues in librarian's console, and this repository keeps "
+                "receiving every approved decision as a commit."
+            )
+        except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+            log.warning("could not close review pull requests from before 0.20: %s", exc)
+            return
+        if closed:
+            log.info("closed %d review pull request(s) from before 0.20: %s", len(closed), closed)
+            await self.audit.record(
+                AuditEvent(
+                    event="old_proposals_closed",
+                    caller="librarian",
+                    detail=f"{len(closed)} pull request(s)",
+                    extra={"closed": closed},
+                )
+            )
 
     async def _signing_key(self) -> bytes:
         ref = self.settings.signing_key_ref
@@ -470,6 +519,7 @@ class Librarian:
         return key.encode()
 
     async def aclose(self) -> None:
+        await self.recorder.drain()  # decisions still on their way to the record
         await self.http.aclose()
         if self.engine is not None:
             await self.engine.dispose()
@@ -1003,7 +1053,8 @@ class Librarian:
             existing.status is not EntryStatus.PROVISIONAL or not replace_provisional
         ):
             raise LibrarianError(
-                f"API {api_id!r} already exists ({existing.status}); edit it via review"
+                f"API {api_id!r} already exists ({existing.status}); an approver changes it "
+                "in the console"
             )
         if spec_url is None and base_url is None and docs_url is None:
             raise LibrarianError("onboarding needs spec_url, docs_url or base_url")
@@ -1022,14 +1073,6 @@ class Librarian:
         path = await self.registry.save(entry)
         reads = sum(1 for op in entry.operations if op.access is Access.READ)
         review = sum(1 for op in entry.operations if op.access is Access.UNKNOWN)
-        review_url = review_error = None
-        if self.publisher is not None:
-            try:
-                review_url = await self.publisher.publish(entry, caller.agent)
-            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-                # Onboarding still succeeded; the entry is usable as provisional.
-                review_error = f"could not open a review: {exc}"
-                log.warning("publishing %s for review failed: %s", api_id, exc)
         await self.audit.record(
             AuditEvent(
                 event="onboard",
@@ -1038,94 +1081,181 @@ class Librarian:
                 api=api_id,
                 detail=f"{len(entry.operations)} operations ({reads} read, {review} need review)"
                 f" from {entry.source.kind}",
-                extra={"source": entry.source.url, "review_url": review_url}
-                | ({"internal": internal} if internal else {}),
+                extra={"source": entry.source.url} | ({"internal": internal} if internal else {}),
             )
         )
         summary = (
             f"{len(entry.operations)} operations ({reads} reads, {review} need review) from "
             f"{_learned_from(entry)}"
         )
-        all_warnings = warnings + ([internal] if internal else [])
+        opened: ReviewRequest | None = None
         try:
-            if review_url:
-                # The approve-or-deny step: a card with a link to the review page.
-                await self.reviews.open(
-                    api=entry.id,
-                    api_name=entry.name,
-                    host=entry.host,
-                    review_url=review_url,
-                    learned_by=caller.principal or caller.agent,
-                    summary=summary,
-                    auth=_auth_words(entry),
-                    warnings=all_warnings,
-                    needs_review=[op.id for op in entry.operations if op.access is Access.UNKNOWN],
-                    channel=entry.owners.channel,
-                    approver_group=entry.owners.approver_group,
-                )
-            else:
-                await self.notifier.api_learned(
-                    entry.id,
-                    entry.name,
-                    caller.principal or caller.agent,
-                    f"{summary}; auth: {_auth_words(entry)}",
-                    None,
-                    entry.owners.channel,
-                    all_warnings,
-                    review_error,
-                )
+            # The approve-or-deny step: a card with a link to the review page.
+            opened = await self.reviews.open(
+                api=entry.id,
+                api_name=entry.name,
+                host=entry.host,
+                learned_by=caller.principal or caller.agent,
+                summary=summary,
+                auth=_auth_words(entry),
+                warnings=warnings + ([internal] if internal else []),
+                needs_review=[op.id for op in entry.operations if op.access is Access.UNKNOWN],
+                channel=entry.owners.channel,
+                approver_group=entry.owners.approver_group,
+            )
         except Exception as exc:  # a broken notifier must not undo a successful onboarding
             log.warning("could not announce the learned API %s: %s", api_id, exc)
-        return OnboardResult(entry, path, reads, review, review_url, review_error)
+            opened = self.reviews.pending_for(entry.id)
+        return OnboardResult(entry, path, reads, review, opened.id if opened else None)
+
+    async def approve_api(self, api_id: str, by: str) -> tuple[ApiEntry, Applied]:
+        """An approver approves a learned API: it is verified from now on, on every
+        replica. Operations whose access is unknown stay refused until decided."""
+        await self.registry.refresh_stored()
+        entry = self.registry.get(api_id)
+        if entry is None:
+            raise LibrarianError(f"unknown API {api_id!r}")
+        if entry.status is EntryStatus.BLOCKED:
+            raise LibrarianError(f"{api_id!r} is blocked; unblock it first")
+        if entry.status is EntryStatus.VERIFIED:
+            return entry, Applied(recorded=self.recorder.enabled)
+        await self.reviews.refresh()  # the review may have been opened on another replica
+        note = f"\nApproved by {by}."
+        updated, applied = await self._decide(
+            api_id,
+            lambda base: base.model_copy(
+                update={"status": EntryStatus.VERIFIED, "notes": (base.notes + note)[:8000]}
+            ),
+            f"approved ({entry.name})",
+            f"{by} approved {entry.name}: {len(entry.operations)} operations learned from "
+            f"{_learned_from(entry)}, authentication {_auth_words(entry)}.",
+            by,
+        )
+        await self.audit.record(
+            AuditEvent(
+                event="api_approved",
+                caller="console",
+                principal=by,
+                api=api_id,
+                extra={"recorded": applied.recorded},
+            )
+        )
+        pending = self.reviews.pending_for(api_id)
+        if pending is not None and pending.kind == "learned":
+            await self.reviews.decide(
+                pending.id, ReviewState.APPROVED, by, "verified; " + applied.note
+            )
+        return updated, applied
 
     async def approve_review(
         self, review_id: str, by: str, decisions: dict[str, str]
-    ) -> tuple[ReviewRequest, str | None]:
-        """Apply the person's decisions on operations, then merge the proposal as the
-        App. Returns the review and, when GitHub refused the merge, why (the review stays
-        open so the person can merge on GitHub)."""
+    ) -> ReviewRequest:
+        """Apply the person's decisions on operations, then the approval itself: a
+        learned API becomes verified; an update to a verified API is applied. Both take
+        effect at once, in the database."""
         review = await self.reviews.load(review_id)
         if review is None or review.state is not ReviewState.PENDING:
             raise LookupError(f"review {review_id!r} is not pending")
+        if review.kind == "update":
+            await self._apply_update(review, by)
+            note = "the update was applied"
+        else:
+            note = "verified"
         for op_id, choice in decisions.items():
             if op_id in review.needs_review:
                 await self.set_operation_access(review.api, op_id, choice, by)
-        if self.publisher is None:
-            raise LibrarianError("no registry publisher is configured")
-        try:
-            merged = await self.publisher.merge(review.api, by)
-        except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-            await self.audit.record(
-                AuditEvent(
-                    event="review_merge_failed",
-                    caller="console",
-                    principal=by,
-                    api=review.api,
-                    detail=str(exc)[:500],
-                )
+        if review.kind == "update":
+            return await self.reviews.decide(review_id, ReviewState.APPROVED, by, note)
+        _, applied = await self.approve_api(review.api, by)  # closes the review too
+        done = await self.reviews.load(review_id)
+        if done is not None and done.state is ReviewState.PENDING:  # e.g. already verified
+            done = await self.reviews.decide(
+                review_id, ReviewState.APPROVED, by, f"{note}; {applied.note}"
             )
-            return review, str(exc)
-        note = "merged; verified once the registry syncs" if merged else "nothing left to merge"
-        return await self.reviews.decide(review_id, ReviewState.APPROVED, by, note), None
+        return done or review
 
     async def deny_review(self, review_id: str, by: str) -> ReviewRequest:
-        """Close the proposal and drop the API (a person said no)."""
+        """A person said no. A learned API is dropped; for an update, the entry stays
+        as it is (operations suspended meanwhile stay suspended until someone clears
+        them in the console)."""
         review = await self.reviews.load(review_id)
         if review is None or review.state is not ReviewState.PENDING:
             raise LookupError(f"review {review_id!r} is not pending")
         entry = self.registry.get(review.api)
-        note = "closed"
-        if entry is not None and entry.status is EntryStatus.PROVISIONAL:
-            report = await self.forget(review.api, by, close_review=False)  # closes the PR too
-            note = "closed and the API forgotten"
-            if report.review_error:
-                note += f" (could not close the proposal: {report.review_error})"
-        elif self.publisher is not None:
-            try:
-                await self.publisher.withdraw(review.api, f"Denied by {by} (librarian).")
-            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-                note = f"could not close the proposal: {exc}"
+        note = "denied"
+        if review.kind == "update":
+            await self._drop_update(review.api)
+            note = "the entry stays as it is"
+        elif entry is not None and entry.status is EntryStatus.PROVISIONAL:
+            await self.forget(review.api, by, close_review=False)
+            note = "the API was forgotten"
         return await self.reviews.decide(review_id, ReviewState.DENIED, by, note)
+
+    # -- a verified API changed at its source: the update waits for a person --------------
+
+    async def _save_update(self, api_id: str, fresh: ApiEntry) -> None:
+        self._updates[api_id] = fresh
+        if self.state is not None:
+            await self.state.save_doc(
+                UPDATE_KIND, api_id, "pending", fresh.model_dump_json(by_alias=True)
+            )
+
+    async def _load_update(self, api_id: str) -> ApiEntry | None:
+        if self.state is not None:
+            data = await self.state.get_doc(UPDATE_KIND, api_id)
+            return None if data is None or data == "{}" else ApiEntry.model_validate_json(data)
+        return self._updates.get(api_id)
+
+    async def _drop_update(self, api_id: str) -> None:
+        self._updates.pop(api_id, None)
+        if self.state is not None and await self.state.get_doc(UPDATE_KIND, api_id) is not None:
+            await self.state.save_doc(UPDATE_KIND, api_id, "done", "{}")
+
+    async def pending_update(self, api_id: str) -> tuple[ApiEntry, list[Change]] | None:
+        """What approving the API's pending update would make of the entry, and the
+        changes it carries, worked out against the entry as it is now."""
+        entry = self.registry.get(api_id)
+        fresh = await self._load_update(api_id)
+        if entry is None or fresh is None:
+            return None
+        changes = diff(entry, fresh)
+        return proposed_update(entry, fresh, changes), changes
+
+    async def _apply_update(self, review: ReviewRequest, by: str) -> None:
+        await self.registry.refresh_stored()
+        fresh = await self._load_update(review.api)
+        if fresh is None:
+            raise LibrarianError("this update is no longer there; re-check the API's source")
+        count = 0
+
+        def change(base: ApiEntry) -> ApiEntry:
+            # Against the entry as it is now, so decisions made since are kept.
+            nonlocal count
+            changes = diff(base, fresh)
+            count = len(changes)
+            updated = proposed_update(base, fresh, changes)
+            note = f"\n{by} approved an update from the API's source ({count} change(s))."
+            return updated.model_copy(update={"notes": (updated.notes + note)[:8000]})
+
+        _, applied = await self._decide(
+            review.api,
+            change,
+            "updated from its source",
+            f"{by} approved the update librarian found at the API's source:\n"
+            + "\n".join(f"- {c}" for c in review.changes[:50]),
+            by,
+        )
+        await self._drop_update(review.api)
+        await self.audit.record(
+            AuditEvent(
+                event="api_updated",
+                caller="console",
+                principal=by,
+                api=review.api,
+                detail=f"{count} change(s) applied",
+                extra={"recorded": applied.recorded},
+            )
+        )
 
     async def _settle_auth(self, entry: ApiEntry) -> tuple[ApiEntry, list[str]]:
         """A spec that declares no authentication is common even for APIs that need a key
@@ -1177,38 +1307,36 @@ class Librarian:
 
     async def set_auth(
         self, api_id: str, scheme: str, key_name: str | None, by: str
-    ) -> tuple[ApiEntry, str | None]:
-        """A person chose the authentication for a provisional API (the console). Returns
-        the entry and the review link, if a review could be opened."""
+    ) -> tuple[ApiEntry, Applied]:
+        """A person chose the authentication for an API (the console): in effect at
+        once. Returns the entry and what happened to the decision."""
         entry = self.registry.get(api_id)
         if entry is None:
             raise LibrarianError(f"unknown API {api_id!r}")
-        if entry.status is not EntryStatus.PROVISIONAL:
-            raise LibrarianError("only provisional entries change here; verified ones via review")
+        if entry.status is EntryStatus.BLOCKED:
+            raise LibrarianError(f"{api_id!r} is blocked; unblock it first")
         extracted = ExtractedApi.model_validate({"auth": scheme, "auth_key_name": key_name})
         if scheme == "none":
-            updated = entry.model_copy(
-                update={"auth": NoAuth(), "credential": CredentialGuidance()}
-            )
+            chosen = entry.model_copy(update={"auth": NoAuth(), "credential": CredentialGuidance()})
         else:
             auth = auth_from_extracted(extracted, f"{api_id}/readonly")
             if isinstance(auth, NoAuth):
                 raise LibrarianError("that authentication needs a valid header or query name")
-            updated = self._with_auth(entry, auth, f"chosen by {by}")
-        await self.registry.save(updated)
-        proposal = await self._propose(
-            updated,
-            f"{updated.name}: authentication {scheme}",
-            f"{by} set the authentication to {scheme} in the console.",
+            chosen = self._with_auth(entry, auth, f"chosen by {by}")
+        updated, applied = await self._decide(
+            api_id,
             lambda base: base.model_copy(
                 update={
-                    "auth": updated.auth,
-                    "credential": updated.credential,
-                    "notes": updated.notes,
+                    "auth": chosen.auth,
+                    "credential": chosen.credential,
+                    "notes": chosen.notes,
                 }
             ),
+            f"authentication {scheme}",
+            f"{by} set the authentication to {scheme} in the console.",
+            by,
         )
-        link = proposal.link
+        self._auth_notified.discard(api_id)
         await self.audit.record(
             AuditEvent(
                 event="auth_set",
@@ -1216,56 +1344,79 @@ class Librarian:
                 principal=by,
                 api=api_id,
                 detail=scheme,
-                extra={"review_url": link},
+                extra={"recorded": applied.recorded},
             )
         )
-        return updated, link
+        return updated, applied
 
-    async def _propose(
-        self,
-        entry: ApiEntry,
-        title: str,
-        body: str,
-        change: EntryChange | None = None,
-        *,
-        merge: bool = False,
-        by: str = "",
-    ) -> Proposal:
-        """Carry a decision into the entry's review: a new commit on its open proposal
-        when there is one (one pull request per entry), else a new proposal. `change`
-        is the decision as a function, applied to what the proposal already holds so
-        earlier decisions survive. With `merge`, a decision on a verified entry is
-        merged as the App at once (the approver decided in the console)."""
-        if self.publisher is None:
-            return Proposal(None)
-        try:
-            link = await self.publisher.refresh(entry, f"{title}\n\n{body}", change)
-            if link is None:
-                link = await self.publisher.propose_update(entry, title, body)
-        except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-            log.warning("could not carry %s into a review: %s", entry.id, exc)
-            return Proposal(None, problem=str(exc)[:500])
-        if not (
-            merge
-            and entry.status is EntryStatus.VERIFIED
-            and self.settings.publish.merge_console_decisions
-        ):
-            return Proposal(link)
-        try:
-            merged = await self.publisher.merge(entry.id, by)
-        except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-            await self.audit.record(
-                AuditEvent(
-                    event="proposal_merge_failed",
-                    caller="console",
-                    principal=by,
-                    api=entry.id,
-                    detail=str(exc)[:500],
-                    extra={"review_url": link},
-                )
+    async def _decide(
+        self, api_id: str, change: EntryChange, title: str, body: str, by: str
+    ) -> tuple[ApiEntry, Applied]:
+        """Apply a person's decision to an entry. It is saved to the database, which
+        puts it in effect on every replica at once; for an approved API it is then
+        written to the external record, in the background."""
+        await self.registry.refresh_stored()  # decisions made on other replicas
+        entry = self.registry.get(api_id)
+        if entry is None:
+            raise LibrarianError(f"unknown API {api_id!r}")
+        await self.registry.save(change(entry))
+        saved = self.registry.get(api_id) or entry
+        return saved, await self._record(api_id, title, body, by)
+
+    async def _record(self, api_id: str, title: str, body: str, by: str) -> Applied:
+        """Write a decision about an approved API to the external record (when one is
+        configured). An API nobody approved yet is not written down."""
+        if not self.recorder.enabled or not self.registry.approved(api_id):
+            return Applied()
+        message = f"{api_id}: {title}\n\n{body}\n\nDecided by {by} in librarian."
+        return Applied(recorded=await self.recorder.note(api_id, message))
+
+    async def record_now(self, api_id: str, by: str) -> RecordStatus | None:
+        """Write the API's entry to the record now (the console, after a failed write)."""
+        if not self.recorder.enabled:
+            raise LibrarianError("no external record is configured (publish.type)")
+        status = await self.recorder.write_now(api_id)
+        await self.audit.record(
+            AuditEvent(
+                event="record_requested",
+                caller="console",
+                principal=by,
+                api=api_id,
+                detail=(status.error or status.url or "") if status else "",
             )
-            return Proposal(link, problem=str(exc)[:300])
-        return Proposal(link, merged=merged is not None)
+        )
+        return status
+
+    async def restore_from_record(self, by: str, *, replace: bool = False) -> dict[str, Any]:
+        """Bring the entries in the external record into the database: after losing
+        the database, or when moving to a new one. APIs the database already has are
+        left alone unless `replace`. The record is read only here, on request."""
+        publisher = self.publisher
+        if publisher is None:
+            raise LibrarianError("no external record is configured (publish.type)")
+        try:
+            entries, errors = await publisher.read_all()
+        except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
+            raise LibrarianError(f"could not read the record: {exc}") from exc
+        await self.registry.refresh_stored()
+        restored: list[str] = []
+        kept: list[str] = []
+        for entry in entries:
+            if self.registry.get(entry.id) is not None and not replace:
+                kept.append(entry.id)
+                continue
+            await self.registry.save(entry)
+            restored.append(entry.id)
+        await self.audit.record(
+            AuditEvent(
+                event="registry_restored",
+                caller="cli",
+                principal=by,
+                detail=f"{len(restored)} restored, {len(kept)} already there",
+                extra={"restored": restored, "kept": kept, "unreadable": errors},
+            )
+        )
+        return {"restored": restored, "kept": kept, "unreadable": errors}
 
     # -- enabling writes --------------------------------------------------------
 
@@ -1334,13 +1485,13 @@ class Librarian:
         operations: list[str] | None = None,
         approval: str = "each",
         cap: int = 100,
-    ) -> tuple[EnableWriteRequest, str | None]:
-        """An approver enables the operations an agent asked to write: the change goes
-        into the entry's review proposal (approve or deny, as always). `operations`
-        narrows it to some of the request's operations; the rest stay disabled. When the
-        entry has no write credential, `key` says where it comes from: `dedicated` asks
-        for a new `<api>/write` credential through the secure page; `read` uses the read
-        key for writes too. Returns the request and the proposal's link."""
+    ) -> EnableWriteRequest:
+        """An approver enables the operations an agent asked to write: in effect at
+        once (each write still needs approval, a grant, or automatic approval).
+        `operations` narrows it to some of the request's operations; the rest stay
+        disabled. When the entry has no write credential, `key` says where it comes
+        from: `dedicated` asks for a new `<api>/write` credential through the secure
+        page; `read` uses the read key for writes too."""
         request = await self.enablement.load(request_id)
         if request is None or request.state is not EnableState.PENDING:
             raise LookupError("this request is no longer pending")
@@ -1409,34 +1560,27 @@ class Librarian:
                 )
             )
         note = "\n" + " ".join(lines)
-        change = _enable_change(chosen_ids, write_auth, note, auto_ops, cap)
-        updated = change(entry)
-        if entry.status is EntryStatus.PROVISIONAL:
-            await self.registry.save(updated)
         named = ", ".join(o.id for o in chosen[:3]) + (
             f" and {len(chosen) - 3} more" if len(chosen) > 3 else ""
         )
-        proposal = await self._propose(
-            updated,
-            f"{entry.name}: enable writes for {named}",
+        _, applied = await self._decide(
+            entry.id,
+            _enable_change(chosen_ids, write_auth, note, auto_ops, cap),
+            f"enable writes for {named}",
             " ".join(lines),
-            change,
-            merge=True,
-            by=by,
+            by,
         )
-        outcome = "applied now" if entry.status is EntryStatus.PROVISIONAL else proposal.note
+        outcome = applied.note
         if key_request is not None:
             outcome += "; a write credential was asked for"
-        decided = await self.enablement.decide(
+        return await self.enablement.decide(
             request.id,
             EnableState.ENABLED,
             by,
             outcome,
-            review_url=proposal.link,
             key_request=key_request.id if key_request else None,
             enabled=[o.id for o in chosen],
         )
-        return decided, proposal.link
 
     async def enable_operation(
         self,
@@ -1446,7 +1590,7 @@ class Librarian:
         key: str = "dedicated",
         approval: str = "each",
         cap: int = 100,
-    ) -> tuple[EnableWriteRequest, str | None]:
+    ) -> EnableWriteRequest:
         """Enable writes for an operation from the console, without waiting for an agent
         to ask. Joins the pending request for it when there is one."""
         entry = self.registry.get(api_id)
@@ -1466,9 +1610,8 @@ class Librarian:
 
     async def enable_status(self, request_id: str, caller: Caller) -> dict[str, Any]:
         """Where an enable-write request stands, for the agent that asked: pending,
-        enabled (waiting for the review to merge, and maybe for the write credential),
-        live (in effect: writes go through normal approval), declined until a date, or
-        expired."""
+        enabled (decided, but waiting for the write credential), live (in effect: writes
+        go through normal approval), declined until a date, or expired."""
         request = await self.enablement.load(request_id)
         mine = request is not None and any(
             who == caller.agent or who.startswith(f"{caller.agent} (")
@@ -1492,7 +1635,6 @@ class Librarian:
             "live_operations": live,
             "decided_by": request.decided_by,
             "note": request.note,
-            "review_url": request.review_url,
         }
         if request.state is EnableState.PENDING:
             status["state"] = "pending"
@@ -1502,14 +1644,16 @@ class Librarian:
                 status["state"] = "live"
                 status["message"] = "enabled and in effect; writes go through normal approval"
             else:
-                merged = bool(request.note and request.note.startswith("merged"))
-                waits = ["the registry to sync" if merged else "the review to be merged"]
+                waits: list[str] = []
+                if request.review_url:
+                    # Decided before 0.20, in a pull request that was never merged.
+                    waits.append("an approver to apply it in the console")
                 key = self.broker.get(request.key_request) if request.key_request else None
                 if key is not None and key.state is RequestState.PENDING:
                     waits.append("the write credential to be added")
                 status["state"] = "enabled"
-                status["message"] = f"enabled by {request.decided_by}; waiting for " + " and ".join(
-                    waits
+                status["message"] = f"enabled by {request.decided_by}; waiting for " + (
+                    " and ".join(waits) or "the write credential"
                 )
         elif request.state is EnableState.DECLINED:
             status["state"] = "declined"
@@ -1524,9 +1668,9 @@ class Librarian:
         return status
 
     async def unapplied_enables(self, entry: ApiEntry) -> list[EnableWriteRequest]:
-        """Enable-write requests already decided whose operations are not live yet: the
-        proposal is waiting to be merged or the registry to sync, or (before 0.17.2) a
-        later decision overwrote them in the proposal."""
+        """Enable-write requests an approver said yes to before 0.20 that never took
+        effect: back then the decision went into a pull request, and that one was not
+        merged. They can be applied from the console."""
 
         def live(request: EnableWriteRequest) -> bool:
             wanted = request.enabled or request.operations
@@ -1534,20 +1678,21 @@ class Librarian:
                 (op := entry.operation(name)) is not None and op.writable for name in wanted
             )
 
-        return [r for r in await self.enablement.enabled_for(entry.id) if not live(r)]
+        return [
+            r for r in await self.enablement.enabled_for(entry.id) if r.review_url and not live(r)
+        ]
 
     async def reapply_decisions(
         self, api_id: str, by: str
-    ) -> tuple[list[EnableWriteRequest], Proposal]:
-        """Put every enabled-but-not-live write request back into the entry's proposal
-        (and merge it): the repair for proposals where a later decision overwrote an
-        earlier one. Returns the requests re-applied and the proposal."""
+    ) -> tuple[list[EnableWriteRequest], Applied]:
+        """Put write requests that were enabled before 0.20 but never merged into
+        effect. Returns the requests applied and what happened to the decision."""
         entry = self.registry.get(api_id)
         if entry is None:
             raise LibrarianError(f"unknown API {api_id!r}")
         stale = await self.unapplied_enables(entry)
         if not stale:
-            raise LibrarianError("every enabled write request is already live")
+            raise LibrarianError("every enabled write request is already in effect")
         wanted: set[str] = set()
         write_auth: AuthSpec | None = None
         for request in stale:
@@ -1565,21 +1710,21 @@ class Librarian:
             )
         names = sorted(wanted)
         note = (
-            f"\n{by} re-applied enabled write requests to the proposal: "
+            f"\n{by} applied write requests enabled earlier: "
             + ", ".join(f"`{n}`" for n in names)
             + "."
         )
-        change = _enable_change(wanted, write_auth, note)
         named = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
-        proposal = await self._propose(
-            change(entry),
-            f"{entry.name}: re-apply enabled writes for {named}",
-            f"{by} re-applied {len(stale)} enabled write request(s) that were not in the "
-            f"proposal: {', '.join(names)}.",
-            change,
-            merge=True,
-            by=by,
+        _, applied = await self._decide(
+            api_id,
+            _enable_change(wanted, write_auth, note),
+            f"enable writes for {named}",
+            f"{by} applied {len(stale)} write request(s) that were enabled before librarian "
+            f"0.20 but never merged: {', '.join(names)}.",
+            by,
         )
+        for request in stale:
+            await self.enablement.mark_applied(request, applied.note)
         await self.audit.record(
             AuditEvent(
                 event="decisions_reapplied",
@@ -1587,10 +1732,10 @@ class Librarian:
                 principal=by,
                 api=api_id,
                 detail=", ".join(names)[:2000],
-                extra={"review_url": proposal.link, "merged": proposal.merged},
+                extra={"recorded": applied.recorded},
             )
         )
-        return stale, proposal
+        return stale, applied
 
     async def decline_writes(self, request_id: str, by: str, note: str = "") -> EnableWriteRequest:
         """An approver declines: the operation stays refused and the same agents are
@@ -1636,11 +1781,10 @@ class Librarian:
             if not p.allow_slash and looks_like_path(p.name, p.description)
         ]
 
-    async def allow_slashes(self, api_id: str, by: str) -> tuple[ApiEntry, Proposal, list[str]]:
+    async def allow_slashes(self, api_id: str, by: str) -> tuple[ApiEntry, Applied, list[str]]:
         """A person allows "/" in the path parameters that look like paths or refs (the
-        console). Provisional entries change at once; verified ones get a proposal,
-        merged at once by default. Returns the entry, the proposal and the
-        `operation.parameter` names changed."""
+        console): in effect at once. Returns the entry, what happened to the decision
+        and the `operation.parameter` names changed."""
         entry = self.registry.get(api_id)
         if entry is None:
             raise LibrarianError(f"unknown API {api_id!r}")
@@ -1669,17 +1813,13 @@ class Librarian:
                 update={"operations": operations, "notes": (base.notes + note)[:8000]}
             )
 
-        updated = change(entry)
-        if entry.status is EntryStatus.PROVISIONAL:
-            await self.registry.save(updated)
-        proposal = await self._propose(
-            updated,
-            f"{entry.name}: allow slashes in {len(names)} path argument(s)",
+        updated, applied = await self._decide(
+            api_id,
+            change,
+            f"allow slashes in {len(names)} path argument(s)",
             f"{by} allowed '/' in path arguments that are file paths or refs (segments are "
             f"still checked): {', '.join(names)}.",
-            change,
-            merge=True,
-            by=by,
+            by,
         )
         await self.audit.record(
             AuditEvent(
@@ -1688,14 +1828,10 @@ class Librarian:
                 principal=by,
                 api=api_id,
                 detail=", ".join(names)[:2000],
-                extra={
-                    "review_url": proposal.link,
-                    "merged": proposal.merged,
-                    "applied": entry.status is EntryStatus.PROVISIONAL,
-                },
+                extra={"recorded": applied.recorded},
             )
         )
-        return updated, proposal, names
+        return updated, applied, names
 
     async def _auto_count(self, entry: ApiEntry, op: Operation) -> int:
         """Count one automatic write today for this operation, across replicas."""
@@ -1713,12 +1849,10 @@ class Librarian:
 
     async def set_operation_access(
         self, api_id: str, op_id: str, choice: str, by: str, cap: int | None = None
-    ) -> tuple[ApiEntry, Proposal]:
+    ) -> tuple[ApiEntry, Applied]:
         """A person decided what an operation is: `read` (safe to call), `write` (needs
         approval each time), `auto` (writable, approved automatically up to `cap` a day)
-        or `exclude` (agents may not call it). Provisional entries change at once and the
-        decision is carried into the open review; verified entries get it as a proposal,
-        merged at once by default."""
+        or `exclude` (agents may not call it). In effect at once."""
         entry = self.registry.get(api_id)
         if entry is None:
             raise LibrarianError(f"unknown API {api_id!r}")
@@ -1760,16 +1894,12 @@ class Librarian:
                 update={"operations": operations, "notes": (base.notes + note)[:8000]}
             )
 
-        updated = change(entry)
-        if entry.status is EntryStatus.PROVISIONAL:
-            await self.registry.save(updated)
-        proposal = await self._propose(
-            updated,
-            f"{entry.name}: {op_id} is {choice}",
-            f"{by} decided in the console that `{op_id}` is {choice}.",
+        updated, applied = await self._decide(
+            api_id,
             change,
-            merge=True,
-            by=by,
+            f"{op_id} is {choice}",
+            f"{by} decided in the console that `{op_id}` is {what}.",
+            by,
         )
         await self.audit.record(
             AuditEvent(
@@ -1779,19 +1909,16 @@ class Librarian:
                 api=api_id,
                 operation=op_id,
                 detail=choice,
-                extra={
-                    "review_url": proposal.link,
-                    "merged": proposal.merged,
-                    "applied": entry.status is EntryStatus.PROVISIONAL,
-                },
+                extra={"recorded": applied.recorded},
             )
         )
-        return updated, proposal
+        return updated, applied
 
     async def _settle_auth_after_401(self, entry: ApiEntry, status: int) -> ApiEntry | None:
         """An API whose entry says "no authentication" answered 401. Work the scheme out
         and, for a provisional entry, apply it so the credential flow can ask for a key.
-        A verified entry gets an update proposal instead; either way people are told once."""
+        A verified entry is a person's decision: they are told once, with what librarian
+        thinks it is, and choose in the console."""
         inferred: ApiEntry | None = None
         if self.extractor is not None:
             try:
@@ -1817,28 +1944,18 @@ class Librarian:
         if entry.id in self._auth_notified:
             return None
         self._auth_notified.add(entry.id)
-        link = None
         details = [
             f"{entry.name} answered HTTP {status} (not authenticated), but its entry "
             "declares no authentication."
         ]
-        if inferred is not None and self.publisher is not None:
-            try:
-                link = await self.publisher.propose_update(
-                    inferred,
-                    f"{entry.name}: needs authentication ({inferred.auth.type})",
-                    f"The API answered {status}; librarian inferred {inferred.auth.type}.",
-                )
-                details.append(f"Proposed: {inferred.auth.type}. Approve the update.")
-            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-                details.append(f"Could not open an update proposal: {exc}")
-        else:
-            details.append("Choose its authentication in the console (APIs → this API).")
+        if inferred is not None:
+            details.append(f"librarian thinks it uses {inferred.auth.type}.")
+        details.append("Choose its authentication in the console (APIs → this API).")
         await self.notifier.api_changed(
             entry.id,
             "Needs a credential",
             details,
-            link,
+            f"{self.settings.public_url.rstrip('/')}/apis/{entry.id}",
             entry.owners.channel,
             mention_group=entry.owners.approver_group,
         )
@@ -2030,48 +2147,52 @@ class Librarian:
     # -- console actions (a signed-in person; every one is audited) --------------------
 
     async def block(self, api_id: str, by: str) -> ApiEntry:
-        """Stop agents using an API until someone unblocks it. Open review proposals stay
-        open, with a comment saying so."""
-        entry = await self.registry.set_status(api_id, EntryStatus.BLOCKED)
-        extra: dict[str, Any] = {}
-        if self.publisher is not None:
-            try:
-                extra["commented"] = await self.publisher.comment(
-                    api_id,
-                    f"Blocked in the console by {by}: agents are refused until someone "
-                    "unblocks it. This review stays open.",
-                )
-            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-                extra["review_error"] = str(exc)
-                log.warning("could not comment on %s's reviews: %s", api_id, exc)
+        """Stop agents using an API until someone unblocks it."""
+        try:
+            entry = await self.registry.block(api_id)
+        except RegistryError as exc:
+            raise LibrarianError(str(exc)) from exc
+        applied = await self._record(
+            api_id, "blocked", f"{by} blocked {entry.name}: agents are refused.", by
+        )
         await self.audit.record(
-            AuditEvent(event="api_blocked", caller="console", principal=by, api=api_id, extra=extra)
+            AuditEvent(
+                event="api_blocked",
+                caller="console",
+                principal=by,
+                api=api_id,
+                extra={"recorded": applied.recorded},
+            )
         )
         return entry
 
     async def unblock(self, api_id: str, by: str) -> ApiEntry:
-        """Back to its reviewed status, or provisional for a learned API."""
-        reviewed = self.registry.reviewed(api_id)
-        status = EntryStatus.PROVISIONAL
-        if reviewed is not None and reviewed.status is not EntryStatus.BLOCKED:
-            status = reviewed.status
-        entry = await self.registry.set_status(api_id, status)
+        """Back to the status it had before it was blocked."""
+        try:
+            entry = await self.registry.unblock(api_id)
+        except RegistryError as exc:
+            raise LibrarianError(str(exc)) from exc
+        applied = await self._record(
+            api_id, "unblocked", f"{by} unblocked {entry.name}: {entry.status.value} again.", by
+        )
         await self.audit.record(
             AuditEvent(
                 event="api_unblocked",
                 caller="console",
                 principal=by,
                 api=api_id,
-                detail=f"now {status.value}",
+                detail=f"now {entry.status.value}",
+                extra={"recorded": applied.recorded},
             )
         )
         return entry
 
     async def forget(self, api_id: str, by: str, *, close_review: bool = True) -> ForgetReport:
-        """Drop a learned API altogether: the entry, what was observed about it, anything
-        waiting on a person for it, and its open review proposals (closed as the App).
-        The next agent that needs it teaches it again."""
+        """Drop an API altogether: the entry, what was observed about it, anything
+        waiting on a person for it, and its file in the external record. The next agent
+        that needs it teaches it again."""
         report = ForgetReport()
+        await self.reviews.refresh()
         review = self.reviews.pending_for(api_id)
         if review is not None and close_review:
             await self.reviews.decide(review.id, ReviewState.DENIED, by, "the API was forgotten")
@@ -2082,16 +2203,14 @@ class Librarian:
         for approval in [a for a in self.approvals.pending() if a.api == api_id]:
             await self.approvals.deny(approval.id, by)
             report.cancelled += 1
+        was_approved = self.registry.approved(api_id)
         await self.registry.forget(api_id)
+        await self._drop_update(api_id)
         report.observations = await self.observations.forget(api_id)
-        if self.publisher is not None:
-            try:
-                report.closed = await self.publisher.withdraw(
-                    api_id, f"Forgotten in the console by {by}; this proposal is withdrawn."
-                )
-            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-                report.review_error = str(exc)
-                log.warning("could not close %s's reviews: %s", api_id, exc)
+        if was_approved or await self.recorder.status(api_id) is not None:
+            report.recorded = await self.recorder.note(
+                api_id, f"{api_id}: forgotten\n\n{by} forgot this API in librarian."
+            )
         await self.audit.record(
             AuditEvent(
                 event="api_forgotten",
@@ -2099,11 +2218,10 @@ class Librarian:
                 principal=by,
                 api=api_id,
                 extra={
-                    "closed_reviews": report.closed,
+                    "recorded": report.recorded,
                     "cancelled": report.cancelled,
                     "observations": report.observations,
-                }
-                | ({"review_error": report.review_error} if report.review_error else {}),
+                },
             )
         )
         return report
@@ -2204,43 +2322,41 @@ class Librarian:
         changes = diff(entry, fresh)
         if not changes:
             return RecheckReport(api_id, "unchanged", detail="source changed; operations did not")
-        actions, review_url = await self._apply_changes(entry, fresh, changes)
-        details = [f"[{c.severity}] {c.detail}" for c in changes] + actions
-        await self._notify_change(
-            entry,
-            f"{entry.name} changed ({worst(changes)})",
-            details,
-            review_url,
-            urgent=worst(changes) != "additive",
-        )
+        actions, review = await self._apply_changes(entry, fresh, changes)
+        if review is None:
+            # No review card went out (a provisional entry, or it could not be sent).
+            await self._notify_change(
+                entry,
+                f"{entry.name} changed ({worst(changes)})",
+                [f"[{c.severity}] {c.detail}" for c in changes] + actions,
+                f"{self.settings.public_url.rstrip('/')}/apis/{entry.id}",
+                urgent=worst(changes) != "additive",
+            )
         await self.audit.record(
             AuditEvent(
                 event="api_changed",
                 api=api_id,
                 detail=f"{len(changes)} change(s), worst {worst(changes)}",
-                extra={"review_url": review_url, "actions": actions},
+                extra={"review": review, "actions": actions},
             )
         )
-        return RecheckReport(api_id, "changed", changes, actions, review_url)
+        return RecheckReport(api_id, "changed", changes, actions, review)
 
     async def _apply_changes(
         self, entry: ApiEntry, fresh: ApiEntry, changes: list[Change]
     ) -> tuple[list[str], str | None]:
+        """Handle a change at an API's source. Returns what was done at once and the
+        id of the review opened for an approver, if any."""
         actions: list[str] = []
-        review_url: str | None = None
         if entry.status is EntryStatus.PROVISIONAL:
-            # Never reviewed: take the fresh copy (keeping owners and auth) and re-propose.
+            # Nobody approved it yet: take the fresh copy (keeping owners and auth). The
+            # review still open for it shows the entry as it is now.
             updated = _keep_human_fields(entry, fresh)
             await self.registry.save(updated)
             actions.append("the provisional entry was updated to match")
-            if self.publisher is not None:
-                try:
-                    review_url = await self.publisher.publish(updated, "librarian (API changed)")
-                except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-                    actions.append(f"could not open a review: {exc}")
-            return actions, review_url
+            return actions, None
 
-        # Reviewed entries are not changed until a human merges the proposal; until
+        # An approved entry changes only when a person approves the update; until
         # then, operations that may now do something else are held back.
         for change in changes:
             op = entry.operation(change.operation)
@@ -2252,17 +2368,30 @@ class Librarian:
             elif change.severity == "breaking":
                 await self.observations.warn(entry, op, f"API changed: {change.detail}")
                 actions.append(f"callers of {op.id} are warned: {change.detail}")
-        if self.publisher is not None:
-            proposal = proposed_update(entry, fresh, changes)
-            try:
-                review_url = await self.publisher.propose_update(
-                    proposal,
-                    f"registry: `{entry.id}` changed at its source ({worst(changes)})",
-                    review_body(entry, changes, actions),
-                )
-            except (PublishError, httpx.HTTPError, KeyError, ValueError) as exc:
-                actions.append(f"could not open a review: {exc}")
-        return actions, review_url
+        await self._save_update(entry.id, fresh)
+        proposal = proposed_update(entry, fresh, changes)
+        ranked = sorted(changes, key=lambda c: c.severity != "safety")
+        try:
+            review = await self.reviews.open(
+                kind="update",
+                api=entry.id,
+                api_name=entry.name,
+                host=entry.host,
+                learned_by="librarian (re-check of the source)",
+                summary=f"{len(changes)} change(s) at {entry.source.url or 'its source'}; "
+                f"the worst is {worst(changes)}",
+                auth=_auth_words(entry),
+                warnings=actions,
+                changes=[f"[{c.severity}] {c.detail}" for c in ranked][:200],
+                needs_review=[op.id for op in proposal.operations if op.access is Access.UNKNOWN],
+                channel=entry.owners.channel,
+                approver_group=entry.owners.approver_group,
+            )
+        except Exception as exc:  # the update is saved; the console still offers it
+            log.warning("could not announce the update to %s: %s", entry.id, exc)
+            pending = self.reviews.pending_for(entry.id)
+            return actions, pending.id if pending else None
+        return actions, review.id
 
     async def recheck_all_if_due(self) -> list[RecheckReport]:
         """Re-check every entry once per `drift.recheck_hours`, on one replica only."""

@@ -417,7 +417,7 @@ def credential_routes(broker: CredentialBroker, approvers: ApproverSettings) -> 
             return _notice(
                 "ok",
                 f"{req.api_name} write credential added",
-                f"{note} Approved writes use it once the enabled operations are merged.".strip(),
+                f"{note} Approved writes use it from then on.".strip(),
             )
         return _notice(
             "ok",

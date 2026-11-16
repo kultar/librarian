@@ -14,8 +14,9 @@ high-value target. This document lists what we defend against, how, and what is 
 
 | Actor | Trust |
 |---|---|
-| Operator (deploys, configures, reviews registry PRs) | Trusted |
-| Approver (adds credentials via the secure page) | Trusted for the approval action only |
+| Operator (deploys, configures, owns the database and the registry directory) | Trusted |
+| Approver (approves learned APIs, enables writes, adds credentials, on the signed-in pages) | Trusted for those decisions |
+| The record repository on GitHub | **Not trusted as input**: written to, never read back |
 | Calling agent | **Untrusted input**, authenticated by key |
 | API responses | **Untrusted input**, may contain prompt injection |
 | Downloaded OpenAPI specs / community registry entries | **Untrusted input** |
@@ -67,15 +68,15 @@ high-value target. This document lists what we defend against, how, and what is 
 - **Search results are untrusted too.** Docs found by search are ranked by trust (the API's own
   domain, then well-known docs hosts); third-party sites are not even fetched unless allowed,
   and a redirect off the official site makes a page third-party. The source and its trust
-  level are recorded on the entry and shown in the review PR. The model's own search must
+  level are recorded on the entry and shown on the review page. The model's own search must
   visibly run (a search call in the reply), so an answer from memory is never mistaken for one.
 - **Residual risk:** a docs page can describe a real GET operation misleadingly (e.g. one with
   side effects). This is the same trust level as an agent-supplied OpenAPI spec: provisional
   entries only allow GET/HEAD to the given host, and review before `verified` is the control.
 
 ### T3. Credential theft
-- **Registry repo access.** Prefer the GitHub App: its installation tokens last under an hour and
-  are requested for the registry repo only, with contents and pull requests permissions. Its
+- **Record repository access.** Prefer the GitHub App: its installation tokens last under an hour and
+  are requested for the record repository only, with contents and pull requests permissions. Its
   private key is the long-lived secret: keep it in a Kubernetes Secret (or Secrets Manager via
   ExternalSecrets), mounted read-only. `github-app create` writes it to an owner-only file and
   never prints it; its one-time callback listens on 127.0.0.1 and checks a random `state`.
@@ -119,7 +120,7 @@ high-value target. This document lists what we defend against, how, and what is 
   `*.internal.example.com`): they may resolve to private addresses, but never to loopback or
   link-local, and DNS pinning still applies. A pattern can't be a bare `*`.
 - Internal APIs belong in human-reviewed `verified` entries; keep `allow_private_networks` off
-  and list only the domains you mean in `internal_hosts`. The review PR and the audit log say
+  and list only the domains you mean in `internal_hosts`. The review page and the audit log say
   when an entry was learned under such a pattern.
 
 The console (the pages listener's root) lists every API, pending request and grant, with
@@ -128,13 +129,34 @@ re-learn, re-check, clear). It needs a signed-in approver (or `approvers.console
 for a laptop) and never appears on the A2A listener alone. Each action form carries a token
 bound to the signed-in person (an HMAC with the link-signing key), so a page on another site
 cannot submit it for them, and each action is written to the audit log with who did it.
-Re-learning goes through the normal onboarding path (provisional entry, review pull request);
-verified entries only change through the registry repo.
+Re-learning goes through the normal onboarding path (provisional entry, a review for the
+approvers); a verified entry changes only by an approver's decision in the console or on an
+approval page.
 
 The review of a learned API works the same way: a one-time link to a page where a signed-in
-approver approves (librarian merges the proposal as the App) or denies. The proposal is written
-as `status: verified`, so merging is the approval; operations whose access is unknown stay
-unknown, hence refused, until a person decides them on that page or in the console.
+approver approves or denies. Approving sets `status: verified` in the database; operations whose
+access is unknown stay unknown, hence refused, until a person decides them on that page or in
+the console.
+
+**Where authority sits (since 0.20).** What agents may do is decided by the entries in
+librarian's database and nowhere else. The people who can change them are the approvers
+(`approvers.group`, signed in through the proxy), each decision bound to their identity and
+audited; and the operator, through the database, the config and the registry directory.
+- The record repository is an output. librarian commits each approved decision there and does
+  not read it back, so write access to that repository (a merged pull request, a force-push, a
+  compromised token) cannot enable a write, verify an API or change a host. Before 0.20 a merge
+  there *was* the approval; that path is gone.
+- This also removes a control some deployments added on top: a required human review on the
+  registry repository. If you relied on that as a second approval, the approver group is now
+  the only gate: keep it small, and keep `approvers.mode: trusted_header` (not `token`, where
+  holding a link is enough) anywhere real credentials are at stake.
+- `librarian registry restore` is the one path from the record back into the database. It is a
+  command the operator runs on purpose, and it trusts the repository's content as it is at
+  that moment: check the repository's history before restoring from it.
+- Registry files (`registry_dir`) are operator configuration: a file's `status` is taken as
+  written when it is imported. A file cannot overrule a decision made in librarian (the
+  database's entry wins and the console flags the file), but a new file can add a verified
+  entry, so guard that directory, and any repository synced into it, like the config.
 
 ### T5. Approval-link abuse
 - Links are HMAC tokens bound to one request, valid only while it is pending and until expiry,
@@ -150,12 +172,12 @@ unknown, hence refused, until a person decides them on that page or in the conso
 ### T6. Malicious or broken registry entries
 - Strict validation: unknown fields rejected, absolute/protocol-relative paths rejected, base URLs
   cannot embed credentials, file names must match ids, invalid files are skipped not fatal.
-- Review registry changes by pull request; run `librarian registry validate` in CI.
+- Hand-written entries: review them like code and run `librarian registry validate` in CI.
 
 - **APIs change under a reviewed entry.** Re-checks compare the source with the entry; an
   operation whose HTTP method changed, or a writable one whose request changed, is suspended
-  until a reviewer merges the proposed update. Suspensions live in the state database (tied to
-  the operation's definition), so they cannot be undone by a registry file being re-synced.
+  until an approver approves the update (or clears the suspension). Suspensions live in the
+  state database, tied to the operation's definition.
 
 ### T7. Abuse / resource exhaustion
 - Per-(caller, API) rate limits, request timeouts, response size caps, spec size caps, operation

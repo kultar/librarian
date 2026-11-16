@@ -62,8 +62,10 @@ persistence:
   existingClaim: ""
 
 registry:
-  # Keep the registry in a git repo you review by pull request; git-sync pulls merged
-  # changes and librarian hot-reloads them.
+  # Optional: bring hand-written entries in from a git repo. git-sync pulls it and librarian
+  # imports new files into its database, which is the registry (a file never overrules a
+  # decision made in librarian). Not needed for the record that githubApp writes: librarian
+  # does not read that back, so leave this off unless you keep hand-written entries in git.
   gitSync:
     enabled: false
     image: registry.k8s.io/git-sync/git-sync:v4.4.0
@@ -76,11 +78,15 @@ registry:
     credentialsSecret: ""
     resources: {}
 
-# A GitHub App for the registry repo (create one with `librarian github-app create
-# --repo owner/name`; it prints these values). git-sync reads the repo with it and
-# librarian opens review pull requests with it. Needs registry.gitSync.
+# The external record. Approvals and every later decision are made in librarian's database;
+# with this on, each one is also committed to a GitHub repository (one YAML file per API, one
+# commit per decision, saying who decided), so the registry also lives outside the database.
+# Nothing is read back from it. Create the App with `librarian github-app create --repo
+# owner/name`; it prints these values. (git-sync, when enabled, reads its repo with the
+# same App.)
 githubApp:
   enabled: false
+  repo: ""                  # owner/name of the record repository (default: registry.gitSync.repo)
   appId: ""                 # e.g. "123456" (quote them: YAML numbers this large render badly)
   installationId: ""        # e.g. "987654321"
   secretName: ""            # Secret holding the App's private key

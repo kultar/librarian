@@ -14,9 +14,8 @@ from librarian.executor import PolicyDenied
 from librarian.openapi import entry_from_spec
 from librarian.registry.models import ApiEntry, Parameter, looks_like_path
 from librarian.service import Librarian
-from tests.conftest import BASE, Router
+from tests.conftest import BASE, RecordPublisher, Router
 from tests.test_console import console, token
-from tests.test_enable_writes import ProposalPublisher
 
 FILES: dict[str, Any] = {
     "id": "files",
@@ -172,33 +171,32 @@ async def test_console_allows_slashes_in_path_like_parameters(
     librarian: Librarian, files: ApiEntry, audit: MemoryAuditSink
 ) -> None:
     librarian.settings.approvers.console = "open"
-    pub = ProposalPublisher()
-    librarian.publisher = pub
+    record = RecordPublisher()
+    librarian.publisher = record
     c = console(librarian)
     t = token(librarian)
     page = c.get("/apis/files").text
     assert "Slashes in path arguments" in page and "getRef.ref" in page
     assert "getContent.path" not in page  # already allowed
     done = c.post("/apis/files/slashes", data={"t": t})
-    assert (
-        done.status_code == 200 and "getRef.ref" in done.text and "Proposed for review" in done.text
-    )
-    proposed, title = pub.entries[-1]
-    assert title == "Files: allow slashes in 1 path argument(s)"
-    ref = next(p for p in proposed.operation("getRef").parameters if p.name == "ref")
-    assert ref.allow_slash and "allowed '/' in path arguments" in proposed.notes
+    assert done.status_code == 200 and "getRef.ref" in done.text
+    assert "In effect now; being written to the record." in done.text
     live = librarian.registry.get("files")
     assert live is not None
-    assert not next(p for p in live.operation("getRef").parameters if p.name == "ref").allow_slash  # type: ignore[union-attr]
+    ref = next(p for p in live.operation("getRef").parameters if p.name == "ref")  # type: ignore[union-attr]
+    assert ref.allow_slash and "allowed '/' in path arguments" in live.notes
+    api, message = record.commits[-1]
+    assert api == "files" and message.startswith("files: allow slashes in 1 path argument(s)\n")
     assert audit.events[-1].event == "slashes_allowed" and audit.events[-1].detail == "getRef.ref"
     nothing = c.post("/apis/tracker/slashes", data={"t": t})
     assert nothing.status_code == 400 and "no path parameter looks like" in nothing.text
-    # a provisional entry changes at once
+    # a provisional entry changes at once too, but nobody approved it: not written down
     await librarian.registry.save(
         ApiEntry.model_validate({**FILES, "id": "files2", "status": "provisional"})
     )
     applied = c.post("/apis/files2/slashes", data={"t": t})
-    assert applied.status_code == 200 and "Applied now" in applied.text
+    assert applied.status_code == 200 and "In effect now." in applied.text
+    assert [api for api, _ in record.commits] == ["files"]
     changed = librarian.registry.get("files2")
     assert changed is not None
     assert next(p for p in changed.operation("getRef").parameters if p.name == "ref").allow_slash  # type: ignore[union-attr]

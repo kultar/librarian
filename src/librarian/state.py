@@ -109,17 +109,23 @@ async def retry_already_exists(setup: Callable[[], Awaitable[None]]) -> None:
     """Run a schema setup step, tolerating another replica doing it at the same moment.
 
     `create_all` checks before creating, so two replicas starting together can both
-    decide to create a table; the loser gets "already exists". Retrying succeeds
-    because the check then sees the table.
+    decide to create a table; the loser gets "already exists" or, from Postgres when the
+    two CREATE TABLEs overlap, a duplicate key in its own catalogue
+    (`pg_type_typname_nsp_index`). Retrying succeeds because the check then sees the table.
     """
     for attempt in range(5):
         try:
             await setup()
             return
         except DBAPIError as exc:
-            if "already exists" not in str(exc).lower() or attempt == 4:
+            if not _lost_the_race(exc) or attempt == 4:
                 raise
             await asyncio.sleep(0.2 * (attempt + 1))
+
+
+def _lost_the_race(exc: DBAPIError) -> bool:
+    text = str(exc).lower()
+    return "already exists" in text or ("duplicate key" in text and "pg_" in text)
 
 
 class StateStore:

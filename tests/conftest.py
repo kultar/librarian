@@ -11,6 +11,8 @@ import yaml
 from librarian.audit import MemoryAuditSink
 from librarian.config import Settings
 from librarian.credentials import CredentialRequest, Notifier
+from librarian.publish import PublishError
+from librarian.registry.models import ApiEntry
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian
 
@@ -117,7 +119,6 @@ OPEN: dict[str, Any] = {
 
 class RecordingNotifier(Notifier):
     def __init__(self) -> None:
-        self.learned: list[dict[str, Any]] = []
         self.reviews: list[tuple[str, Any, str | None]] = []
         self.consents: list[tuple[str, Any, str | None]] = []
         self.opened_links: list[str] = []
@@ -171,29 +172,6 @@ class RecordingNotifier(Notifier):
     async def enable_closed(self, request: Any) -> None:
         self.enables.append(("closed", request, None))
 
-    async def api_learned(
-        self,
-        api: str,
-        name: str,
-        learned_by: str,
-        summary: str,
-        link: str | None,
-        channel: str | None,
-        warnings: list[str],
-        error: str | None = None,
-    ) -> None:
-        self.learned.append(
-            {
-                "api": api,
-                "learned_by": learned_by,
-                "summary": summary,
-                "link": link,
-                "channel": channel,
-                "warnings": warnings,
-                "error": error,
-            }
-        )
-
     async def api_changed(
         self,
         api: str,
@@ -206,6 +184,50 @@ class RecordingNotifier(Notifier):
         self.changes.append(
             {"api": api, "title": title, "details": details, "link": link, "group": mention_group}
         )
+
+
+class RecordPublisher:
+    """An external record kept in memory: what a repository would hold, and every
+    commit made to it."""
+
+    def __init__(self) -> None:
+        self.files: dict[str, ApiEntry] = {}
+        self.commits: list[tuple[str, str]] = []  # (api, commit message)
+        self.fail: str | None = None  # the repository refuses writes, saying this
+        self.unreadable: dict[str, str] = {}
+        self.old_proposals: list[str] = []  # pull requests left by a librarian before 0.20
+        self.closed_with: str | None = None
+
+    def _url(self) -> str:
+        return f"https://github.test/acme/registry/commit/{len(self.commits)}"
+
+    async def record(self, entry: ApiEntry, message: str) -> str:
+        if self.fail:
+            raise PublishError(self.fail)
+        if self.files.get(entry.id) == entry:
+            return f"https://github.test/acme/registry/blob/main/registry/{entry.id}.yaml"
+        self.files[entry.id] = entry
+        self.commits.append((entry.id, message))
+        return self._url()
+
+    async def remove(self, api_id: str, message: str) -> str | None:
+        if self.fail:
+            raise PublishError(self.fail)
+        if api_id not in self.files:
+            return None
+        del self.files[api_id]
+        self.commits.append((api_id, message))
+        return self._url()
+
+    async def read_all(self) -> tuple[list[ApiEntry], dict[str, str]]:
+        if self.fail:
+            raise PublishError(self.fail)
+        return list(self.files.values()), dict(self.unreadable)
+
+    async def close_proposals(self, reason: str) -> list[str]:
+        closed, self.old_proposals = self.old_proposals, []
+        self.closed_with = reason
+        return closed
 
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -286,5 +308,8 @@ def librarian(
         notifier=notifier,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(router)),
     )
+    # Decisions are written to the record before the call returns, so tests can look
+    # at it straight away (the server does it in the background).
+    lib.recorder.background = False
     lib.load()
     return lib

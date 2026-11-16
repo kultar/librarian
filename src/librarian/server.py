@@ -370,8 +370,7 @@ class LibrarianExecutor(AgentExecutor):
                 "needs_review": outcome.needs_review,
                 "auth": outcome.entry.auth.type,
                 "learned_from": outcome.entry.source.kind,
-                "review_url": outcome.review_url,
-                "review_error": outcome.review_error,
+                "review": "approvers were asked to approve it" if outcome.review else None,
             }
         if skill == "fetch":
             intent = command.get("intent")
@@ -697,6 +696,7 @@ async def _sweep_forever(librarian: Librarian) -> None:
             if librarian.registry.reload_if_changed():
                 log.info("registry reloaded: %d APIs", len(librarian.registry.all()))
             await librarian.registry.refresh_stored()  # changes saved by other replicas
+            await librarian.registry.import_files()  # new registry files, into the database
         except Exception:
             log.exception("registry reload failed")
         if ticks % 240 == 0:  # about hourly
@@ -708,8 +708,13 @@ async def _sweep_forever(librarian: Librarian) -> None:
             try:
                 await librarian.broker.sweep()
                 await librarian.enablement.sweep()
+                await librarian.reviews.refresh()
             except Exception:
                 log.exception("credential sweep failed")
+            try:
+                await librarian.recorder.retry_due()  # decisions GitHub did not take yet
+            except Exception:
+                log.exception("writing to the record failed")
             try:
                 # Pick up suspensions, confirmations and recipes from other replicas.
                 await librarian.observations.load()

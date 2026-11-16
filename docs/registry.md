@@ -153,17 +153,77 @@ issue. This keeps large responses under the size cap and saves LLM context.
 
 ## Lifecycle
 
-1. **Onboard**: `librarian learn <id> --spec-url ...` (or the `onboard` A2A skill) writes a
-   provisional entry. Search-like POSTs are listed in `notes` for review. With publishing
-   configured, a pull request with a review checklist is opened automatically.
-2. **Review**: a human checks base URL, auth, and any operations to promote, then sets
-   `status: verified` in the pull request. Once merged and synced, the running librarian
-   hot-reloads the file. The review is approve or deny: the authentication and the operations
-   that need a decision are settled in the console, and each decision lands as a commit on
-   the open pull request. Branch protection on `main` (pull requests only, approving reviews,
-   code owners) is compatible: librarian pushes only `librarian/*` branches, which must stay
-   unprotected so the App can create them.
-3. **Block**: denying a credential request sets `status: blocked` so agents stop asking.
-4. **Change**: re-checks (`drift.recheck_hours`) compare the entry with its source. Provisional
-   entries follow the source; for verified entries librarian opens an update pull request and
-   suspends risky operations until it is merged (see the README).
+Entries live in librarian's database, and so does every decision about them. A decision is in
+effect on every replica the moment a person makes it.
+
+1. **Onboard**: `librarian learn <id> --spec-url ...` (or the `onboard` A2A skill) saves a
+   provisional entry and asks the approvers to review it (a Slack card, a console to-do).
+   Search-like POSTs are listed in `notes` and on the review page.
+2. **Review**: an approver checks base URL, auth and the operations that need a decision on
+   the review page (or the API's page in the console), and approves or denies. Approving makes
+   the entry `verified` at once; denying forgets the API. Nobody edits YAML.
+3. **Decide later**: enabling writes, changing an operation's access, allowing slashes, the
+   authentication: each is a click in the console or on an approval page, saved to the
+   database and in effect at once.
+4. **Block**: denying a credential request sets `status: blocked` so agents stop asking;
+   unblocking returns the entry to what it was.
+5. **Change**: re-checks (`drift.recheck_hours`) compare the entry with its source. Provisional
+   entries follow the source; for verified entries librarian suspends risky operations and
+   asks an approver to approve the update (see the README).
+6. **Forget**: any API can be dropped from the console; the next agent that needs it teaches
+   it again.
+
+## The record (GitHub)
+
+With `publish.type: github`, every approved entry and every later decision about it is also
+committed to a repository: `<directory>/<id>.yaml`, one commit per decision, with what was
+decided and by whom in the message. Forgetting an API deletes its file. The record exists so
+the registry lives somewhere outside the database; **librarian never reads it back**, so
+nothing edited or merged there changes what agents may do.
+
+- The write happens after the decision, in the background. If GitHub refuses or is down the
+  decision still stands; the console lists what is not written yet and why, librarian retries
+  (after 2 minutes, then 4, 8, ... up to an hour), and the API's page offers *Write it now*.
+- librarian commits to the base branch. If a rule there only allows pull requests, it opens
+  one from a `librarian/record-<id>-...` branch and merges it as the App in the same step, so
+  `librarian/*` branches must stay unprotected and the App must be allowed to merge (no
+  required review for it: add the App to the rule's bypass list). A pull request a rule kept
+  from merging is reused for the next decision, so there is at most one per API.
+- Provisional (unapproved) APIs are not written. Neither is the glossary, which holds names
+  read from the API with its credential.
+- **Restoring.** `librarian registry restore` brings the record's entries into the database:
+  after losing the database, or when moving to a new one. Entries the database already has are
+  kept unless you pass `--replace`. This is the only time the record is read.
+
+## Registry files
+
+`registry_dir` holds entries written by hand, in the format on this page.
+
+- **Without a database** (`database_url: null`) the files are the registry; librarian saves its
+  own changes there too (or into `registry_overlay_dir`).
+- **With a database** (the default) files are imported into it. A new file is imported at start
+  and whenever it appears. An edited file is imported again as long as nobody has decided
+  anything about that API in librarian (glossary updates do not count); once someone has, the
+  database's entry is used, the console says the file is being ignored, and forgetting the API
+  imports the file afresh. Deleting a file does not remove the API: forget it in the console.
+
+A file's `status` is taken as written, so whoever can change those files can add a verified
+entry: treat the directory like the config file. Keeping hand-written entries in a git
+repository pulled by git-sync (the chart's `registry.gitSync`) still works; do not point it at
+the record's directory, which librarian writes itself.
+
+## Upgrading from 0.19 or earlier
+
+Before 0.20 the reviewed registry was a git repository: approving meant merging a pull request,
+and git-sync brought the result back. On the first start of 0.20:
+
+- every entry in the registry directory is imported into the database, and librarian's own
+  earlier changes (blocks, glossaries) are kept exactly as 0.19 applied them;
+- review pull requests that librarian left open are closed with a comment saying where the
+  review continues: learned APIs still wait under *Waiting* in the console, and write requests
+  that were enabled but never merged show up on the API's page with an *Apply* button;
+- the repository keeps receiving every decision, now as commits.
+
+So upgrade with git-sync still on, check the console lists your APIs, and then switch
+`registry.gitSync` off (set `githubApp.repo` to the repository). If the files were already gone
+when 0.20 first started, run `librarian registry restore` once.

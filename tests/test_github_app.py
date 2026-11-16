@@ -144,7 +144,9 @@ async def test_publisher_uses_minted_tokens() -> None:
     auth = GitHubAppAuth("777", PEM, REPO, client=http)
     publisher = GitHubPublisher(REPO, auth, client=http)
     entry = entry_from_spec(SPEC, api_id="jira", spec_url="https://x.example/spec.json")
-    assert await publisher.publish(entry, "agent") == "https://github.test/pr/1"
+    assert await publisher.record(entry, "jira: approved") == (
+        "https://github.com/acme/api-registry/blob/main/registry/jira.yaml"
+    )
     publisher_calls = [
         c
         for c in fake.calls

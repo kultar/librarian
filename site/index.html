@@ -78,11 +78,11 @@ docker pull ghcr.io/kultar/librarian:0.19.1</code></pre></div>
     <path class="hot" d="M260 180V212M175 212H452M175 212V230M322 212V230M452 212V230"/>
     <g class="lbl">
       <rect class="box" x="100" y="230" width="150" height="70" rx="8"/>
-      <text x="112" y="253">registry (git)</text><text class="sub" x="112" y="271">what each API is,</text><text class="sub" x="112" y="286">which operations are reads</text>
+      <text x="112" y="253">registry (database)</text><text class="sub" x="112" y="271">what each API is,</text><text class="sub" x="112" y="286">which operations are reads</text>
       <rect class="box" x="262" y="230" width="120" height="70" rx="8"/>
       <text x="274" y="253">secret store</text><text class="sub" x="274" y="271">keys people add;</text><text class="sub" x="274" y="286">agents see references</text>
       <rect class="box" x="394" y="230" width="116" height="70" rx="8"/>
-      <text x="406" y="253">people</text><text class="sub" x="406" y="271">review the registry,</text><text class="sub" x="406" y="286">add keys, approve writes</text>
+      <text x="406" y="253">people</text><text class="sub" x="406" y="271">approve what was learned,</text><text class="sub" x="406" y="286">add keys, approve writes</text>
     </g>
   </svg>
 </div>
@@ -93,9 +93,9 @@ docker pull ghcr.io/kultar/librarian:0.19.1</code></pre></div>
     <p>Nothing is set up per API in advance. The registry fills itself as agents need things, and a person is asked only when a key is missing or data would change.</p>
     <ol class="ledger">
       <li><div><h3>An agent asks for data from an API librarian doesn't know yet</h3><p>Over A2A or MCP, through a gateway such as LiteLLM or directly. The agent names the API and what it wants; it never names a host, so it can't point librarian anywhere else.</p></div></li>
-      <li><div><h3>librarian learns the API</h3><p>From its OpenAPI spec, else its documentation (found by itself if needed, with every extracted operation quote-checked against the page), else the model's own knowledge. Reads work at once; a pull request is opened on your registry repo so a person can review the entry.</p></div></li>
+      <li><div><h3>librarian learns the API</h3><p>From its OpenAPI spec, else its documentation (found by itself if needed, with every extracted operation quote-checked against the page), else the model's own knowledge. Reads work at once; approvers are asked to review the entry, and approving makes it verified there and then.</p></div></li>
       <li><div><h3>If the API needs a key, a person is asked once</h3><p>The agent's task waits and approvers get a Slack card. Someone follows the one-time link, signs in and pastes the key. It goes straight to your secret store, never through Slack, an agent or a model, and the task carries on by itself. When the API needs the person's own sign-in instead, the person behind the agent gets the link, signs in to the provider once, and every later request for them carries their own token.</p></div></li>
-      <li><div><h3>Writes wait for a person's approval</h3><p>The approval page shows exactly what will be sent: method, path, arguments and body. Approve once, allow similar writes with a narrow grant that lasts as long as the approver chooses, or decide once that an operation's writes are approved automatically, up to a daily cap and with one click back. DELETEs can only ever be approved one at a time. A write nobody has enabled yet is not refused silently: approvers get a card, enable the whole flow, and their decision is merged into the registry at once.</p></div></li>
+      <li><div><h3>Writes wait for a person's approval</h3><p>The approval page shows exactly what will be sent: method, path, arguments and body. Approve once, allow similar writes with a narrow grant that lasts as long as the approver chooses, or decide once that an operation's writes are approved automatically, up to a daily cap and with one click back. DELETEs can only ever be approved one at a time. A write nobody has enabled yet is not refused silently: approvers get a card, enable the whole flow, and their decision is in effect at once.</p></div></li>
     </ol>
   </div>
 </section>
@@ -106,7 +106,7 @@ docker pull ghcr.io/kultar/librarian:0.19.1</code></pre></div>
     <p>Three kinds of access, chosen per API, and none of them ever in an agent's hands.</p>
     <dl class="rules">
       <div><dt>A shared read-only key</dt><dd>Added once by an approver on a one-time page, straight into your secret store. Every agent's reads use it, within policy. Agents, logs and the model only see a reference like <code>jira/readonly</code>.</dd></div>
-      <div><dt>A separate write credential</dt><dd>Reviewed into the entry, and used only after a person approves that exact write, a narrow grant covers it, or an approver chose automatic approval for that operation, capped per day. DELETE is never granted or automatic.</dd></div>
+      <div><dt>A separate write credential</dt><dd>Enabled by an approver, and used only after a person approves that exact write, a narrow grant covers it, or an approver chose automatic approval for that operation, capped per day. DELETE is never granted or automatic.</dd></div>
       <div><dt>The person's own sign-in</dt><dd>For APIs where what you see depends on who you are: librarian is the OAuth client, each person signs in once in their browser, and every request their agents make for them carries their own token, so the API enforces their access. Tokens are stored per person, refreshed by librarian, never shown to agents, and a request for one person can never go out with another's token. People see and drop their own sign-ins in the console.</dd></div>
     </dl>
   </div>
@@ -121,7 +121,7 @@ docker pull ghcr.io/kultar/librarian:0.19.1</code></pre></div>
       <figure><img src="assets/screens/console-api.png" alt="An API page with search, needs-attention operations and groups by tag" loading="lazy"><figcaption>A large API: search, the operations needing a decision first, then groups by tag.</figcaption></figure>
       <figure><img src="assets/screens/console-activity.png" alt="The Activity page: seven-day numbers, the busiest APIs and recent events" loading="lazy"><figcaption>Activity: what agents did through librarian, and what it cost.</figcaption></figure>
       <figure><img src="assets/screens/enable-flow.png" alt="The enable page for a write flow: operations with ticks, the approval choice, the write credential choice" loading="lazy"><figcaption>An agent wanted a write nobody had enabled: enable the whole flow, choose how writes are approved and where the write credential comes from.</figcaption></figure>
-      <figure><img src="assets/screens/review.png" alt="The review page for a learned API" loading="lazy"><figcaption>Approving a learned API from the Slack card: decide the open operations, then merge as the App.</figcaption></figure>
+      <figure><img src="assets/screens/review.png" alt="The review page for a learned API" loading="lazy"><figcaption>Approving a learned API from the Slack card: decide the open operations, then approve. It is verified at once.</figcaption></figure>
       <figure><img src="assets/screens/approve-write.png" alt="A write approval page" loading="lazy"><figcaption>Approving one write: method, path, arguments and body, nothing hidden.</figcaption></figure>
     </div>
   </div>
@@ -152,6 +152,7 @@ docker pull ghcr.io/kultar/librarian:0.19.1</code></pre></div>
       <div><dt>Writes need a person</dt><dd>A verified registry entry, a separate write credential, and a human approval or a grant pinned to an agent, a person and an operation. Each write is sent once, with no redirects and an idempotency key, and claimed atomically so replicas never run it twice. A repeat with the same key, on any replica, gets the first result instead of a second run.</dd></div>
       <div><dt>Untrusted input is fenced</dt><dd>The API host only ever comes from the caller's <code>base_url</code>, never from documentation or search results. Read versus write is decided by HTTP method. Search results are trust-ranked and third-party sites are skipped by default.</dd></div>
       <div><dt>No way out to your network</dt><dd>An SSRF guard with DNS pinning refuses private addresses unless you allow them, redirects stay on the same origin, and response sizes are capped.</dd></div>
+      <div><dt>Decisions are made in one place</dt><dd>What agents may do is decided by signed-in approvers on librarian's own pages and stored in its database, in effect on every replica at once. A GitHub repository receives a commit for every decision, saying who decided what, but it is only ever written to: nothing edited or merged there changes what agents may do.</dd></div>
       <div><dt>Approval pages are locked down</dt><dd>A separate listener behind your SSO proxy, one-time HMAC links that expire, a strict content security policy with no external resources, and every decision recorded with who made it. The console on the same listener shows credential references only, and every action there is audited too.</dd></div>
     </dl>
     <p style="margin-top:24px">The full <a href="https://github.com/kultar/librarian/blob/main/docs/threat-model.md">threat model</a> lists each threat and its mitigation.</p>
@@ -174,7 +175,7 @@ docker compose up -d
       </div>
       <div>
         <h3>For your team</h3>
-        <p>A Helm chart with oauth2-proxy sign-in, git-sync for the registry, Postgres for shared state and AWS Secrets Manager for keys. Two or more replicas, no volumes, nothing exposed to the internet.</p>
+        <p>A Helm chart with oauth2-proxy sign-in, Postgres for the registry and every decision, AWS Secrets Manager for keys, and a GitHub repository that receives a commit for each approved decision. Two or more replicas, no volumes, nothing exposed to the internet.</p>
 <pre><code>helm install librarian oci://ghcr.io/kultar/charts/librarian \
   --version 0.19.1 -n librarian -f values.yaml
 helm test librarian -n librarian</code></pre>
@@ -219,9 +220,9 @@ mcp_servers:
     <h2>Documentation</h2>
     <ul class="docs">
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Getting started</a><span>The laptop walkthrough with Docker Compose.</span></li>
-      <li><a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a><span>Kubernetes, step by step: registry App, Slack, SSO, secrets, database, replicas.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a><span>Kubernetes, step by step: the record repository, Slack, SSO, secrets, database, replicas.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md">Integrations</a><span>LiteLLM, any A2A or MCP client, verified principals.</span></li>
-      <li><a href="https://github.com/kultar/librarian/blob/main/docs/registry.md">Registry format</a><span>One YAML file per API, reviewed by pull request.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/registry.md">Registry format</a><span>What an entry holds, how approval works, and the record kept on GitHub.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/threat-model.md">Threat model</a><span>Assets, actors, threats and mitigations.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/troubleshooting.md">Troubleshooting</a><span>What to check when agents, learning, Slack, sign-in or Kubernetes misbehave.</span></li>
     </ul>
@@ -235,13 +236,13 @@ mcp_servers:
       <div><h3>Done</h3><ul>
         <li>Reads within policy, writes with approval or grants</li>
         <li>Learning from specs, documentation and model knowledge, with change detection</li>
-        <li>Slack cards, Helm chart, GitHub App for the registry repo</li>
+        <li>Slack cards, Helm chart, a GitHub App that writes the record</li>
         <li>MCP endpoint and the LiteLLM gateway</li>
         <li>Verified principals from your identity provider</li>
         <li>Replicas with shared state and no volumes, and one rate limit across them</li>
         <li>Internal APIs learned on demand within the domains you list</li>
         <li>A console for the people who run it: everything it knows, what waits on them, and the levers to revoke, block, re-learn and invalidate</li>
-        <li>Approve or deny a learned API from Slack: the review card leads to a signed-in page, and approving merges the proposal as the App</li>
+        <li>Approve or deny a learned API from Slack: the review card leads to a signed-in page, and approving makes it verified at once</li>
         <li>Acting as the person: APIs that need each person's own sign-in, with their own token and the API enforcing their access</li>
         <li>Activity in the console: the last seven days in numbers, the busiest APIs, and recent events per API</li>
         <li>Writes an agent wants but nobody has enabled yet become requests: Enable or Decline from Slack or the console, with a dedicated write credential asked for when there is none</li>
@@ -249,9 +250,10 @@ mcp_servers:
         <li>Automatic approval per operation with a daily cap and a one-click way back, and a Change control on every operation in the console</li>
         <li>Grants that last as long as the approver chooses, re-timed, revoked or quieted from the console's Grants page</li>
         <li>Idempotency keys kept with the write across replicas and restarts, every write answering how it ran, and rate limiting told apart from a permission problem</li>
+        <li>The database decides: approvals and every later decision take effect at once on every replica, and GitHub becomes the record, written after each decision and never read back</li>
       </ul></div>
       <div><h3>Next</h3><ul>
-        <li>Console actions that answer at once, with the proposal, model guidance and Slack updates finishing in the background</li>
+        <li>Console actions that answer at once everywhere, with model guidance and Slack updates finishing in the background as the record already does</li>
         <li>Verifying the SearXNG and Brave documentation search, and Google and Microsoft sign-in, live</li>
       </ul></div>
       <div><h3>Later</h3><ul>

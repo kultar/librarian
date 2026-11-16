@@ -49,8 +49,9 @@ from its OpenAPI spec, then reads from it:
 # ..."data": {"numAPIs": 2529.0}
 ```
 
-It was usable at once: learned APIs start as **provisional**, which allows reads (GET) only. In a
-real deployment librarian also opens a pull request so a person can review the entry
+It was usable at once: learned APIs start as **provisional**, which allows reads (GET) only. An
+approver makes it verified with one click: librarian logged a review link for it, and the
+console (http://localhost:8080/) lists it under *Waiting*
 ([docs/registry.md](registry.md)).
 
 No spec? Give it the documentation page instead (`"docs_url"` plus `"base_url"`), or just the
