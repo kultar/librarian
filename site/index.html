@@ -264,6 +264,7 @@ substrate:
         <li>The database decides: approvals and every later decision take effect at once on every replica, and GitHub becomes the record, written after each decision and never read back</li>
         <li>Agents on Agent Substrate and kagent with no key of their own: the platform's gateway signs each call, librarian verifies it and applies the rule for that agent</li>
         <li>A key an API sends back in its answer is removed before any agent sees it, and a stored key that cannot be sent is refused without being named</li>
+        <li>Credentials made for each call instead of stored: OAuth client credentials, GitHub App tokens for one repository (read-only for a read), and AWS request signing</li>
       </ul></div>
       <div><h3>Next</h3><ul>
         <li>Console actions that answer at once everywhere, with model guidance and Slack updates finishing in the background as the record already does</li>

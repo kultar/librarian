@@ -25,11 +25,11 @@ from librarian import telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import Caller
 from librarian.registry.models import (
+    KEYLESS,
     ApiEntry,
     AuthSpec,
     EntryStatus,
     NoAuth,
-    OAuth2UserAuth,
     is_reserved_secret,
 )
 from librarian.registry.store import Registry
@@ -381,7 +381,7 @@ class CredentialBroker:
         """Ask for a dedicated write credential (an approver enabled writes on an entry
         that has none). `auth` is the write credential's shape; its secret is pasted on
         the secure page like any key. One open request per API."""
-        if isinstance(auth, NoAuth | OAuth2UserAuth):
+        if isinstance(auth, KEYLESS):
             raise ValueError("a write credential request needs a shared-key authentication")
         async with self._lock:
             existing = self.pending_for(entry.id, "write")

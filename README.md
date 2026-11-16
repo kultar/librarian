@@ -45,6 +45,10 @@ credential out.
   or, for APIs where what you see depends on who you are, each person's own OAuth sign-in,
   done once in their browser and used only for their requests (see
   [Acting as the person](#acting-as-the-person-per-person-oauth)).
+- **Where the API allows it, no long-lived key is sent at all.** librarian makes what a call
+  goes out with: an OAuth token that expires by itself, a GitHub App token for the one
+  repository the call names (read-only for a read), or an AWS signature that fits one request
+  (see [Credentials made for each call](#credentials-made-for-each-call)).
 
 ### What your agents save
 
@@ -347,6 +351,63 @@ With `principals.mode: required` the person must be verified by your identity pr
 their token is used; with `off` (a laptop) the agent's claimed principal is trusted. Requests
 with no person behind them are refused for these APIs. MCP callers get `consent_pending` while
 the person signs in.
+
+## Credentials made for each call
+
+A stored key is the same key for every call until someone replaces it: whoever gets hold of
+it has everything it can do. Three kinds of authentication avoid sending such a key to an API
+at all. librarian makes what each call goes out with, keeps it until shortly before it expires,
+and removes it from the answer like any other credential.
+
+```yaml
+# OAuth 2.0 client credentials: the API gets a token that expires by itself. The client
+# secret is stored, and goes to the token endpoint only.
+auth:
+  type: oauth2_client
+  secret_ref: ledger/client          # the client secret, in the secret store
+  token_url: https://login.example.com/oauth2/token
+  client_id: librarian
+  scopes: [ledger.read]              # give writes their own under write_auth
+  # audience: https://ledger.example.com   # where the provider wants one
+  # client_auth: basic                     # id and secret as HTTP basic instead of in the form
+
+# A GitHub App instead of a personal token: a token for each call, valid for an hour,
+# limited to the repository the call names, and read-only when the call is a read.
+auth:
+  type: github_app
+  secret_ref: github/app-key         # the App's private key (PEM), in the secret store
+  app_id: 123456
+  # installation_id: 987654321       # for operations that name no owner (/user, search)
+  # permissions: {contents: read}    # ask for exactly these instead of what is installed
+
+# AWS Signature Version 4: every request is signed; there is no key to store.
+auth: {type: aws_sigv4, service: execute-api, region: eu-west-1}
+write_auth:                          # writes as a role assumed for this API, for 15 minutes
+  type: aws_sigv4
+  service: execute-api
+  region: eu-west-1
+  role_arn: arn:aws:iam::123456789012:role/orders-writer
+```
+
+Set them in the console (an API's page, *Authentication*, *Describe it in full*) or in a
+registry file; only an approved entry may use them, because they say where a secret is sent
+and whose identity is used. `write_auth` takes the same shapes, so reads and writes can have
+different scopes, permissions or roles. When writes are enabled on an API that reads this way,
+nobody is asked for a write key: a write is authenticated the same way, and a read still never
+gets a token that can write.
+
+- **GitHub**: create an App with the permissions your agents need, install it on the
+  repositories they may touch, and store its private key. For a read, librarian asks GitHub
+  for a token with every permission turned down to `read`; GitHub itself then refuses a write
+  made with it. Works with GitHub Enterprise Server (the entry's `base_url`).
+- **AWS**: without `role_arn`, requests are signed with librarian's own identity (the role
+  of its pod). With it, librarian assumes that role first: let its pod role
+  `sts:AssumeRole` only the roles your entries name, and give each role only what that API
+  needs. `service` is the signing name (`execute-api`, `s3`, `es`, `lambda`, ...). Needs the
+  `aws` extra, which the image has.
+- **When it does not work**, the agent is told what to have fixed (a scope, where the App is
+  installed, a role librarian may not assume) and no approver is asked for a key that would not
+  help. A client secret or App key that is refused is asked for like any other key.
 
 ## Verified principals
 
@@ -734,7 +795,11 @@ uv run pytest
   ends: an approval can no longer stay "executing" after a failure or a stopped replica.
   `librarian doctor` looks for credentials that earlier versions could have stored in the
   database or the audit file, names them by reference, and replaces them with `--redact`.
-  A fake API with every misbehaviour we know of now runs through every surface in the tests
+  A fake API with every misbehaviour we know of now runs through every surface in the tests.
+  Credentials made for each call instead of stored: OAuth client credentials, GitHub App
+  tokens (one repository, an hour, read-only for a read) and AWS request signing (librarian's
+  own identity, or a role assumed for the API). An API's authentication can be described in
+  full in the console
 
 ### Next
 

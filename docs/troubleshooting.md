@@ -85,6 +85,27 @@ A2A carries JSON numbers as floating point. Over MCP they arrive as written (`25
 Fixed in 0.7.0. If you restrict hosts with `mcp_allowed_hosts`, include the name clients use
 (e.g. `librarian.librarian.svc:8080`).
 
+**"... did not issue a token" / "... is not installed on ..." / "... may not assume ..."**
+The API's authentication makes a credential for each call (`oauth2_client`, `github_app`,
+`aws_sigv4`) and making one failed in a way a new key would not fix, so no approver is asked
+for one. The message says what to change, in the console under the API's *Authentication*:
+- *the token endpoint did not issue a token (HTTP 400, invalid_scope)*: the scopes or the
+  audience are not what the provider expects for this client.
+- *the GitHub App is not installed on owner/repo*: install the App there, or the agent has no
+  business in that repository.
+- *this operation names no repository or organisation*: operations such as `/user` or search
+  cannot tell librarian whose installation to use; set `installation_id`.
+- *librarian may not assume arn:... (AccessDenied)*: the role's trust policy must name
+  librarian's own role, and librarian's role must be allowed `sts:AssumeRole` on it.
+- *librarian has no AWS identity to sign with*: its pod has no role (IRSA or Pod Identity).
+- *refused ... (HTTP 401) although the credential was made for it a moment ago*: the token
+  was issued but the API does not accept it: a missing scope, the wrong audience, a permission
+  the App does not have.
+
+A refused client secret or App private key is different: that is asked for like any key
+("the token endpoint refused the client id and secret", "the GitHub App's private key is not
+usable"). A private key pasted on one line is fine; librarian restores its line breaks.
+
 **Was a key ever stored where it should not be?**
 `librarian doctor` compares every credential in the secret store with every row of the database
 and every line of the audit file, in each form a credential can take there, and names what it

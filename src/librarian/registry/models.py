@@ -331,10 +331,115 @@ class OAuth2UserAuth(StrictModel):
         return url
 
 
+def _https_unless_local(url: str) -> str:
+    """Where a secret is sent must be https; http is accepted for this machine only."""
+    parts = urlsplit(url)
+    local = parts.hostname in ("localhost", "127.0.0.1", "::1")
+    if not parts.hostname or parts.scheme not in ("https", "http"):
+        raise ValueError("must be an absolute https URL")
+    if parts.scheme == "http" and not local:
+        raise ValueError("must be an https URL (http is accepted for localhost only)")
+    if parts.username or parts.password:
+        raise ValueError("must not embed credentials")
+    return url
+
+
+class OAuth2ClientAuth(StrictModel):
+    """OAuth 2.0 client credentials: a token made for librarian itself, not a person.
+
+    librarian exchanges the client id and secret for an access token at `token_url`,
+    keeps it until shortly before it expires, and sends it as a bearer token. Only the
+    client secret is stored (under `secret_ref`), and it is sent to the token endpoint
+    only, never to the API. Give reads and writes different `scopes`. Only verified
+    entries may use this (the URL is where the secret goes)."""
+
+    type: Literal["oauth2_client"] = "oauth2_client"
+    secret_ref: str  # the client secret
+    token_url: str
+    client_id: str = Field(min_length=1, max_length=256)
+    scopes: list[str] = Field(default_factory=list[str], max_length=50)
+    audience: str | None = Field(default=None, max_length=500)  # some providers want one
+    # How the id and secret travel to the token endpoint: in the form, or as HTTP basic.
+    client_auth: Literal["body", "basic"] = "body"
+    extra_token_params: dict[str, str] = Field(default_factory=dict[str, str])
+
+    @field_validator("token_url")
+    @classmethod
+    def _check_token_url(cls, url: str) -> str:
+        return _https_unless_local(url)
+
+    @field_validator("extra_token_params")
+    @classmethod
+    def _no_reserved_params(cls, params: dict[str, str]) -> dict[str, str]:
+        taken = {"grant_type", "client_id", "client_secret", "scope", "audience"} & set(params)
+        if taken:
+            raise ValueError(f"extra_token_params may not set {sorted(taken)}")
+        return params
+
+
+class GitHubAppTokenAuth(StrictModel):
+    """A GitHub App: a token made for each call instead of a stored personal token.
+
+    librarian signs in as the App (its private key is under `secret_ref`) and asks
+    GitHub for an installation token: valid for an hour, limited to the repository the
+    call names, and read-only when the call is a read. The key never leaves librarian.
+    The installation is found from the call's owner (`owner_param`, `repo_param`,
+    `org_param` name those arguments); `installation_id` serves the operations that
+    name none. `permissions` asks for exactly these instead of what the installation
+    has. Works for github.com and GitHub Enterprise Server (the entry's `base_url`).
+    Only verified entries may use this."""
+
+    type: Literal["github_app"] = "github_app"
+    secret_ref: str  # the App's private key (PEM)
+    app_id: str = Field(min_length=1, max_length=64)  # the App id, or its client id
+    installation_id: int | None = Field(default=None, ge=1)
+    permissions: dict[str, Literal["read", "write"]] | None = None
+    owner_param: str = "owner"
+    repo_param: str = "repo"
+    org_param: str = "org"
+
+    @field_validator("app_id", mode="before")
+    @classmethod
+    def _id_as_text(cls, value: object) -> object:
+        return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+
+
+class AwsSigV4Auth(StrictModel):
+    """AWS Signature Version 4: each request is signed; there is no key to store.
+
+    The signature is made with librarian's own AWS identity (the role of its pod) or,
+    with `role_arn`, with short-lived credentials of a role librarian assumes for this
+    API: give reads and writes different roles, each allowed only what it needs.
+    `service` is the signing name (`execute-api`, `s3`, `es`, `lambda`, ...). Needs the
+    `aws` extra. Only verified entries may use this."""
+
+    type: Literal["aws_sigv4"] = "aws_sigv4"
+    service: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9-]+$")
+    region: str = Field(min_length=1, max_length=32, pattern=r"^[a-z0-9-]+$")
+    role_arn: str | None = Field(default=None, pattern=r"^arn:aws[a-z-]*:iam::\d{12}:role/.+$")
+    external_id: str | None = Field(default=None, max_length=1224)
+
+
 AuthSpec = Annotated[
-    NoAuth | BearerAuth | ApiKeyAuth | BasicAuth | OAuth2UserAuth,
+    NoAuth
+    | BearerAuth
+    | ApiKeyAuth
+    | BasicAuth
+    | OAuth2UserAuth
+    | OAuth2ClientAuth
+    | GitHubAppTokenAuth
+    | AwsSigV4Auth,
     Field(discriminator="type"),
 ]
+
+# Authentication that keeps nothing in the secret store under the entry's own name:
+# no key at all, each person's own sign-in, or a signature made with librarian's identity.
+KEYLESS = (NoAuth, OAuth2UserAuth, AwsSigV4Auth)
+# Authentication where what is sent is made for each call, never a stored key.
+MADE_PER_CALL = (OAuth2ClientAuth, GitHubAppTokenAuth, AwsSigV4Auth)
+# Authentication whose addresses and identifiers decide where a secret is sent or whose
+# identity is used: only an entry a person approved may use these.
+NEEDS_VERIFIED = (OAuth2UserAuth, OAuth2ClientAuth, GitHubAppTokenAuth, AwsSigV4Auth)
 
 
 class CredentialGuidance(StrictModel):
@@ -435,7 +540,7 @@ class ApiEntry(StrictModel):
                 raise ValueError(f"duplicate operation id {op.id!r}")
             seen.add(op.id)
         for auth in (self.auth, self.write_auth):
-            if auth is None or isinstance(auth, NoAuth):
+            if auth is None or isinstance(auth, NoAuth | AwsSigV4Auth):
                 continue
             if isinstance(auth, OAuth2UserAuth):
                 ref = auth.client_secret_ref
@@ -468,16 +573,17 @@ class ApiEntry(StrictModel):
 
     @property
     def secret_ref(self) -> str | None:
-        """The shared read credential's reference (None for no auth, and for per-person
-        sign-in, whose tokens live under `<id>/users/...`)."""
-        if isinstance(self.auth, NoAuth | OAuth2UserAuth):
+        """The shared read credential's reference: the key itself, or what a token is
+        made from (a client secret, an App's private key). None for no auth, for
+        per-person sign-in (tokens live under `<id>/users/...`) and for AWS signing."""
+        if isinstance(self.auth, KEYLESS):
             return None
         return self.auth.secret_ref
 
     @property
     def write_secret_ref(self) -> str | None:
         auth = self.write_auth
-        if auth is None or isinstance(auth, NoAuth | OAuth2UserAuth):
+        if auth is None or isinstance(auth, KEYLESS):
             return None
         return auth.secret_ref
 

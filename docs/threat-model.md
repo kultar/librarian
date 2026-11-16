@@ -86,6 +86,19 @@ high-value target. This document lists what we defend against, how, and what is 
   gateway URL.)
 - Secrets never enter A2A messages, Slack, logs, audit events, provenance or LLM context.
   Query-string keys are redacted in provenance URLs.
+- **Credentials made for each call.** Where an API allows it, what is sent is not a stored
+  key: an OAuth client-credentials token (the client secret goes to the token endpoint only),
+  a GitHub App installation token (an hour, the one repository the call names, and for a read
+  every permission turned down to `read`, so GitHub itself refuses a write made with it), or
+  an AWS signature that fits one request (made with librarian's own identity, or with
+  fifteen-minute credentials of a role assumed for that API). A token is kept in memory until
+  shortly before it expires, never stored, and removed from answers like any credential.
+  These kinds say where a secret is sent and whose identity is used, so only an approved
+  entry may use them, a token endpoint must be https, and through the console a secret can
+  only be referred to under the API's own name (one API cannot be pointed at another's key).
+  What a token endpoint or GitHub answers is never quoted beyond a status and a short error
+  code. **Residual risk:** an approver decides these settings; whoever can approve can name a
+  token endpoint or a role.
 - **An API that sends the credential back.** Some APIs answer with the request they received:
   an echo or debugging endpoint, links that repeat the query string with its key, an error page
   that quotes the URL, a message that names the rejected key. librarian removes the credential

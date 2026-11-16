@@ -284,6 +284,17 @@ Verified end to end with oauth2-proxy v7.7.1: the sign-in arrives as `preferred_
 
 Without AWS: keys are files on the pod's volume. Fine for one replica; back up the volume.
 
+**No stored key at all** is possible for some APIs: a GitHub App's tokens, OAuth client
+credentials and AWS request signing are made for each call
+([README](../README.md#credentials-made-for-each-call)). For AWS APIs that means IAM instead
+of secrets: give each API a role with only what it needs, let those roles trust librarian's
+pod role, and allow the pod role to assume exactly them:
+
+```json
+{"Effect": "Allow", "Action": "sts:AssumeRole",
+ "Resource": ["arn:aws:iam::<account>:role/orders-reader", "arn:aws:iam::<account>:role/orders-writer"]}
+```
+
 ## 5. The database
 
 Create a PostgreSQL database and user for librarian. The URL goes in the `librarian-env` Secret:

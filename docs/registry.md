@@ -14,6 +14,11 @@ auth:                             # one of:
   secret_ref: jira/readonly       #   bearer   {secret_ref}
                                   #   api_key  {secret_ref, in: header|query, name}
                                   #   basic    {secret_ref}  secret holds "username:password"
+                                  # and, on approved entries only (see the README):
+                                  #   oauth2_user    each person's own sign-in
+                                  #   oauth2_client  a token made from a client secret
+                                  #   github_app     a token made per call from an App key
+                                  #   aws_sigv4      each request signed; nothing stored
 
 credential:                       # shown to the approver on the secure page
   create_url: https://id.atlassian.com/manage-profile/security/api-tokens

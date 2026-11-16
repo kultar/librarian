@@ -279,16 +279,19 @@ async def test_large_apis_are_grouped_searchable_and_flag_attention(librarian: L
     c = console(librarian)
     page = c.get("/apis/big").text
     assert "<b>60 operations</b>" in page and "1 need review" in page
-    assert page.count("<details") == 3 and "issues <span class=muted>(20)</span>" in page
+    # Groups of operations are plain <details>; the one under Authentication has a class.
+    assert page.count("<details>") + page.count("<details open>") == 3
+    assert "issues <span class=muted>(20)</span>" in page
     assert page.count("<details open") == 1  # only the group with the unknown operation
     assert "Needs attention" in page and page.index("op5") < page.index("<details")
     assert "name=q" in page
     found = c.get("/apis/big?q=issues").text
-    assert "<details" not in found and "match" in found and "op1" in found and "op0" not in found
+    assert "<details>" not in found and "<details open>" not in found
+    assert "match" in found and "op1" in found and "op0" not in found
     none = c.get("/apis/big?q=zzzz").text
     assert "0 matches" in none
     small = c.get("/apis/tracker").text
-    assert "<details" not in small and "name=q" not in small  # few operations: one table
+    assert "<details>" not in small and "name=q" not in small  # few operations: one table
     listing = c.get("/apis?q=big").text
     assert "Big API" in listing and "Issue Tracker" not in listing
     assert "No API matches" in c.get("/apis?q=zzz").text

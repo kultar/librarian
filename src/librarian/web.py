@@ -89,8 +89,9 @@ border-radius:6px;background:var(--ink);color:#fff;vertical-align:middle;margin-
 .method.get{background:var(--ok)}.method.delete{background:var(--danger)}
 .pg{fill:var(--ink)}.hb{fill:var(--brass)}
 label{display:block;margin-top:10px}
-input,select{font:inherit;color:inherit;padding:9px 11px;border-radius:8px;
+input,select,textarea{font:inherit;color:inherit;padding:9px 11px;border-radius:8px;
 border:1px solid var(--line);background:var(--paper);width:100%;margin-top:6px}
+textarea{font-family:var(--mono);font-size:.9em;min-height:9em;resize:vertical}
 input[type=checkbox],input[type=radio]{width:auto;margin:0 6px 0 0;vertical-align:middle}
 input.cap{width:6em;display:inline-block;padding:4px 8px;margin:0 4px}
 input[type=number]{width:7em;display:inline-block}

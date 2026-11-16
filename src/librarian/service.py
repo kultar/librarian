@@ -16,6 +16,8 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
+import yaml
+from pydantic import ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import (
     AgentRunError,
@@ -83,9 +85,12 @@ from librarian.recipes import Recipe, recipe_summary
 from librarian.recipes import learn as learn_recipe
 from librarian.record import Recorder, RecordStatus
 from librarian.registry.models import (
+    KEYLESS,
+    MADE_PER_CALL,
     Access,
     ApiEntry,
     AuthSpec,
+    AwsSigV4Auth,
     BearerAuth,
     CredentialGuidance,
     EntryStatus,
@@ -1336,6 +1341,79 @@ class Librarian:
             update={"auth": auth, "credential": guidance, "notes": (entry.notes + note)[:8000]}
         )
 
+    async def set_auth_spec(
+        self, api_id: str, which: str, spec: str, by: str
+    ) -> tuple[ApiEntry, Applied]:
+        """A person described the authentication of an API in full (the console), as a
+        registry entry would: for the kinds the simple choice does not cover (tokens made
+        per call, per-person sign-in). `which` is `auth` (reads) or `write_auth`; an
+        empty `write_auth` removes the write credential. In effect at once.
+
+        A secret may only be referred to under the API's own name (or where the entry
+        already refers to): through this form nobody can point one API at another's key.
+        """
+        entry = self.registry.get(api_id)
+        if entry is None:
+            raise LibrarianError(f"unknown API {api_id!r}")
+        if entry.status is EntryStatus.BLOCKED:
+            raise LibrarianError(f"{api_id!r} is blocked; unblock it first")
+        if which not in ("auth", "write_auth"):
+            raise LibrarianError("choose reads or writes")
+        try:
+            described: Any = yaml.safe_load(spec) if spec.strip() else None
+        except yaml.YAMLError as exc:
+            problem = getattr(exc, "problem", None) or "it does not parse"
+            raise LibrarianError(f"that is not valid YAML: {problem}") from None
+        if described is None and which == "auth":
+            described = {"type": "none"}
+        if described is not None and not isinstance(described, dict):
+            raise LibrarianError("describe the authentication as `key: value` lines")
+        data = entry.model_dump(mode="json", by_alias=True)
+        data[which] = described
+        try:
+            chosen = ApiEntry.model_validate(data)
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            where = ".".join(str(part) for part in first["loc"] if part != which)
+            raise LibrarianError(
+                f"that authentication is not valid: {where + ': ' if where else ''}{first['msg']}"
+            ) from None
+        new = chosen.auth if which == "auth" else chosen.write_auth
+        allowed = {
+            ref
+            for auth in (entry.auth, entry.write_auth)
+            for name in ("secret_ref", "client_secret_ref")
+            if isinstance(ref := getattr(auth, name, None), str)
+        }
+        for name in ("secret_ref", "client_secret_ref"):
+            ref = getattr(new, name, None)
+            if isinstance(ref, str) and ref not in allowed and not ref.startswith(f"{api_id}/"):
+                raise LibrarianError(
+                    f"{name} {ref!r} is not under this API's own name: use `{api_id}/...` "
+                    "(a secret kept elsewhere can be named in a registry file)"
+                )
+        kind = "none" if new is None else new.type
+        what = "reads" if which == "auth" else "writes"
+        updated, applied = await self._decide(
+            api_id,
+            lambda base: base.model_copy(update={which: new}),
+            f"authentication for {what}: {kind}",
+            f"{by} set the authentication for {what} to {kind} in the console.",
+            by,
+        )
+        self._auth_notified.discard(api_id)
+        await self.audit.record(
+            AuditEvent(
+                event="auth_set",
+                caller="console",
+                principal=by,
+                api=api_id,
+                detail=f"{what}: {kind}",
+                extra={"recorded": applied.recorded},
+            )
+        )
+        return updated, applied
+
     async def set_auth(
         self, api_id: str, scheme: str, key_name: str | None, by: str
     ) -> tuple[ApiEntry, Applied]:
@@ -1556,6 +1634,14 @@ class Librarian:
             if isinstance(entry.auth, OAuth2UserAuth):
                 write_auth = entry.auth
                 lines.append("Writes use each person's own sign-in, like reads.")
+            elif isinstance(entry.auth, MADE_PER_CALL):
+                # Nothing to ask a person for: what a write is sent with is made for it.
+                write_auth = entry.auth
+                lines.append(
+                    f"Writes are authenticated like reads ({entry.auth.type}): the "
+                    "credential is made for each write. Give writes their own scopes, "
+                    "permissions or role under Authentication in the console if they need them."
+                )
             elif key == "read" and entry.secret_ref is not None:
                 write_auth = entry.auth
                 lines.append(
@@ -2640,7 +2726,7 @@ def _enable_change(
 def _write_auth_like(auth: AuthSpec, secret_ref: str) -> AuthSpec:
     """The write credential's shape: the read authentication with another secret. An
     API that needs no key for reads is assumed to take a bearer token for writes."""
-    if isinstance(auth, NoAuth | OAuth2UserAuth):
+    if isinstance(auth, KEYLESS):
         return BearerAuth(secret_ref=secret_ref)
     return auth.model_copy(update={"secret_ref": secret_ref})
 
@@ -2726,6 +2812,10 @@ def _learned_from(entry: ApiEntry) -> str:
 def _auth_words(entry: ApiEntry) -> str:
     if isinstance(entry.auth, NoAuth):
         return "none"
+    if isinstance(entry.auth, AwsSigV4Auth):
+        return f"aws_sigv4 ({entry.auth.service}, {entry.auth.region})"
+    if isinstance(entry.auth, OAuth2UserAuth):
+        return "oauth2_user (each person signs in)"
     return f"{entry.auth.type} ({entry.secret_ref})"
 
 

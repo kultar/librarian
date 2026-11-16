@@ -15,7 +15,9 @@ import html
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
+import yaml
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
@@ -29,7 +31,19 @@ from librarian.enablement import EnableWriteRequest
 from librarian.oauth import ConsentRequest, OAuthError, authorize_url
 from librarian.opsearch import rank, tokens
 from librarian.record import RecordStatus
-from librarian.registry.models import Access, ApiEntry, EntryStatus, OAuth2UserAuth, Operation
+from librarian.registry.models import (
+    MADE_PER_CALL,
+    Access,
+    ApiEntry,
+    ApiKeyAuth,
+    AuthSpec,
+    AwsSigV4Auth,
+    EntryStatus,
+    GitHubAppTokenAuth,
+    OAuth2ClientAuth,
+    OAuth2UserAuth,
+    Operation,
+)
 from librarian.registry.store import RegistryError
 from librarian.reviews import ReviewRequest
 from librarian.service import Applied, Librarian, LibrarianError
@@ -956,16 +970,27 @@ def _actions(
         )
     if entry.status is not EntryStatus.BLOCKED:
         current = e(entry.auth.type)
-        options = "".join(
-            f"<option value={v}{' selected' if v == entry.auth.type else ''}>{label}</option>"
-            for v, label in (
-                ("none", "none (public API)"),
-                ("bearer", "bearer token (Authorization: Bearer ...)"),
-                ("basic", "basic (username:password)"),
-                ("api_key_header", "API key in a header"),
-                ("api_key_query", "API key in a query parameter"),
-            )
+        simple = (
+            ("none", "none (public API)"),
+            ("bearer", "bearer token (Authorization: Bearer ...)"),
+            ("basic", "basic (username:password)"),
+            ("api_key_header", "API key in a header"),
+            ("api_key_query", "API key in a query parameter"),
         )
+        chosen = entry.auth.type
+        if isinstance(entry.auth, ApiKeyAuth):
+            chosen = f"api_key_{entry.auth.location}"
+        options = "".join(
+            f"<option value={v}{' selected' if v == chosen else ''}>{label}</option>"
+            for v, label in simple
+        )
+        if chosen not in {v for v, _ in simple}:
+            # Never preselect "none" for an API that uses something this list cannot say:
+            # one careless click would take its authentication away.
+            options = (
+                f"<option value='' selected disabled>{current} (described in full below)"
+                f"</option>{options}"
+            )
         cards.append(
             f"<div class=card><h2>Authentication</h2><p class=muted>Now: <b>{current}</b>. "
             "Specs often declare none even when the API needs a key; choose what it really "
@@ -975,7 +1000,28 @@ def _actions(
             f"<label>Scheme<select name=scheme>{options}</select></label>"
             "<label>Header or query parameter name (API keys only)"
             "<input name=key_name placeholder='X-Api-Key'></label>"
-            "<button class=quiet>Set authentication</button></form></div>"
+            "<button class=quiet>Set authentication</button></form>"
+            "<details class=full><summary>Describe it in full</summary><p class=muted>For what the "
+            "choice above does not cover: a credential made for each call (<code>"
+            "oauth2_client</code>, <code>github_app</code>, <code>aws_sigv4</code>), each "
+            "person's own sign-in (<code>oauth2_user</code>), or different authentication "
+            "for writes. Written as in a registry entry; it names secrets, it never holds "
+            f"one. A secret must be under <code>{e(entry.id)}/</code>.</p>"
+            f"<form method=post action='{e(base)}/auth-spec'>"
+            f"<input type=hidden name=t value='{e(token)}'>"
+            "<label>For<select name=which><option value=auth>reads</option>"
+            "<option value=write_auth>writes</option></select></label>"
+            "<label>Authentication (YAML)<textarea name=spec spellcheck=false "
+            f"placeholder='type: github_app&#10;secret_ref: {e(entry.id)}/app-key&#10;"
+            "app_id: 123456'></textarea></label>"
+            "<button class=quiet>Set</button></form>"
+            f"<p class=muted>Now, for reads:</p><pre>{e(_auth_yaml(entry.auth))}</pre>"
+            + (
+                f"<p class=muted>and for writes:</p><pre>{e(_auth_yaml(entry.write_auth))}</pre>"
+                if entry.write_auth is not None
+                else "<p class=muted>Writes have no credential yet.</p>"
+            )
+            + "</details></div>"
         )
     candidates = librarian.slash_candidates(entry)
     if candidates:
@@ -1039,9 +1085,42 @@ def _actions(
     return "".join(cards), "<div class=zone><h2>Danger</h2>" + "".join(zone) + "</div>"
 
 
+def _made(auth: AuthSpec | None) -> str | None:
+    """How a credential that is made for each call is made, in words."""
+    if isinstance(auth, OAuth2ClientAuth):
+        scopes = f", scopes {e(' '.join(auth.scopes))}" if auth.scopes else ""
+        return (
+            f"a token made for each call from the client secret <code>{e(auth.secret_ref)}"
+            f"</code> at <code>{e(urlsplit(auth.token_url).hostname or '')}</code>{scopes}"
+        )
+    if isinstance(auth, GitHubAppTokenAuth):
+        return (
+            "a GitHub App token made for each call (one repository, an hour, read-only "
+            f"for a read) with the App key <code>{e(auth.secret_ref)}</code>"
+        )
+    if isinstance(auth, AwsSigV4Auth):
+        who = (
+            f"as the role <code>{e(auth.role_arn.rsplit('/', 1)[-1])}</code>"
+            if auth.role_arn
+            else "with librarian's own AWS identity"
+        )
+        return f"each request signed for AWS ({e(auth.service)}, {e(auth.region)}) {who}"
+    return None
+
+
 def _auth(entry: ApiEntry) -> str:
     if isinstance(entry.auth, OAuth2UserAuth):
         return f"each person signs in themselves (OAuth, scopes: {e(' '.join(entry.auth.scopes))})"
+    made = _made(entry.auth)
+    if made is not None:
+        writes = _made(entry.write_auth)
+        if entry.write_auth is None:
+            return made
+        if entry.write_auth == entry.auth:
+            return f"{made}; writes the same way"
+        if type(entry.write_auth) is type(entry.auth) and writes is not None:
+            return f"{made}; writes the same way, with their own settings"
+        return f"{made}; writes: {writes or e(entry.write_auth.type)}"
     if not entry.secret_ref:
         return "none (no authentication)"
     kind = e(entry.auth.type)
@@ -1049,7 +1128,18 @@ def _auth(entry: ApiEntry) -> str:
     write = ""
     if entry.write_secret_ref:
         write = f", writes with <code>{e(entry.write_secret_ref)}</code>"
+    elif (writes := _made(entry.write_auth)) is not None:
+        write = f"; writes: {writes}"
     return f"{kind}: {ref}{write}"
+
+
+def _auth_yaml(auth: AuthSpec | None) -> str:
+    """An entry's authentication as it would be written in a registry file. It holds
+    references to secrets, never a secret."""
+    if auth is None:
+        return ""
+    data = auth.model_dump(mode="json", by_alias=True, exclude_defaults=True)
+    return yaml.safe_dump({"type": auth.type, **data}, sort_keys=False).strip()
 
 
 def _access(op: Operation) -> str:
@@ -1357,6 +1447,20 @@ def console_routes(librarian: Librarian) -> list[Route]:
                 "Authentication set",
                 f"{e(api_id)} now uses {e(updated.auth.type)}; a key is asked for when it is "
                 f"first needed. {_applied_text(applied)}{back(api_id)}",
+            )
+        if action == "auth-spec":
+            form = await request.form()
+            which = str(form.get("which", "auth"))
+            updated, applied = await librarian.set_auth_spec(
+                api_id, which, str(form.get("spec", "")), identity
+            )
+            chosen = updated.auth if which == "auth" else updated.write_auth
+            what = "Reads" if which == "auth" else "Writes"
+            now = f"now use {e(chosen.type)}" if chosen is not None else "have no credential now"
+            return notice(
+                "ok",
+                "Authentication set",
+                f"{what} of {e(api_id)} {now}. {_applied_text(applied)}{back(api_id)}",
             )
         if action == "approve":
             updated, applied = await librarian.approve_api(api_id, identity)
@@ -1815,6 +1919,10 @@ def _enable_body(
         credential = "<span class=bad>the API is no longer in the registry</span>"
     elif entry.per_person:
         credential = "each person's own sign-in, like reads"
+    elif entry.write_auth is None and isinstance(entry.auth, MADE_PER_CALL):
+        credential = "made for each write, like for reads: " + (_made(entry.auth) or "")
+    elif entry.write_auth is not None and (made := _made(entry.write_auth)) is not None:
+        credential = f"{made}, already configured"
     elif entry.write_secret_ref:
         credential = f"<code>{e(entry.write_secret_ref)}</code>, already configured"
     else:

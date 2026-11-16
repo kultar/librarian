@@ -7,6 +7,9 @@ Security properties enforced here (in addition to the policy engine):
 - secret values are injected at the last moment and never returned or logged: a
   credential the API sends back (an echo, an error quoting the request) is removed from
   the answer, and a credential that cannot be sent is refused without being named
+- where the API allows it, what is sent is made for the call and expires by itself (an
+  OAuth token, a GitHub App token for one repository, an AWS signature) instead of
+  being a stored key (`librarian.minted`)
 - every request has a time limit, and an API that cannot be reached or does not finish
   answering is reported as exactly that (`ApiUnavailable`), saying for a write whether
   the request can have reached it
@@ -23,10 +26,9 @@ import json
 import logging
 import math
 import re
-import socket
-import ssl
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any, cast
@@ -37,19 +39,25 @@ import httpx
 from librarian import __version__, telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance, WriteRequest
-from librarian.errors import ApiUnavailable
+from librarian.errors import ApiUnavailable, CredentialSetupError, why_no_answer
+from librarian.minted import AwsSigner, Minter, SecretRejected, SetupProblem
 from librarian.net import PUBLIC, BlockedAddress, NetworkPolicy, pin
 from librarian.oauth import ConsentBroker, principal_key
 from librarian.observations import Observations
 from librarian.policy import PolicyEngine
 from librarian.registry.models import (
+    KEYLESS,
+    NEEDS_VERIFIED,
     ApiEntry,
     ApiKeyAuth,
     AuthSpec,
+    AwsSigV4Auth,
     BasicAuth,
     BearerAuth,
     EntryStatus,
+    GitHubAppTokenAuth,
     NoAuth,
+    OAuth2ClientAuth,
     OAuth2UserAuth,
     Operation,
     ParamLocation,
@@ -84,6 +92,28 @@ class CredentialMissing(Exception):
         self.principal = principal
 
 
+@dataclass
+class _Credential:
+    """What a call is authenticated with, as it goes out."""
+
+    secret: str | None  # the value sent: a stored key, or a token made for this call
+    auth: AuthSpec  # how it travels (a made token travels as a bearer token)
+    echoes: tuple[str, ...]  # every form of it that must not come back in an answer
+    signer: AwsSigner | None = None  # signs each request instead (AWS)
+    note: str = ""  # for the audit trail, when the credential was made for the call
+    forget: Callable[[], None] | None = None  # drop a made token the API refused
+
+    @property
+    def made(self) -> bool:
+        return self.forget is not None or self.signer is not None
+
+    def not_to_come_back(self) -> tuple[str, ...]:
+        if self.signer is None:
+            return self.echoes
+        signed = {form for value in self.signer.sent for form in credential_forms(value)}
+        return tuple(sorted(set(self.echoes) | signed, key=lambda f: (-len(f), f)))
+
+
 class Executor:
     def __init__(
         self,
@@ -113,6 +143,8 @@ class Executor:
         self.deadline_seconds = (
             deadline_seconds if deadline_seconds is not None else 2 * timeout_seconds
         )
+        # Makes the credentials that are not stored: tokens and signatures for one call.
+        self.minter = Minter(self.client, deadline_seconds=self.deadline_seconds)
         # Called when an API whose entry declares no authentication answers 401. May
         # return the entry with the authentication librarian worked out, in which case
         # the normal credential flow takes over.
@@ -207,20 +239,19 @@ class Executor:
                 )
             )
             raise PolicyDenied(limited)
-        sent_as = auth if auth is not None else entry.auth
-        secret = _sendable(
-            entry,
+        declared = auth if auth is not None else entry.auth
+        stored = (
             await self._resolve_secret(entry, caller)
             if auth is None
-            else await self._shared_secret(entry, auth),
-            sent_as,
-            caller,
+            else await self._shared_secret(entry, auth)
         )
+        cred = await self._credential(entry, op, request.args, declared, stored, caller)
+        secret = cred.secret
         started = time.monotonic()
         url, headers, query = _build_request(entry, op, request.args)
-        secret_query = _auth_query(entry, secret, auth)
-        _apply_auth_headers(entry, secret, headers, auth)
-        echoes = _echoes(secret, sent_as)
+        secret_query = _auth_query(entry, secret, cred.auth)
+        _apply_auth_headers(entry, secret, headers, cred.auth)
+        echoes = cred.echoes
 
         pages: list[Any] = []
         total_bytes = 0
@@ -243,11 +274,19 @@ class Executor:
         while next_url is not None and page_count < request.max_pages:
             try:
                 response, body, cut, final_url = await self._send(
-                    entry, op, next_url, next_query, secret_query, headers, request.body
+                    entry,
+                    op,
+                    next_url,
+                    next_query,
+                    secret_query,
+                    headers,
+                    request.body,
+                    cred.signer,
                 )
             except ApiUnavailable as gone:
-                await self._no_answer(entry, op, caller, gone, echoes, started)
+                await self._no_answer(entry, op, caller, gone, cred.not_to_come_back(), started)
                 raise
+            echoes = cred.not_to_come_back()  # a signature is new with every request
             response_headers = response.headers
             last_headers = {
                 name: _scrub(response.headers[name], echoes)
@@ -320,6 +359,8 @@ class Executor:
         )
         refusal, refusal_detail = _refusal(entry, status_code, response_headers, data, secret)
         extra: dict[str, Any] = {"pages": page_count, "truncated": truncated}
+        if cred.note:
+            extra["credential"] = cred.note
         if status_code >= 400:
             extra["upstream"] = _said(data, secret)
             log.info(
@@ -344,6 +385,22 @@ class Executor:
                 extra=extra | _via(caller),
             )
         )
+        if status_code == 401 and cred.made:
+            # What the token or signature was made from was accepted a moment ago, so a
+            # person storing a new secret would not help. Make a new token next time, and
+            # say what is known.
+            if cred.forget is not None:
+                cred.forget()
+            return CallResult(
+                status_code=status_code,
+                ok=False,
+                data=data,
+                truncated=truncated,
+                content_type=content_type,
+                error=_made_but_refused(entry, declared, data, secret),
+                warnings=self.observations.warnings(entry, op),
+                provenance=provenance,
+            )
         if status_code == 401 and auth is not None:
             raise CredentialMissing(entry, reason="rejected with HTTP 401")
         if status_code == 401 and isinstance(entry.auth, OAuth2UserAuth):
@@ -398,25 +455,34 @@ class Executor:
         would replay the write against another URL.
         """
         auth = entry.write_auth
+        stored: str | None = None
+        ref: str | None = None
         if isinstance(auth, OAuth2UserAuth):
-            secret: str | None = await self._person_token(entry, auth, caller)
+            stored = await self._person_token(entry, auth, caller)
             ref = principal_key(entry.id, caller.principal or "")
+        elif isinstance(auth, AwsSigV4Auth):
+            pass  # signed for this request: there is nothing stored
         else:
             ref = entry.write_secret_ref
             if auth is None or ref is None or is_reserved_secret(ref):
                 raise PolicyDenied(f"API {entry.id!r} has no usable write credential")
-            secret = await self.secrets.get(ref)
-            if secret is None:
+            stored = await self.secrets.get(ref)
+            if stored is None:
                 raise CredentialMissing(entry, reason=f"write credential {ref!r} is missing")
-        secret = _sendable(entry, secret, auth, caller, what="the write credential")
+        cred = await self._credential(
+            entry, op, request.args, auth, stored, caller, write=True, what="the write credential"
+        )
+        secret = cred.secret
         url, headers, query = _build_request(entry, op, request.args)
-        _apply_auth_headers(entry, secret, headers, auth)
-        echoes = _echoes(secret, auth)
-        params: dict[str, ArgValue] = {**query, **_auth_query(entry, secret, auth)}
+        _apply_auth_headers(entry, secret, headers, cred.auth)
+        echoes = cred.echoes
+        params: dict[str, ArgValue] = {**query, **_auth_query(entry, secret, cred.auth)}
         if request.idempotency_key:
             headers.setdefault("Idempotency-Key", request.idempotency_key)
         excerpt = json.dumps(request.body, default=str)[:2000] if request.body is not None else None
         sent: dict[str, Any] = {"args": request.args, "body_excerpt": excerpt}
+        if cred.note:
+            sent["credential"] = cred.note
         attributes = {
             "librarian.api": entry.id,
             "librarian.operation": op.id,
@@ -435,6 +501,9 @@ class Executor:
                 headers=headers,
                 json=request.body if request.body is not None else None,
             )
+            if cred.signer is not None:
+                cred.signer.sign(http_request)
+                echoes = cred.not_to_come_back()
             response: httpx.Response | None = None
             body, cut, incomplete = b"", False, False
             try:
@@ -506,7 +575,11 @@ class Executor:
             )
         )
         error = refusal
-        if status_code == 401:
+        if status_code == 401 and cred.made:
+            if cred.forget is not None:
+                cred.forget()  # make a new token for the next write
+            error = _made_but_refused(entry, auth, data, secret, write=True)
+        elif status_code == 401:
             error = f"{entry.name} refused the write (HTTP 401): check the write credential"
         elif error is None and response.is_redirect:
             error = f"{entry.name} answered with a redirect; writes are never re-sent elsewhere"
@@ -532,7 +605,7 @@ class Executor:
 
     async def _shared_secret(self, entry: ApiEntry, auth: AuthSpec) -> str | None:
         """The secret behind a given shared-key authentication (not the entry's own)."""
-        if isinstance(auth, NoAuth | OAuth2UserAuth):
+        if isinstance(auth, KEYLESS):
             return None
         if is_reserved_secret(auth.secret_ref):
             raise PolicyDenied(f"API {entry.id!r} references an internal secret")
@@ -553,6 +626,56 @@ class Executor:
         if value is None:
             raise CredentialMissing(entry)
         return value
+
+    async def _credential(
+        self,
+        entry: ApiEntry,
+        op: Operation,
+        args: Mapping[str, ArgValue],
+        auth: AuthSpec,
+        stored: str | None,
+        caller: Caller,
+        *,
+        write: bool = False,
+        what: str = "the stored credential",
+    ) -> _Credential:
+        """What this call goes out with: the stored key, or what is made from it (or
+        from nothing stored at all) for this call alone."""
+        if (
+            isinstance(auth, NEEDS_VERIFIED)
+            and not isinstance(auth, OAuth2UserAuth)  # checked where the person's token is read
+            and entry.status is not EntryStatus.VERIFIED
+        ):
+            raise PolicyDenied(
+                f"API {entry.id!r} uses {auth.type} authentication, which needs a verified entry"
+            )
+        secret = _sendable(entry, stored, auth, caller, what=what)
+        try:
+            if isinstance(auth, AwsSigV4Auth):
+                signer = await self.minter.aws_signer(entry, auth)
+                return _Credential(None, auth, (), signer=signer, note=signer.note)
+            if secret is not None and isinstance(auth, OAuth2ClientAuth | GitHubAppTokenAuth):
+                if isinstance(auth, OAuth2ClientAuth):
+                    made = await self.minter.client_token(entry, auth, secret)
+                else:
+                    made = await self.minter.github_token(
+                        entry, auth, secret, op, args, write=write
+                    )
+                token = _sendable(entry, made.token, _AS_A_BEARER_KEY, caller, what="the token")
+                # Neither the token nor what it was made from may come back.
+                echoes = set(_echoes(token, _AS_A_BEARER_KEY)) | set(credential_forms(secret))
+                return _Credential(
+                    token,
+                    _AS_A_BEARER_KEY,
+                    tuple(sorted(echoes, key=lambda f: (-len(f), f))),
+                    note=made.note,
+                    forget=made.forget,
+                )
+        except SecretRejected as exc:
+            raise CredentialMissing(entry, reason=str(exc)) from None
+        except SetupProblem as exc:
+            raise CredentialSetupError(f"{entry.name}: {exc}") from None
+        return _Credential(secret, auth, _echoes(secret, auth))
 
     async def _person_token(self, entry: ApiEntry, auth: OAuth2UserAuth, caller: Caller) -> str:
         """The calling person's own access token for this API, or the reasons there is none."""
@@ -583,6 +706,7 @@ class Executor:
         secret_query: dict[str, str],
         headers: dict[str, str],
         body: dict[str, Any] | None,
+        signer: AwsSigner | None = None,
     ) -> tuple[httpx.Response, bytes, bool, str]:
         """Send with same-origin redirects. Returns (response, body, truncated, final URL)."""
         method = op.method
@@ -610,6 +734,8 @@ class Executor:
                     json=body if body is not None else None,
                     extensions=extensions,
                 )
+                if signer is not None:
+                    signer.sign(request)  # each request, also after a redirect, has its own
                 try:
                     async with asyncio.timeout(self.deadline_seconds):
                         response = await client.send(request, stream=True)
@@ -674,41 +800,9 @@ class Executor:
         )
 
 
-# The failures that happen before any of the request has left: a write was not made.
-_NOT_SENT = (
-    httpx.ConnectError,
-    httpx.ConnectTimeout,
-    httpx.PoolTimeout,
-    httpx.LocalProtocolError,
-    httpx.UnsupportedProtocol,
-)
-
-
 def _unavailable(entry: ApiEntry, exc: BaseException, *, write: bool) -> ApiUnavailable:
-    """Why a call got no answer, in words for the calling agent.
-
-    Built from the kind of failure, never from the HTTP client's own message: that one
-    can quote the request it refused, credential included (see `_sendable`). The
-    client's message is kept apart, for the log, where the credential is removed first.
-    """
-    sent = not isinstance(exc, _NOT_SENT)
-    detail = str(exc)
-    if isinstance(exc, httpx.LocalProtocolError):
-        reason, detail = "the request has a header that is not valid HTTP", ""
-    elif isinstance(exc, httpx.PoolTimeout):
-        reason = "librarian has too many calls to it in progress"
-    elif isinstance(exc, httpx.ConnectTimeout):
-        reason = "it could not be reached: connecting took too long"
-    elif isinstance(exc, httpx.ConnectError):
-        reason = "it could not be reached" + _why_not_reached(exc)
-    elif isinstance(exc, TimeoutError | httpx.ReadTimeout | httpx.WriteTimeout):
-        reason = "it did not answer in time"
-    elif isinstance(exc, httpx.DecodingError):
-        reason = "its answer could not be decompressed"
-    elif isinstance(exc, httpx.RemoteProtocolError | httpx.ReadError | httpx.WriteError):
-        reason = "the connection broke before it had answered"
-    else:
-        reason = f"the call failed ({type(exc).__name__})"
+    """Why a call got no answer, in words for the calling agent (see `why_no_answer`)."""
+    reason, detail, sent = why_no_answer(exc)
     if not write:
         consequence = "Nothing was read: retry later."
     elif sent:
@@ -721,30 +815,6 @@ def _unavailable(entry: ApiEntry, exc: BaseException, *, write: bool) -> ApiUnav
         reason=reason,
         detail=detail,
     )
-
-
-def _why_not_reached(exc: BaseException) -> str:
-    """What stopped a connection, if the chain of causes says: the name, the TLS
-    certificate, or a refusal."""
-    seen: set[int] = set()
-    todo: list[BaseException] = [exc]
-    while todo:
-        cause = todo.pop()
-        if id(cause) in seen:
-            continue
-        seen.add(id(cause))
-        if isinstance(cause, ssl.SSLCertVerificationError):
-            return " (its TLS certificate was not accepted)"
-        if isinstance(cause, ssl.SSLError):
-            return " (the TLS handshake failed)"
-        if isinstance(cause, socket.gaierror):
-            return " (its host name did not resolve)"
-        if isinstance(cause, ConnectionRefusedError):
-            return " (the connection was refused)"
-        todo += [c for c in (cause.__cause__, cause.__context__) if c is not None]
-        if isinstance(cause, BaseExceptionGroup):
-            todo += list(cast(BaseExceptionGroup[BaseException], cause).exceptions)
-    return ""
 
 
 SAID_LIMIT = 240
@@ -916,6 +986,21 @@ def _scrub(data: Any, echoes: tuple[str, ...], *, cut: bool = False) -> Any:
     return rewrite_strings(data, clean)
 
 
+def _made_but_refused(
+    entry: ApiEntry, auth: AuthSpec | None, data: Any, secret: str | None, *, write: bool = False
+) -> str:
+    """What to tell the caller when an API answers 401 to a credential made for the call."""
+    said = _said(data, secret)
+    quoted = f" The API said: {said}" if said else ""
+    kind = auth.type if auth is not None else "its"
+    what = "the write" if write else "this request"
+    return (
+        f"{entry.name} refused {what} (HTTP 401) although the credential was made for it a "
+        f"moment ago: check what its {kind} authentication asks for (scopes, audience, "
+        f"permissions, the role) in the console.{quoted}"
+    )
+
+
 def _reset_time(headers: Mapping[str, str]) -> datetime | None:
     """When the limit lifts: Retry-After (seconds or a date), else X-RateLimit-Reset."""
     try:
@@ -1043,7 +1128,7 @@ def _apply_auth_headers(
         headers["Authorization"] = f"Bearer {secret}"
     elif isinstance(auth, BasicAuth):
         headers["Authorization"] = "Basic " + base64.b64encode(secret.encode()).decode()
-    elif auth.location == "header":
+    elif isinstance(auth, ApiKeyAuth) and auth.location == "header":
         headers[auth.name] = secret
 
 

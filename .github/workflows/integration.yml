@@ -19,6 +19,7 @@ jobs:
           - {name: replicas, project: libint, test: test_replicas.py}
           - {name: identity, project: libid, test: test_identity.py}
           - {name: litellm, project: liblite, test: test_litellm.py}
+          - {name: credentials, project: libcred, test: test_credentials.py}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
