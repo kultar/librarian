@@ -7,6 +7,7 @@ import json
 import logging
 import secrets as pysecrets
 import time
+import traceback
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -51,6 +52,7 @@ from librarian.docs import (
 )
 from librarian.drift import Change, diff, proposed_update, worst
 from librarian.enablement import EnableState, EnableWriteBroker, EnableWriteRequest
+from librarian.errors import ApiUnavailable, LibrarianError
 from librarian.executor import CredentialMissing, Executor, PolicyDenied
 from librarian.finddocs import (
     SearchDidNotRun,
@@ -117,10 +119,6 @@ EntryChange = Callable[[ApiEntry], ApiEntry]
 at that moment, so a decision made on another replica a moment earlier is kept."""
 
 UPDATE_KIND = "source-update"  # the freshly learned entry a pending update review is about
-
-
-class LibrarianError(Exception):
-    """An error safe to show to the calling agent."""
 
 
 class CredentialUnavailable(LibrarianError):
@@ -307,6 +305,7 @@ class Librarian:
             self.secrets,
             self.audit,
             client=self.http,
+            timeout_seconds=settings.request_timeout_seconds,
             max_response_bytes=settings.max_response_bytes,
             net=settings.network,
         )
@@ -446,6 +445,7 @@ class Librarian:
             if restored:
                 log.info("restored %d pending credential request(s)", restored)
             await self.approvals.restore()
+            await self.approvals.close_interrupted()  # writes a stopped replica left open
             for data in await self.state.list_docs("recipe", "active"):
                 recipe = Recipe.model_validate_json(data)
                 self.recipes[recipe.id] = recipe
@@ -773,6 +773,13 @@ class Librarian:
             )
         if prior.state is ApprovalState.PENDING:
             return prior
+        if prior.state in (ApprovalState.APPROVED, ApprovalState.EXECUTING):
+            # Still being sent (or its replica stopped mid-way and it has not been closed
+            # yet): a second copy must not go out beside it.
+            raise WriteRefused(
+                f"a write with idempotency key {idempotency_key!r} is still being run "
+                f"(approval {prior.id}); ask write_status for its outcome before retrying"
+            )
         return None  # failed, denied or expired: a fresh request
 
     def _finish_in_background(self, approval: WriteApproval, caller: Caller) -> None:
@@ -780,7 +787,7 @@ class Librarian:
             decided = await self.approvals.wait(approval.id)
             try:
                 await self._run_approved(decided, caller)
-            except WriteRefused as exc:
+            except LibrarianError as exc:  # refused, or the API gave no answer
                 log.info("detached write %s not run: %s", approval.id, exc)
 
         task = asyncio.create_task(finish())
@@ -973,18 +980,42 @@ class Librarian:
         if suspended:
             await self.approvals.finish(approval, False, None, f"suspended: {suspended}")
             raise WriteRefused(f"the operation was suspended after approval: {suspended}")
+        # From the claim on, this approval must reach an end whatever happens: left as
+        # "executing", nobody could tell whether the write was made or may be retried.
         try:
             result = await self.executor.execute_write(
                 current, current_op, approval.request, caller
             )
-        except (CredentialMissing, PolicyDenied, httpx.HTTPError) as exc:
+        except ApiUnavailable as gone:
+            await self.approvals.finish(approval, False, None, str(gone))
+            raise
+        except (CredentialMissing, PolicyDenied) as exc:
             await self.approvals.finish(approval, False, None, str(exc))
             raise WriteRefused(f"approved write failed: {exc}") from exc
-        stored = result.model_dump(mode="json")
-        if len(json.dumps(stored, default=str)) > 65_536:
-            stored = {**stored, "data": None, "truncated": True}
+        except Exception as exc:
+            note = (
+                f"librarian failed while making this write ({_where(exc)}). It may have "
+                f"reached {approval.api_name}: check before sending it again."
+            )
+            log.error("approved write %s: %s", approval.id, note)
+            await self.approvals.finish(approval, False, None, note)
+            raise WriteRefused(note) from None
         note = "done" if result.ok else (result.error or f"HTTP {result.status_code}")
-        await self.approvals.finish(approval, result.ok, stored, note)
+        try:
+            stored = result.model_dump(mode="json")
+            if len(json.dumps(stored, default=str)) > 65_536:
+                stored = {**stored, "data": None, "truncated": True}
+            await self.approvals.finish(approval, result.ok, stored, note)
+        except Exception as exc:
+            # The write was made and answered; only keeping the answer failed.
+            log.error(
+                "approved write %s: its result could not be kept (%s)", approval.id, _where(exc)
+            )
+            kept = (
+                f"{note}; {approval.api_name} answered HTTP {result.status_code}, but the "
+                "answer could not be kept"
+            )
+            await self.approvals.finish(approval, result.ok, None, kept)
         telemetry.write_requests.add(1, {"librarian.api": approval.api, "outcome": "executed"})
         who = f" by {approval.decided_by}" if approval.decided_by else ""
         return WriteOutcome(
@@ -2563,11 +2594,19 @@ class Librarian:
             return exc.reason
         except PolicyDenied as exc:
             return f"validation call refused: {exc.reason}"
-        except httpx.HTTPError as exc:
+        except LibrarianError as exc:  # the API gave no answer
             return f"validation call failed: {exc}"
         if not result.ok:
             return f"validation call returned HTTP {result.status_code}"
         return None
+
+
+def _where(exc: BaseException) -> str:
+    """An unexpected error as its kind and where it was raised, without its message: a
+    message can quote whatever the code was handling at that moment."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    place = f" at {frames[-1].filename.rsplit('/', 1)[-1]}:{frames[-1].lineno}" if frames else ""
+    return f"{type(exc).__name__}{place}"
 
 
 def _enable_change(

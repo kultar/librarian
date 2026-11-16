@@ -726,6 +726,16 @@ uv run pytest
   end of a file) is not sent, and a key that cannot be sent is refused without being named:
   the HTTP client's own error quoted it, to the log and, for a write, to the agent
 
+- **v0.21** (in progress, not released): hardening against APIs that misbehave. An agent is
+  told when an API cannot be reached or does not finish answering, in those words and, for a
+  write, with whether the request can have reached the API ("was not sent" or "may have
+  reached it"), instead of "internal error". One request has a time limit as a whole. An
+  answer is passed on as data only if everything downstream can handle it. A write always
+  ends: an approval can no longer stay "executing" after a failure or a stopped replica.
+  `librarian doctor` looks for credentials that earlier versions could have stored in the
+  database or the audit file, names them by reference, and replaces them with `--redact`.
+  A fake API with every misbehaviour we know of now runs through every surface in the tests
+
 ### Next
 
 - Console actions answer at once everywhere: writing the record already happens in the

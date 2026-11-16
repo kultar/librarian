@@ -37,6 +37,31 @@ changed under an approved entry. Approve the update librarian found (the console
 under *Waiting*), or, after checking by hand, clear the suspension on the API's page or with
 `librarian registry clear <api> <operation>`.
 
+**"... gave no answer: ..."**
+The API could not be reached, or did not finish answering; the words after the colon say which:
+it could not be reached (with the reason when there is one: the name did not resolve, the
+connection was refused, its TLS certificate was not accepted), it did not answer in time, the
+connection broke, or librarian has too many calls to it in progress. Nothing is wrong with the
+request. For a read, try again later. For a write the message ends one of two ways:
+- *The write was not sent*: nothing left librarian. It is safe to ask again.
+- *The write may have reached it*: the request went out and no answer came back. Read the
+  resource first to see whether the change was made, and use an `idempotency_key` so a repeat
+  cannot be sent twice.
+
+One request to an API (connecting, sending and reading the whole answer) may take at most twice
+`request_timeout_seconds` (so a minute by default), however slowly the answer trickles in.
+librarian's log has the HTTP client's own words for the failure, under `got no answer`.
+
+**A write is `failed` with "interrupted".**
+The replica that was sending it stopped before it had an answer (a rollout, a crash), so nobody
+knows whether the write was made. librarian closes such a write after fifteen minutes, says so,
+and never sends it again by itself. Check the resource, then ask again if it is needed.
+
+**JSON from an API arrives as text, or a number arrives as `null`.**
+An answer is passed on as data only when everything after librarian can handle it. JSON nested
+more than 100 levels deep, JSON cut off at `max_response_bytes`, and anything that does not
+parse are passed on as text. `NaN` and `Infinity`, which are not JSON, become `null`.
+
 **An answer contains `[redacted]`.**
 The API sent back the credential librarian called it with (an echo endpoint, a link that repeats
 the query string, an error that quotes the key), and librarian removed it: agents never get a
@@ -59,6 +84,25 @@ A2A carries JSON numbers as floating point. Over MCP they arrive as written (`25
 **MCP calls get HTTP 421 (older versions).**
 Fixed in 0.7.0. If you restrict hosts with `mcp_allowed_hosts`, include the name clients use
 (e.g. `librarian.librarian.svc:8080`).
+
+**Was a key ever stored where it should not be?**
+`librarian doctor` compares every credential in the secret store with every row of the database
+and every line of the audit file, in each form a credential can take there, and names what it
+finds by the secret's reference; it never prints a credential. Versions before 0.20 could
+store one (an API that sent its key back in the answer to a write; an error that quoted a key
+stored with a line break), so run it once after upgrading:
+
+```bash
+kubectl -n librarian exec deploy/librarian -- librarian doctor
+# demo/write is stored in librarian_documents approval/5027a47b... (data)
+kubectl -n librarian exec deploy/librarian -- librarian doctor --redact   # replaces the copies
+```
+
+A credential that was found was readable by whoever can read that table: replace it at the
+API. `--redact` then removes the copies from the database (backups and write-ahead logs made
+before keep theirs). The audit file is only reported, since librarian appends to it while it
+runs. The command also lists stored credentials that cannot be used (a line break inside), and
+exits 1 while anything is left to do.
 
 ## Learning APIs
 

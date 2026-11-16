@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hmac
 import logging
 from collections.abc import AsyncGenerator
@@ -26,6 +27,7 @@ from a2a.helpers.proto_helpers import (
 )
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
+from a2a.server.models import create_task_model
 from a2a.server.request_handlers import DefaultRequestHandlerV2
 from a2a.server.routes import (
     DefaultServerCallContextBuilder,
@@ -51,6 +53,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from opentelemetry import propagate, trace
 from pydantic import ValidationError
 from pydantic_ai.exceptions import AgentRunError
+from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -400,6 +403,19 @@ class LibrarianExecutor(AgentExecutor):
             await TaskUpdater(event_queue, task.id, task.context_id).cancel()
 
 
+@functools.cache
+def _task_model() -> Any:
+    """The A2A tasks table, defined once per process: the SDK defines it anew for every
+    store, which fails the second time an app is built in the same process."""
+    return create_task_model("librarian_tasks")
+
+
+def _database_task_store(engine: AsyncEngine) -> DatabaseTaskStore:
+    store = DatabaseTaskStore(engine)  # with the SDK's default table, which defines nothing
+    store.task_model = _task_model()
+    return store
+
+
 MAX_SAFE_INT = 2**53
 
 
@@ -578,7 +594,7 @@ def create_app(
         librarian, require_auth=bool(librarian.settings.callers) or bool(caller_keys)
     )
     task_store: TaskStore = (
-        DatabaseTaskStore(librarian.engine, table_name="librarian_tasks")
+        _database_task_store(librarian.engine)
         if librarian.engine is not None
         else InMemoryTaskStore()
     )
@@ -742,6 +758,7 @@ async def _sweep_forever(librarian: Librarian) -> None:
                 await librarian.broker.sweep()
                 await librarian.enablement.sweep()
                 await librarian.reviews.refresh()
+                await librarian.approvals.close_interrupted()
             except Exception:
                 log.exception("credential sweep failed")
             try:

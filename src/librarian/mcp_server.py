@@ -124,6 +124,8 @@ def build_mcp(librarian: Librarian) -> MCPServer:
             raise ToolError(f"invalid request: {exc.errors()[0]['msg']}") from exc
         except PolicyDenied as exc:
             raise ToolError(f"refused: {exc.reason}") from exc
+        except LibrarianError as exc:  # e.g. the API gave no answer: say so, in its words
+            raise ToolError(str(exc)) from exc
         return {"status": "ok", **result.model_dump(mode="json")}
 
     if librarian.planner is not None:
@@ -188,6 +190,8 @@ def build_mcp(librarian: Librarian) -> MCPServer:
             raise ToolError(f"invalid request: {exc.errors()[0]['msg']}") from exc
         except PolicyDenied as exc:
             raise ToolError(f"refused: {exc.reason}") from exc
+        except LibrarianError as exc:  # refused for another reason, or no answer
+            raise ToolError(str(exc)) from exc
         return _write_outcome(outcome, librarian)
 
     @server.tool(annotations=read_only)

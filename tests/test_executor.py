@@ -238,3 +238,43 @@ async def test_internal_hosts_let_provisional_entries_reach_private_addresses(
     with pytest.raises(PolicyDenied, match="non-public"):
         await librarian.executor.execute(CallRequest(api="status", operation="summary"), CALLER)
     assert len(seen) == 1
+
+
+def test_an_answer_is_passed_on_as_data_only_if_everything_downstream_can_take_it() -> None:
+    """What the decoder hands on is plain JSON: whatever serialises it next (for an
+    agent, a model, the database) must not be able to choke on it."""
+    from librarian.executor import MAX_DEPTH, _decode  # pyright: ignore[reportPrivateUsage]
+
+    def decode(text: str) -> object:
+        return _decode(text.encode(), "application/json", False)
+
+    # Numbers that are not JSON become null, as in JavaScript; real ones are untouched.
+    assert decode('{"a": NaN, "b": [Infinity, -Infinity], "c": 1e999, "d": -1e999}') == {
+        "a": None,
+        "b": [None, None],
+        "c": None,
+        "d": None,
+    }
+    assert decode('{"pi": 3.5, "n": 7, "big": 123456789012345678901234567890}') == {
+        "pi": 3.5,
+        "n": 7,
+        "big": 123456789012345678901234567890,
+    }
+    # Half of a surrogate pair cannot be encoded as UTF-8; a whole pair is a character.
+    assert decode('{"half": "x\\ud83dy", "\\udc00": 1, "whole": "\\ud83d\\ude00"}') == {
+        "half": "x�y",
+        "�": 1,
+        "whole": "\U0001f600",
+    }
+    # Nesting up to the limit is data; beyond it, or beyond what can be parsed, text.
+    at_the_limit = "[" * MAX_DEPTH + "]" * MAX_DEPTH
+    beyond = "[" * (MAX_DEPTH + 1) + "]" * (MAX_DEPTH + 1)
+    assert isinstance(decode(at_the_limit), list)
+    assert decode(beyond) == beyond
+    assert decode("[" * 100_000 + "]" * 100_000) == "[" * 100_000 + "]" * 100_000
+    assert isinstance(decode("[" + ",".join(["[[1]]"] * 2000) + "]"), list)  # wide is fine
+    # What is not JSON, or was cut off, stays text; top-level values of any kind pass.
+    assert decode('{"a": [1,') == '{"a": [1,'
+    assert _decode(b'{"a": 1}', "application/json", True) == '{"a": 1}'
+    assert _decode(b'{"a": 1}', "text/plain", False) == '{"a": 1}'
+    assert (decode("null"), decode("7"), decode('"s"'), decode("")) == (None, 7, "s", "")

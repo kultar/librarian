@@ -97,8 +97,9 @@ high-value target. This document lists what we defend against, how, and what is 
   (another key that an API returns as data is data); a value shorter than six characters is
   left alone, because replacing it everywhere would mangle ordinary data; and a key the API
   transformed (hashed, or encoded some other way) is not recognised. Results stored before
-  0.20 are not rewritten: if an API you write to sends its key back, replace that key after
-  upgrading.
+  0.20 are not rewritten: `librarian doctor` finds any credential that got into the database
+  or the audit file (and `--redact` replaces it there). If an API you write to sends its key
+  back, replace that key after upgrading.
 - **A stored key that cannot be sent.** A key stored with a line break after it (the usual
   accident when it is created from a file) makes an HTTP client refuse the request, with an
   error that quotes the header it refused: the key. librarian therefore sends a credential
@@ -202,6 +203,23 @@ audited; and the operator, through the database, the config and the registry dir
 ### T7. Abuse / resource exhaustion
 - Per-(caller, API) rate limits, request timeouts, response size caps, spec size caps, operation
   count caps, page limits, LLM request limits per `fetch`.
+- **An API that misbehaves** (by accident, or on purpose: a provisional entry is an API an
+  agent chose). Besides the size cap, one request has a time limit as a whole (twice
+  `request_timeout_seconds`), so an API that sends a byte now and then cannot hold a call
+  open; a compressed body is cut at the size cap while it is unpacked; redirects, pages and
+  rate-limit headers are bounded or ignored when they make no sense. An answer is passed on as
+  data only if everything downstream can handle it: JSON nested deeper than 100 levels is
+  passed on as text, `NaN` and `Infinity` as `null`, half a Unicode surrogate pair as the
+  replacement character, and nothing a terminal would act on reaches the log.
+- **A write always ends.** Once a replica has taken an approved write to send it, its approval
+  reaches a final state whatever happens: the API's answer, "not sent", "may have reached the
+  API", or, if the replica stopped in the middle, "interrupted" (closed after fifteen minutes,
+  never sent again by librarian). A repeat with the same idempotency key is refused while the
+  first is still open. An agent is told which of these it was, never "internal error".
+- These are tested as a whole: `tests/hostile.py` is a fake API with every misbehaviour we
+  know of, and each one runs through every way an agent reaches librarian (the service, A2A,
+  MCP), for a read and for an approved write, with the same three claims checked each time:
+  the agent is told something it can act on, no credential leaves, and a write ends.
 
 ### T8. Caller impersonation
 - Per-agent bearer keys, compared in constant time.

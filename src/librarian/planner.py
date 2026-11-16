@@ -21,6 +21,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, WriteRequest
+from librarian.errors import ApiUnavailable
 from librarian.executor import Executor, PolicyDenied
 from librarian.opsearch import rank, tokens
 from librarian.registry.models import Access, EntryStatus
@@ -228,6 +229,9 @@ def build_agent(
                 result = await ctx.deps.executor.execute(request, ctx.deps.caller)
             except PolicyDenied as exc:
                 raise ModelRetry(f"call refused by policy: {exc.reason}") from exc
+            except ApiUnavailable as exc:
+                # Not the plan's fault and not worth another try now: answer with the rest.
+                return json.dumps({"status": "unavailable", "error": str(exc)})
             ctx.deps.cache[key] = result
             ctx.deps.results.append(result)
             ctx.deps.requests.append(request)

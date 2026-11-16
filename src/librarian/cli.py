@@ -1,4 +1,4 @@
-"""Command-line interface: `librarian serve | learn | call | registry ...`."""
+"""Command-line interface: `librarian serve | learn | call | doctor | registry ...`."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import typer
 from librarian.approvals import ApprovalError
 from librarian.calls import Caller, CallRequest
 from librarian.config import Settings
+from librarian.doctor import examine
 from librarian.executor import CredentialMissing, PolicyDenied
 from librarian.registry.models import Access
 from librarian.service import SOURCE_LABELS, Librarian, LibrarianError
@@ -369,6 +370,82 @@ def github_app_check(
                 f"token minted, but reading {repo} gave HTTP {response.status_code}"
             )
         typer.echo(f"OK: installation {auth.installation_id} can read and write {repo}")
+
+    _run(run())
+
+
+@app.command()
+def doctor(
+    redact: Annotated[
+        bool,
+        typer.Option(
+            "--redact", help="Replace the credentials found in the database with a marker"
+        ),
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Print the report as JSON")] = False,
+    config: ConfigOption = None,
+) -> None:
+    """Look for credentials where they must never be, and for ones that cannot be used.
+
+    Compares every credential in the secret store with every row of the database and
+    every line of the audit file, in each form a credential can take there. A credential
+    that is found was readable by whoever can read that table or file: replace it at the
+    API, then run again with --redact to remove the copies from the database. Never
+    prints a credential; exits 1 while anything is left to do."""
+
+    async def run() -> None:
+        librarian = Librarian(_settings(config))
+        await librarian.start()
+        try:
+            report = await examine(librarian, redact=redact)
+        finally:
+            await librarian.aclose()
+        if as_json:
+            typer.echo(
+                json.dumps(
+                    {
+                        "secrets": report.secrets,
+                        "rows": report.rows,
+                        "listed": report.listed,
+                        "findings": [
+                            {
+                                "kind": f.kind,
+                                "secret": f.secret,
+                                "where": f.where,
+                                "redacted": f.redacted,
+                            }
+                            for f in report.findings
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            typer.echo(f"Compared {report.secrets} credentials with {report.rows} database rows.")
+            if not report.listed:
+                typer.echo(
+                    "The secret store would not list its secrets, so only the ones the "
+                    "registry and the configuration name were looked for."
+                )
+            words = {
+                "stored": "is stored in",
+                "unusable": "cannot be used:",
+                "unreadable": "could not be read:",
+            }
+            for f in report.findings:
+                done = "  [now redacted]" if f.redacted else ""
+                typer.echo(f"  {f.secret} {words[f.kind]} {f.where}{done}")
+            stored = [f for f in report.findings if f.kind == "stored"]
+            if stored:
+                typer.echo(
+                    "A credential that was stored was readable by whoever can read that "
+                    "table or file: replace it at the API."
+                    + ("" if redact else " Then run again with --redact to remove the copies.")
+                )
+            if not report.findings:
+                typer.echo("Nothing found.")
+        if report.open:
+            raise typer.Exit(code=1)
 
     _run(run())
 

@@ -32,8 +32,8 @@ max_calls_per_fetch: 8
 fetch_timeout_seconds: 100
 
 rate_limit_per_minute: 60              # per calling agent, per API
-request_timeout_seconds: 30
-max_response_bytes: 2000000
+request_timeout_seconds: 30            # each step of a request; the whole request gets twice this
+max_response_bytes: 2000000            # a larger answer is cut here (and passed on as text)
 allow_provisional: true                # serve auto-learned (unreviewed) entries, GET/HEAD only
 allow_private_networks: false          # SSRF guard for onboarding + provisional entries
 internal_hosts: []                     # e.g. ["*.internal.example.com"]: private addresses allowed for these hosts only

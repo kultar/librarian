@@ -29,6 +29,9 @@ from librarian.registry.models import ApiEntry, Operation
 log = logging.getLogger(__name__)
 
 POLL_SECONDS = 2.0
+# How long after a replica took a write it counts as interrupted. A write is one request
+# with a time limit of a minute or two; this leaves a wide margin.
+INTERRUPTED_AFTER = timedelta(minutes=15)
 
 ApproverMode = Literal["requester", "group", "requester_or_group"]
 
@@ -67,6 +70,7 @@ class WriteApproval(BaseModel):
     note: str | None = None
     result: dict[str, Any] | None = None  # CallResult as JSON once executed
     executed_at: datetime | None = None  # when the write ran (the result is as of then)
+    claimed_at: datetime | None = None  # when a replica took it to run it
     # Requested by a caller that does not wait (e.g. MCP): librarian runs the write
     # itself once approved, and the caller polls for the outcome.
     detached: bool = False
@@ -615,6 +619,7 @@ class ApprovalBroker:
         if approval.state is not ApprovalState.APPROVED:
             return False
         approval.state = ApprovalState.EXECUTING
+        approval.claimed_at = datetime.now(UTC)
         if self.store is None:
             return True
         claimed = await self.store.transition_doc(
@@ -627,6 +632,53 @@ class ApprovalBroker:
         if not claimed:
             await self.load(approval.id)  # someone else claimed it; refresh our copy
         return claimed
+
+    async def close_interrupted(self, older_than: timedelta = INTERRUPTED_AFTER) -> int:
+        """End the writes a replica took and never finished (it was stopped, or lost the
+        database, in the middle).
+
+        Such a write stays "executing" for ever otherwise, and nobody can tell whether it
+        was made. It may have been: so it is closed as failed with exactly that said,
+        never run again here. `older_than` is far longer than a write can take, so a
+        write another replica is making right now is left alone.
+        """
+        if self.store is None:
+            return 0
+        closed = 0
+        now = datetime.now(UTC)
+        executing = ApprovalState.EXECUTING.value
+        for data in await self.store.list_docs("approval", executing):
+            approval = WriteApproval.model_validate_json(data)
+            if now - (approval.claimed_at or approval.created_at) < older_than:
+                continue
+            approval.state = ApprovalState.FAILED
+            approval.note = (
+                "interrupted: librarian stopped while this write was being sent, so it "
+                f"may or may not have reached {approval.api_name}. Check before sending "
+                "it again."
+            )
+            approval.executed_at = now
+            if not await self.store.transition_doc(
+                "approval", approval.id, executing, approval.state.value, approval.model_dump_json()
+            ):
+                continue  # it finished, or another replica closed it, in the meantime
+            closed += 1
+            self._approvals[approval.id] = approval
+            self._events.setdefault(approval.id, asyncio.Event()).set()
+            log.warning("write %s was interrupted and is closed as failed", approval.id)
+            await self.audit.record(
+                AuditEvent(
+                    event="write_interrupted",
+                    caller=approval.agent,
+                    principal=approval.principal,
+                    api=approval.api,
+                    operation=approval.operation,
+                    detail=approval.note,
+                    extra={"approval": approval.id},
+                )
+            )
+            await self.notifier.write_closed(approval)
+        return closed
 
     async def finish(
         self, approval: WriteApproval, ok: bool, result: dict[str, Any] | None, note: str

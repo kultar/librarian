@@ -87,6 +87,37 @@ async def test_planner_chains_tools_and_policy_still_applies(
     assert "refused by policy" in str(refused.content)
 
 
+async def test_an_api_that_gives_no_answer_does_not_end_the_whole_request(
+    librarian: Librarian, router: Router, secrets_store: FileSecretStore
+) -> None:
+    """The model is told that API is unavailable and answers with what it has."""
+    await secrets_store.put("tracker/readonly", "tok")
+
+    def down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("All connection attempts failed")
+
+    router.add("GET", f"{BASE}/v1/me", down)
+    router.add(
+        "GET", f"{BASE}/v1/issues/ABC-1", lambda r: httpx.Response(200, json={"state": "open"})
+    )
+    model, seen = scripted(
+        [
+            ToolCallPart("call_api", {"api": "tracker", "operation": "whoami"}),
+            ToolCallPart(
+                "call_api", {"api": "tracker", "operation": "getIssue", "args": {"key": "ABC-1"}}
+            ),
+        ]
+    )
+    outcome = await Planner(model).fetch(
+        "Is ABC-1 open?", librarian.registry, librarian.executor, Caller(agent="agent-a")
+    )
+    assert outcome.answer.summary == "Issue ABC-1 is open."
+    assert [r.provenance.operation for r in outcome.results] == ["getIssue"]
+    told = [part.content for part in tool_results(seen[1]) if isinstance(part, ToolReturnPart)]
+    assert len(told) == 1 and '"status": "unavailable"' in str(told[0])
+    assert "Issue Tracker gave no answer: it could not be reached" in str(told[0])
+
+
 async def test_service_fetch_uses_configured_model(
     librarian: Librarian, router: Router, secrets_store: FileSecretStore
 ) -> None:

@@ -7,15 +7,24 @@ Security properties enforced here (in addition to the policy engine):
 - secret values are injected at the last moment and never returned or logged: a
   credential the API sends back (an echo, an error quoting the request) is removed from
   the answer, and a credential that cannot be sent is refused without being named
+- every request has a time limit, and an API that cannot be reached or does not finish
+  answering is reported as exactly that (`ApiUnavailable`), saying for a write whether
+  the request can have reached it
+- an answer is only passed on as data if everything downstream can handle it; a write
+  that was sent is always recorded, whatever its answer looks like
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
 import json
 import logging
+import math
 import re
+import socket
+import ssl
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -28,6 +37,7 @@ import httpx
 from librarian import __version__, telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance, WriteRequest
+from librarian.errors import ApiUnavailable
 from librarian.net import PUBLIC, BlockedAddress, NetworkPolicy, pin
 from librarian.oauth import ConsentBroker, principal_key
 from librarian.observations import Observations
@@ -87,6 +97,7 @@ class Executor:
         net: NetworkPolicy = PUBLIC,
         pinned_client_factory: Callable[[], httpx.AsyncClient] | None = None,
         observations: Observations | None = None,
+        deadline_seconds: float | None = None,
     ) -> None:
         self.policy = policy
         self.observations = observations or policy.observations
@@ -96,6 +107,12 @@ class Executor:
             timeout=timeout_seconds, follow_redirects=False, headers={"User-Agent": USER_AGENT}
         )
         self.max_response_bytes = max_response_bytes
+        # One request to an API (connecting, sending, and reading the whole answer) must
+        # finish within this. The client's own timeouts apply to each step, so an API
+        # that keeps sending a byte now and then would otherwise never time out.
+        self.deadline_seconds = (
+            deadline_seconds if deadline_seconds is not None else 2 * timeout_seconds
+        )
         # Called when an API whose entry declares no authentication answers 401. May
         # return the entry with the authentication librarian worked out, in which case
         # the normal credential flow takes over.
@@ -142,6 +159,10 @@ class Executor:
                 raise
             except CredentialMissing as exc:
                 span.set_attribute("librarian.credential", exc.reason)
+                raise
+            except ApiUnavailable as exc:
+                span.set_attribute("librarian.unavailable", exc.reason)
+                telemetry.calls.add(1, {**attributes, "http.status_class": "none"})
                 raise
             code = result.status_code
             span.set_attribute("http.response.status_code", code)
@@ -220,9 +241,13 @@ class Executor:
         last_headers: dict[str, str] = {}
         response_headers: Mapping[str, str] = {}
         while next_url is not None and page_count < request.max_pages:
-            response, body, cut, final_url = await self._send(
-                entry, op, next_url, next_query, secret_query, headers, request.body
-            )
+            try:
+                response, body, cut, final_url = await self._send(
+                    entry, op, next_url, next_query, secret_query, headers, request.body
+                )
+            except ApiUnavailable as gone:
+                await self._no_answer(entry, op, caller, gone, echoes, started)
+                raise
             response_headers = response.headers
             last_headers = {
                 name: _scrub(response.headers[name], echoes)
@@ -386,9 +411,12 @@ class Executor:
         secret = _sendable(entry, secret, auth, caller, what="the write credential")
         url, headers, query = _build_request(entry, op, request.args)
         _apply_auth_headers(entry, secret, headers, auth)
+        echoes = _echoes(secret, auth)
         params: dict[str, ArgValue] = {**query, **_auth_query(entry, secret, auth)}
         if request.idempotency_key:
             headers.setdefault("Idempotency-Key", request.idempotency_key)
+        excerpt = json.dumps(request.body, default=str)[:2000] if request.body is not None else None
+        sent: dict[str, Any] = {"args": request.args, "body_excerpt": excerpt}
         attributes = {
             "librarian.api": entry.id,
             "librarian.operation": op.id,
@@ -407,25 +435,52 @@ class Executor:
                 headers=headers,
                 json=request.body if request.body is not None else None,
             )
+            response: httpx.Response | None = None
+            body, cut, incomplete = b"", False, False
             try:
-                response = await self.client.send(http_request, stream=True)
-            except httpx.LocalProtocolError:
-                raise _refused_to_send() from None
-            try:
-                body, cut = await _read_capped(response, self.max_response_bytes)
-            finally:
-                await response.aclose()
+                async with asyncio.timeout(self.deadline_seconds):
+                    response = await self.client.send(http_request, stream=True)
+                    try:
+                        body, cut = await _read_capped(response, self.max_response_bytes)
+                    finally:
+                        await response.aclose()
+            except (httpx.HTTPError, TimeoutError) as exc:
+                if response is None:
+                    gone = _unavailable(entry, exc, write=True)
+                    await self._no_answer(entry, op, caller, gone, echoes, started, sent)
+                    raise gone from None
+                # The API answered and then the answer broke off: what it decided is in
+                # the status line, so the write is reported with that, not as unknown.
+                body, cut, incomplete = b"", True, True
             span.set_attribute("http.response.status_code", response.status_code)
         content_type = response.headers.get("content-type", "")
         status_code = response.status_code
-        # The result is stored with the approval and returned to the agent: neither may
-        # hold the write credential, even if the API sent it back.
-        data = _scrub(_decode(body, content_type, cut), _echoes(secret, auth), cut=cut)
-        excerpt = json.dumps(request.body, default=str)[:2000] if request.body is not None else None
-        refusal, refusal_detail = _refusal(
-            entry, status_code, response.headers, data, secret, write=True
-        )
-        extra: dict[str, Any] = {"args": request.args, "body_excerpt": excerpt}
+        # From here on the write has been sent: whatever its answer looks like, the
+        # outcome is recorded and returned. The result is stored with the approval and
+        # returned to the agent: neither may hold the write credential, even if the API
+        # sent it back.
+        try:
+            data = _scrub(_decode(body, content_type, cut), echoes, cut=cut)
+            refusal, refusal_detail = _refusal(
+                entry, status_code, response.headers, data, secret, write=True
+            )
+        except Exception as exc:
+            log.error(
+                "%s.%s answered HTTP %s to a write, but the answer could not be read (%s)",
+                entry.id,
+                op.id,
+                status_code,
+                type(exc).__name__,
+            )
+            data, refusal_detail = None, "the answer could not be read"
+            refusal = f"{entry.name} answered HTTP {status_code}, but its answer could not be read"
+        if incomplete:
+            data, refusal_detail = None, "the answer did not arrive completely"
+            refusal = (
+                f"{entry.name} answered HTTP {status_code}, but the answer did not arrive "
+                "completely"
+            )
+        extra: dict[str, Any] = dict(sent)
         if status_code >= 400:
             extra["upstream"] = _said(data, secret)
             log.info(
@@ -556,32 +611,144 @@ class Executor:
                     extensions=extensions,
                 )
                 try:
-                    response = await client.send(request, stream=True)
-                except httpx.LocalProtocolError:
-                    raise _refused_to_send() from None
-                try:
-                    if response.is_redirect:
-                        location = response.headers.get("location", "")
-                        next_target = urljoin(current, location)
-                        if not _same_origin(entry, next_target):
-                            # Do not follow (and do not leak credentials) off-origin.
-                            return response, b"", False, current
-                        current = next_target
-                        params = dict(secret_query)  # redirect target carries its own query
-                        if response.status_code in (301, 302, 303):
-                            method, body = "GET", None
-                        continue
-                    payload, cut = await _read_capped(response, self.max_response_bytes)
-                    return response, payload, cut, current
-                finally:
-                    await response.aclose()
+                    async with asyncio.timeout(self.deadline_seconds):
+                        response = await client.send(request, stream=True)
+                        try:
+                            if response.is_redirect:
+                                location = response.headers.get("location", "")
+                                next_target = urljoin(current, location)
+                                if not _same_origin(entry, next_target):
+                                    # Do not follow (and do not leak credentials) off-origin.
+                                    return response, b"", False, current
+                                current = next_target
+                                params = dict(secret_query)  # the target carries its own query
+                                if response.status_code in (301, 302, 303):
+                                    method, body = "GET", None
+                                continue
+                            payload, cut = await _read_capped(response, self.max_response_bytes)
+                            return response, payload, cut, current
+                        finally:
+                            await response.aclose()
+                except (httpx.HTTPError, TimeoutError) as exc:
+                    raise _unavailable(entry, exc, write=False) from None
             finally:
                 if client is not self.client:
                     await client.aclose()
         raise PolicyDenied(f"too many redirects calling {entry.id!r}")
 
+    async def _no_answer(
+        self,
+        entry: ApiEntry,
+        op: Operation,
+        caller: Caller,
+        gone: ApiUnavailable,
+        echoes: tuple[str, ...],
+        started: float,
+        sent: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a call that got no answer: in the log, with the HTTP client's own words
+        minus the credential, and in the audit trail. `sent`: what a write carried."""
+        detail = _scrub(gone.detail, echoes)
+        log.warning(
+            "%s.%s got no answer for %s: %s%s",
+            entry.id,
+            op.id,
+            caller.agent,
+            gone.reason,
+            f" ({detail})" if detail else "",
+        )
+        extra: dict[str, Any] = dict(sent) if sent is not None else {}
+        if sent is not None:
+            extra["sent"] = gone.sent
+        await self.audit.record(
+            AuditEvent(
+                event="call" if sent is None else "write",
+                caller=caller.agent,
+                principal=caller.principal,
+                api=entry.id,
+                operation=op.id,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                detail=f"no answer: {gone.reason}",
+                extra=extra | _via(caller),
+            )
+        )
+
+
+# The failures that happen before any of the request has left: a write was not made.
+_NOT_SENT = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.LocalProtocolError,
+    httpx.UnsupportedProtocol,
+)
+
+
+def _unavailable(entry: ApiEntry, exc: BaseException, *, write: bool) -> ApiUnavailable:
+    """Why a call got no answer, in words for the calling agent.
+
+    Built from the kind of failure, never from the HTTP client's own message: that one
+    can quote the request it refused, credential included (see `_sendable`). The
+    client's message is kept apart, for the log, where the credential is removed first.
+    """
+    sent = not isinstance(exc, _NOT_SENT)
+    detail = str(exc)
+    if isinstance(exc, httpx.LocalProtocolError):
+        reason, detail = "the request has a header that is not valid HTTP", ""
+    elif isinstance(exc, httpx.PoolTimeout):
+        reason = "librarian has too many calls to it in progress"
+    elif isinstance(exc, httpx.ConnectTimeout):
+        reason = "it could not be reached: connecting took too long"
+    elif isinstance(exc, httpx.ConnectError):
+        reason = "it could not be reached" + _why_not_reached(exc)
+    elif isinstance(exc, TimeoutError | httpx.ReadTimeout | httpx.WriteTimeout):
+        reason = "it did not answer in time"
+    elif isinstance(exc, httpx.DecodingError):
+        reason = "its answer could not be decompressed"
+    elif isinstance(exc, httpx.RemoteProtocolError | httpx.ReadError | httpx.WriteError):
+        reason = "the connection broke before it had answered"
+    else:
+        reason = f"the call failed ({type(exc).__name__})"
+    if not write:
+        consequence = "Nothing was read: retry later."
+    elif sent:
+        consequence = "The write may have reached it: check before sending it again."
+    else:
+        consequence = "The write was not sent."
+    return ApiUnavailable(
+        f"{entry.name} gave no answer: {reason}. {consequence}",
+        sent=sent,
+        reason=reason,
+        detail=detail,
+    )
+
+
+def _why_not_reached(exc: BaseException) -> str:
+    """What stopped a connection, if the chain of causes says: the name, the TLS
+    certificate, or a refusal."""
+    seen: set[int] = set()
+    todo: list[BaseException] = [exc]
+    while todo:
+        cause = todo.pop()
+        if id(cause) in seen:
+            continue
+        seen.add(id(cause))
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            return " (its TLS certificate was not accepted)"
+        if isinstance(cause, ssl.SSLError):
+            return " (the TLS handshake failed)"
+        if isinstance(cause, socket.gaierror):
+            return " (its host name did not resolve)"
+        if isinstance(cause, ConnectionRefusedError):
+            return " (the connection was refused)"
+        todo += [c for c in (cause.__cause__, cause.__context__) if c is not None]
+        if isinstance(cause, BaseExceptionGroup):
+            todo += list(cast(BaseExceptionGroup[BaseException], cause).exceptions)
+    return ""
+
 
 SAID_LIMIT = 240
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _TOKEN_SHAPES = re.compile(
     r"(?i)\b(?:bearer\s+\S+|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
     r"|xox[abprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})"
@@ -604,7 +771,8 @@ def _said(data: Any, secret: str | None = None) -> str:
         text = data
     elif data is not None:
         text = json.dumps(data, default=str)
-    text = " ".join(text.split())
+    # One line, and nothing a terminal would act on: this text goes into the log.
+    text = _CONTROL.sub("", " ".join(text.split()))
     if secret:
         text = text.replace(secret, "[redacted]")
     text = _TOKEN_SHAPES.sub("[redacted]", text)
@@ -613,6 +781,29 @@ def _said(data: Any, secret: str | None = None) -> str:
 
 # What the HTTP client refuses to put into a header: these, and anything outside ASCII.
 _NOT_FOR_A_HEADER = re.compile(r"[\x00\n\r\x0b\x0c]|[^\x00-\x7f]")
+
+
+def trimmed(secret: str) -> str:
+    """A stored credential without what is never part of it: the whitespace around it (a
+    trailing line break, when it was stored from a file) and a byte-order mark."""
+    return secret.strip().removeprefix("\ufeff").strip()
+
+
+def unsendable(secret: str, auth: AuthSpec) -> bool:
+    """Whether this (trimmed) credential travels in a header and cannot be put into one."""
+    in_header = isinstance(auth, BearerAuth | OAuth2UserAuth) or (
+        isinstance(auth, ApiKeyAuth) and auth.location == "header"
+    )
+    return in_header and bool(_NOT_FOR_A_HEADER.search(secret))
+
+
+_AS_A_BEARER_KEY = BearerAuth.model_validate({"type": "bearer", "secret_ref": "any/key"})
+
+
+def credential_forms(secret: str, auth: AuthSpec | None = None) -> tuple[str, ...]:
+    """Every form a stored credential can turn up in, for code that looks for one outside
+    an API's answer (`librarian doctor`). Without `auth`: as a bearer key would be sent."""
+    return _echoes(trimmed(secret), auth if auth is not None else _AS_A_BEARER_KEY)
 
 
 def _sendable(
@@ -633,14 +824,11 @@ def _sendable(
     """
     if secret is None:
         return None
-    secret = secret.strip().removeprefix("\ufeff").strip()
+    secret = trimmed(secret)
     person = caller.principal if isinstance(auth, OAuth2UserAuth) else None
     if not secret:
         raise CredentialMissing(entry, reason=f"{what} is empty", principal=person)
-    in_header = isinstance(auth, BearerAuth | OAuth2UserAuth) or (
-        isinstance(auth, ApiKeyAuth) and auth.location == "header"
-    )
-    if in_header and _NOT_FOR_A_HEADER.search(secret):
+    if unsendable(secret, auth):
         raise CredentialMissing(
             entry,
             reason=f"{what} contains a line break or another character that cannot be sent "
@@ -648,14 +836,6 @@ def _sendable(
             principal=person,
         )
     return secret
-
-
-def _refused_to_send() -> httpx.LocalProtocolError:
-    """The HTTP client refused to send a request. Its own message quotes what it refused
-    (a header value, which may be the credential), so that message is not passed on."""
-    return httpx.LocalProtocolError(
-        "the request could not be sent: one of its headers is not valid HTTP"
-    )
 
 
 REDACTED = "[redacted]"
@@ -733,32 +913,18 @@ def _scrub(data: Any, echoes: tuple[str, ...], *, cut: bool = False) -> Any:
             if partial:
                 text = text[:-partial] + REDACTED
         return text
-    # Without recursion: an answer may be nested deeper than a function may call itself.
-    todo: list[Any] = [data]
-    while todo:
-        node = todo.pop()
-        if isinstance(node, dict):
-            items = cast(dict[Any, Any], node)
-            for key in list(items):
-                value = items[key]
-                if isinstance(value, str):
-                    items[key] = clean(value)
-                elif isinstance(value, dict | list):
-                    todo.append(value)
-                if isinstance(key, str) and (renamed := clean(key)) != key:
-                    items[renamed] = items.pop(key)
-        elif isinstance(node, list):
-            values = cast(list[Any], node)
-            for index, value in enumerate(values):
-                if isinstance(value, str):
-                    values[index] = clean(value)
-                elif isinstance(value, dict | list):
-                    todo.append(value)
-    return data
+    return rewrite_strings(data, clean)
 
 
 def _reset_time(headers: Mapping[str, str]) -> datetime | None:
     """When the limit lifts: Retry-After (seconds or a date), else X-RateLimit-Reset."""
+    try:
+        return _stated_reset_time(headers)
+    except (OverflowError, ValueError, OSError):  # a number no calendar can hold
+        return None
+
+
+def _stated_reset_time(headers: Mapping[str, str]) -> datetime | None:
     retry_after = headers.get("retry-after")
     if retry_after:
         if retry_after.strip().isdigit():
@@ -917,14 +1083,90 @@ async def _read_capped(response: httpx.Response, limit: int) -> tuple[bytes, boo
     return b"".join(chunks), False
 
 
+# JSON nested deeper than this is passed on as text: no real answer is, and what
+# serialises a result next (for an agent, for the database) gives up well before the
+# parser does.
+MAX_DEPTH = 100
+_HALF_PAIR = re.compile("[\ud800-\udfff]")
+
+
 def _decode(body: bytes, content_type: str, truncated: bool) -> Any:
+    """The answer as data: parsed when it is JSON that can be passed on, else as text.
+
+    "Can be passed on" matters as much as "parses". A document nested hundreds of levels
+    deep, a number that is not one (NaN, Infinity, 1e999) and half of a Unicode
+    surrogate pair all parse here and then break whatever serialises the result next:
+    after a write has already been sent.
+    """
     text = body.decode("utf-8", errors="replace")
-    if "json" in content_type and not truncated and text:
-        try:
-            return json.loads(text)
-        except ValueError:
-            return text
-    return text
+    if "json" not in content_type or truncated or not text:
+        return text
+    try:
+        data: Any = json.loads(text, parse_constant=_not_a_number, parse_float=_finite)
+    except (ValueError, RecursionError):
+        return text
+    if text.count("[") + text.count("{") > MAX_DEPTH and _deeper_than(data, MAX_DEPTH):
+        return text
+    if "\\ud" in text or "\\uD" in text:  # an escaped surrogate: is it half a pair?
+        data = rewrite_strings(data, lambda value: _HALF_PAIR.sub("\ufffd", value))
+    return data
+
+
+def _not_a_number(_: str) -> None:
+    """NaN and Infinity are not JSON; as JavaScript does, pass them on as null."""
+    return None
+
+
+def _finite(text: str) -> float | None:
+    value = float(text)
+    return value if math.isfinite(value) else None
+
+
+def _deeper_than(data: Any, limit: int) -> bool:
+    todo: list[tuple[Any, int]] = [(data, 1)]
+    while todo:
+        node, depth = todo.pop()
+        if isinstance(node, dict):
+            children = list(cast(dict[Any, Any], node).values())
+        elif isinstance(node, list):
+            children = cast(list[Any], node)
+        else:
+            continue
+        if depth > limit:
+            return True
+        todo += [(child, depth + 1) for child in children if isinstance(child, dict | list)]
+    return False
+
+
+def rewrite_strings(data: Any, rewrite: Callable[[str], str]) -> Any:
+    """Apply `rewrite` to every string in a decoded answer: values and keys, however deep.
+
+    In place (the answer was decoded for this call alone) and without recursion (an
+    answer may be nested deeper than a function may call itself).
+    """
+    if isinstance(data, str):
+        return rewrite(data)
+    todo: list[Any] = [data]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, dict):
+            items = cast(dict[Any, Any], node)
+            for key in list(items):
+                value = items[key]
+                if isinstance(value, str):
+                    items[key] = rewrite(value)
+                elif isinstance(value, dict | list):
+                    todo.append(value)
+                if isinstance(key, str) and (renamed := rewrite(key)) != key:
+                    items[renamed] = items.pop(key)
+        elif isinstance(node, list):
+            values = cast(list[Any], node)
+            for index, value in enumerate(values):
+                if isinstance(value, str):
+                    values[index] = rewrite(value)
+                elif isinstance(value, dict | list):
+                    todo.append(value)
+    return data
 
 
 def _next_link(response: httpx.Response, entry: ApiEntry, base_url: str) -> str | None:

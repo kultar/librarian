@@ -24,10 +24,11 @@ import pytest
 from librarian.audit import MemoryAuditSink
 from librarian.calls import Caller, CallRequest, WriteRequest
 from librarian.config import Settings
+from librarian.errors import ApiUnavailable
 from librarian.executor import CredentialMissing
 from librarian.registry import BasicAuth
 from librarian.secrets import FileSecretStore
-from librarian.service import Librarian, WriteRefused
+from librarian.service import Librarian
 from tests.conftest import BASE, PUBLIC, TRACKER, RecordingNotifier, Router, write_entries
 
 CALLER = Caller(agent="agent-a", principal="kim")
@@ -149,10 +150,11 @@ async def test_the_http_clients_own_message_is_not_passed_on(
 
     router.add("GET", f"{BASE}/v1/me", refuse)
     router.add("POST", f"{BASE}/v1/issues/PAY-1/comments", refuse)
-    with pytest.raises(httpx.LocalProtocolError) as read:
+    with pytest.raises(ApiUnavailable) as read:
         await librarian.executor.execute(WHOAMI, CALLER)
-    assert "could not be sent" in str(read.value) and KEY not in str(read.value)
-    assert read.value.__suppress_context__  # a logged traceback does not show the original
+    assert "a header that is not valid HTTP" in str(read.value) and KEY not in str(read.value)
+    assert read.value.detail == ""  # the client's own words are not even kept for the log
+    assert read.value.__suppress_context__  # nor shown by a logged traceback
 
     # A write: its failure is stored with the approval, shown to the approvers and
     # returned to the agent.
@@ -162,9 +164,9 @@ async def test_the_http_clients_own_message_is_not_passed_on(
         await asyncio.sleep(0.01)
     approval_id = next(iter(approvals))
     await librarian.approvals.approve(approval_id, "kim@x.test")
-    with pytest.raises(WriteRefused) as failed:
+    with pytest.raises(ApiUnavailable) as failed:
         await asyncio.wait_for(task, 5)
-    assert "could not be sent" in str(failed.value) and KEY not in str(failed.value)
+    assert "The write was not sent" in str(failed.value) and KEY not in str(failed.value)
     assert KEY not in approvals[approval_id].model_dump_json()
     assert KEY not in json.dumps(librarian.write_status(approvals[approval_id]), default=str)
     assert KEY not in "".join(a.model_dump_json() for _, a in notifier.write_events)

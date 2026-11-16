@@ -516,6 +516,10 @@ Rate limits are shared: with Postgres, `rate_limit_per_minute` is one limit acro
   set `githubApp.repo` and remove `registry.gitSync`: the repository keeps receiving every
   decision, as commits. Details and what to do if the files were already gone:
   [registry](registry.md#upgrading-from-019-or-earlier).
+- **After upgrading from before 0.20**, run `kubectl -n librarian exec deploy/librarian --
+  librarian doctor` once: it looks for credentials those versions could have stored in the
+  database, and says what to do about each
+  ([troubleshooting](troubleshooting.md#agents-and-calls)).
 - **Turning things on later**: writes per agent (`write_apis`; the operations themselves are
   enabled from the Slack card or the console when an agent first asks), standing grants
   (`config.writes.grants`; approvers also create them from the approval page, capped by

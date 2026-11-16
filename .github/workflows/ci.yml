@@ -12,6 +12,19 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      # For the tests that store what a misbehaving API answers: Postgres is stricter than
+      # SQLite about what text and JSON may hold (tests/test_hostile_api.py).
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: librarian
+          POSTGRES_PASSWORD: librarian
+          POSTGRES_DB: hostile
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U librarian -d hostile"
+          --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -22,6 +35,8 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run pyright
       - run: uv run pytest -q
+        env:
+          LIBRARIAN_TEST_POSTGRES_URL: postgresql+asyncpg://librarian:librarian@localhost:5432/hostile
       - name: Validate example registry
         run: uv run librarian registry validate
         env:
