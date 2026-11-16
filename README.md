@@ -21,7 +21,7 @@ credential out.
                                └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.18)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
+> Status: **alpha (v0.20)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
 ## Why
 
@@ -77,7 +77,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.19.1
+docker pull ghcr.io/kultar/librarian:0.20.0
 ```
 
 ### What happens on a request
