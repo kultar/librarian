@@ -84,7 +84,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
 uvx librarian-a2a serve                    # or run it without installing (same CLI)
-docker pull ghcr.io/kultar/librarian:0.22.1
+docker pull ghcr.io/kultar/librarian:0.22.2
 ```
 
 ### What happens on a request
@@ -1309,6 +1309,13 @@ uv run pytest
   says what the operation takes; an operation written another way (`add_comment` for
   `addComment`) is answered with the one that exists; and a search whose words fit an API
   but none of its operations lists them all the same instead of none
+- **v0.22.2**: the first answer fits in an agent's context. `capabilities` stays under
+  `capabilities_max_bytes` (16,000 bytes) however many APIs there are: its lists of
+  operations are cut, every API is still named with how many operations it has, and a
+  `note` says how to see the rest (on five large APIs: 39,000 tokens before, 8,500 now).
+  `capabilities` takes `api` for one API's operations; with a query the API that fits best
+  keeps its matches; and an API named another way (`GitHub` for `github`) is answered with
+  the one that exists
 
 ### Next
 
