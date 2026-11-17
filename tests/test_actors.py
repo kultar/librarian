@@ -454,10 +454,14 @@ WHOAMI = [new_data_part({"skill": "execute", "api": "tracker", "operation": "who
 
 
 async def served(
-    librarian: Librarian, fake: FakeSubstrate, *rule: ActorRule, keys: bool = True
+    librarian: Librarian,
+    fake: FakeSubstrate,
+    *rule: ActorRule,
+    keys: bool = True,
+    names_user_in: str = "",
 ) -> httpx.AsyncClient:
     librarian.settings.substrate = SubstrateSettings(
-        issuer=ISSUER, kagent_url=KAGENT, rules=rules(*rule)
+        issuer=ISSUER, kagent_url=KAGENT, rules=rules(*rule), claimed_user_header=names_user_in
     )
     app = create_app(librarian, caller_keys=KEYS if keys else {})
     if keys:
@@ -575,3 +579,108 @@ async def test_an_actors_write_waits_for_its_owner(
         WriteRequest(api="weather", operation="forecast", args={"city": "x"}), caller
     )
     assert not elsewhere.allowed and "may not write" in elsewhere.reason
+
+
+# -- what the agents' platform says about the person, without proof -----------------------
+
+WRITER = ActorRule(
+    match=ActorMatch(namespace="payments"), write_apis=["tracker"], owner="payments-leads@x.test"
+)
+COMMENT = [
+    new_data_part(
+        {
+            "skill": "write",
+            "api": "tracker",
+            "operation": "addComment",
+            "args": {"key": "PAY-1"},
+            "body": {"text": "hi"},
+            "reason": "test",
+        }
+    )
+]
+
+
+def waiting(librarian: Librarian) -> WriteApproval:
+    """The one write that is waiting for a person."""
+    (approval,) = librarian.approvals.pending()
+    return approval
+
+
+async def test_a_name_the_agents_platform_sends_is_shown_as_a_claim_and_decides_nothing(
+    librarian: Librarian, substrate: FakeSubstrate, audit: MemoryAuditSink
+) -> None:
+    """kagent can send the signed-in user's name in a header that nothing signs, set where
+    the agent itself runs commands. Asked to, librarian shows it to the approver and records
+    it, as what the agent's side says. It is not the person, and not the requester."""
+    http = await served(librarian, substrate, WRITER, names_user_in="X-User-Id")
+    http.headers["Authorization"] = f"Bearer {substrate.token()}"
+    http.headers["X-User-Id"] = "kim@example.com"
+
+    read = await send(librarian, http, WHOAMI)
+    assert read.final == TaskState.TASK_STATE_COMPLETED
+    call = next(ev for ev in audit.events if ev.event == "call")
+    assert call.principal is None and call.extra["claimed_for"] == "kim@example.com"
+    assert read.data[-1]["provenance"]["principal"] is None  # no person reached the call
+
+    asked = await send(librarian, http, COMMENT)
+    assert asked.final == TaskState.TASK_STATE_AUTH_REQUIRED
+    approval = waiting(librarian)
+    assert approval.claimed_for == "kim@example.com" and approval.principal is None
+    # The rule's owner is the requester. The person named is not, and may not approve.
+    assert approval.requesters == ["payments-leads@x.test"]
+    librarian.approvals.approver_mode = "requester"
+    assert librarian.approvals.may_approve(approval, "payments-leads@x.test", set()) is None
+    assert librarian.approvals.may_approve(approval, "kim@example.com", set()) is not None
+    requested = next(ev for ev in audit.events if ev.event == "write_requested")
+    assert requested.principal is None and requested.extra["claimed_for"] == "kim@example.com"
+
+    page = (await http.get(librarian.approvals.link(approval))).text
+    assert (
+        "nobody librarian has proof of. The agent's platform names <b>kim@example.com</b>: "
+        "nothing signs that, and it does not make them the requester." in page
+    )
+    await librarian.approvals.deny(approval.id, "payments-leads@x.test")
+
+
+async def test_what_the_platform_sends_is_made_fit_to_show(
+    librarian: Librarian, substrate: FakeSubstrate
+) -> None:
+    """The header is whatever the agent's side chose to send: it is shown as text, on one
+    line, and no longer than a name needs."""
+    http = await served(librarian, substrate, WRITER, names_user_in="X-User-Id")
+    http.headers["Authorization"] = f"Bearer {substrate.token()}"
+    http.headers["X-User-Id"] = "<script>alert(1)</script>\x1b[31m  kim\t&  co " + "x" * 400
+    assert (await send(librarian, http, COMMENT)).final == TaskState.TASK_STATE_AUTH_REQUIRED
+    approval = waiting(librarian)
+    assert approval.claimed_for is not None
+    assert approval.claimed_for.startswith("<script>alert(1)</script> [31m kim & co xxx")
+    assert len(approval.claimed_for) == 200 and approval.claimed_for.isprintable()
+    page = (await http.get(librarian.approvals.link(approval))).text
+    assert "<script>alert(1)" not in page
+    assert "<b>&lt;script&gt;alert(1)&lt;/script&gt; [31m kim &amp; co xxx" in page
+    await librarian.approvals.deny(approval.id, "payments-leads@x.test")
+
+
+async def test_the_platforms_word_is_not_taken_unless_asked_for_and_never_from_a_key(
+    librarian: Librarian, substrate: FakeSubstrate, audit: MemoryAuditSink
+) -> None:
+    # Not asked for (the default): the header is not read at all.
+    http = await served(librarian, substrate, WRITER)
+    http.headers["Authorization"] = f"Bearer {substrate.token()}"
+    http.headers["X-User-Id"] = "kim@example.com"
+    assert (await send(librarian, http, COMMENT)).final == TaskState.TASK_STATE_AUTH_REQUIRED
+    approval = waiting(librarian)
+    assert approval.claimed_for is None
+    page = (await http.get(librarian.approvals.link(approval))).text
+    assert "nobody (autonomous agent)" in page and "kim@example.com" not in page
+    await librarian.approvals.deny(approval.id, "payments-leads@x.test")
+    assert "claimed_for" not in str([ev.extra for ev in audit.events])
+
+    # Asked for: only from an agent the platform vouches for. An agent with a key of its
+    # own says who it works for the way it always did (`principal`), not in this header.
+    http = await served(librarian, substrate, WRITER, names_user_in="X-User-Id")
+    http.headers["Authorization"] = "Bearer key-a"
+    http.headers["X-User-Id"] = "kim@example.com"
+    assert (await send(librarian, http, WHOAMI)).final == TaskState.TASK_STATE_COMPLETED
+    keyed = [ev for ev in audit.events if ev.event == "call"][-1]
+    assert keyed.caller == "agent-a" and "claimed_for" not in keyed.extra

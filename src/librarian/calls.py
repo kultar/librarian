@@ -133,6 +133,10 @@ class Caller(BaseModel):
     # How the agent proved who it is, when not by its own key: the Agent Substrate
     # actor (one agent session) behind this call. Recorded with each call for audit.
     via: str | None = None
+    # Who the agent's side says it is working for, where its platform sends a name with
+    # nothing to prove it (`substrate.claimed_user_header`). Shown to approvers and
+    # recorded. It is not `principal`: it decides nothing.
+    claimed_for: str | None = None
     # What it may do inside an API it may use, by glob pattern of API id (the first
     # that matches counts). No entry for an API: nothing is limited inside it.
     limits: dict[str, Limits] = Field(default_factory=dict[str, Limits])

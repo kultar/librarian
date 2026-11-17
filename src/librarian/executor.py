@@ -1279,8 +1279,12 @@ def _int(value: Any, default: int = 0) -> int:
 
 def _via(caller: Caller) -> dict[str, Any]:
     """For the audit record: the Agent Substrate actor (one agent session) behind a
-    call, when the agent was identified by its actor token."""
-    return {"via": caller.via} if caller.via else {}
+    call, when the agent was identified by its actor token, and who its platform says
+    it is working for, when it says so (a claim, recorded as one)."""
+    noted: dict[str, Any] = {"via": caller.via} if caller.via else {}
+    if caller.claimed_for:
+        noted["claimed_for"] = caller.claimed_for
+    return noted
 
 
 def _merge_pages(pages: list[Any], items_path: str | None) -> Any:

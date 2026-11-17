@@ -213,6 +213,7 @@ Every value of the chart. `config` is librarian's own configuration: its setting
 | `substrate.trustBundle.labelSelector` |  | Which bundles of that signer: `podcert.ate.dev/canarying: live` |
 | `substrate.kagent.enabled` | `true` | Ask kagent which Agent a session belongs to, so that rules, grants and the audit trail are about the Agent. Off: plain Substrate, where rules match the actor |
 | `substrate.kagent.url` | `http://kagent-controller.kagent.svc:8083` | kagent's controller |
+| `substrate.kagent.claimedUserHeader` |  | The header in which kagent's runtime names the signed-in user (`X-User-Id`, with kagent's token propagation on). Nothing signs it: librarian shows it to approvers and records it as what the agent's side says, and uses it for nothing else. Unset: ignored |
 | `substrate.kagent.remoteMCPServer.create` | `true` | Register librarian as a `RemoteMCPServer`, for Agents to list under their tools |
 | `substrate.kagent.remoteMCPServer.name` | `librarian` | |
 | `substrate.kagent.remoteMCPServer.namespace` |  | Default: the release's (kagent must watch it) |

@@ -92,6 +92,9 @@ database defaults apply only when the user did not set them.
 {{- end -}}
 {{- if $s.kagent.enabled -}}
 {{- $_ := set $substrate "kagent_url" $s.kagent.url -}}
+{{- if $s.kagent.claimedUserHeader -}}
+{{- $_ := set $substrate "claimed_user_header" $s.kagent.claimedUserHeader -}}
+{{- end -}}
 {{- end -}}
 {{- if not (hasKey $substrate "rules") -}}
 {{- $_ := set $substrate "rules" $s.rules -}}

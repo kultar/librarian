@@ -60,6 +60,9 @@ class WriteApproval(BaseModel):
     request: WriteRequest
     agent: str
     principal: str | None = None
+    # Who the agent's platform says it is working for, unproven (`Caller.claimed_for`):
+    # for the approver to read. Never among the requesters.
+    claimed_for: str | None = None
     requesters: list[str] = Field(default_factory=list[str])  # principal and/or owner
     rememberable: bool = True
     state: ApprovalState = ApprovalState.PENDING
@@ -491,6 +494,7 @@ class ApprovalBroker:
                 request=request,
                 agent=caller.agent,
                 principal=caller.principal,
+                claimed_for=caller.claimed_for,
                 requesters=sorted(caller.requesters()),
                 rememberable=bool(op.rememberable),
                 expires_at=datetime.now(UTC) + self.expire_after,
@@ -539,6 +543,7 @@ class ApprovalBroker:
                 ),
                 agent=caller.agent,
                 principal=caller.principal,
+                claimed_for=caller.claimed_for,
                 requesters=sorted(caller.requesters()),
                 rememberable=False,
                 expires_at=datetime.now(UTC) + self.expire_after,
@@ -567,7 +572,11 @@ class ApprovalBroker:
                 api=approval.api,
                 operation=approval.operation,
                 detail=approval.request.reason or None,
-                extra={"approval": approval.id, **extra},
+                extra={
+                    "approval": approval.id,
+                    **extra,
+                    **({"claimed_for": caller.claimed_for} if caller.claimed_for else {}),
+                },
             )
         )
         await self.notifier.write_opened(approval, self.link(approval))

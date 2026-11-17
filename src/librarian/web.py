@@ -522,6 +522,21 @@ def _plan_body(body: Any) -> str:
     )
 
 
+def _for_whom(approval: WriteApproval) -> str:
+    """Who a write is for, as far as librarian knows it. A name the agent's platform sent
+    without proof is shown as that: it is not the person, and not the requester."""
+    e = html.escape
+    if approval.principal:
+        return e(approval.principal)
+    if approval.claimed_for:
+        return (
+            "nobody librarian has proof of. The agent's platform names "
+            f"<b>{e(approval.claimed_for)}</b>: nothing signs that, and it does not make "
+            "them the requester."
+        )
+    return "nobody (autonomous agent)"
+
+
 def _plan_form(approval: WriteApproval, token: str, error: str | None) -> str:
     """The approval page of a plan: every write, exactly as it will be sent, in order."""
     e = html.escape
@@ -529,7 +544,7 @@ def _plan_form(approval: WriteApproval, token: str, error: str | None) -> str:
     rows = [
         ("API", f"{e(approval.api_name)} <span class=muted>({e(approval.host)})</span>"),
         ("Agent", e(approval.agent)),
-        ("On behalf of", e(approval.principal or "nobody (autonomous agent)")),
+        ("On behalf of", _for_whom(approval)),
         ("Requester", e(", ".join(approval.requesters) or "none (approver group decides)")),
     ]
     if approval.request.reason:
@@ -598,7 +613,7 @@ def _approval_form(
         ("Operation", f"<code>{e(approval.operation)}</code>"),
         ("API", f"{e(approval.api_name)} <span class=muted>({e(approval.host)})</span>"),
         ("Agent", e(approval.agent)),
-        ("On behalf of", e(approval.principal or "nobody (autonomous agent)")),
+        ("On behalf of", _for_whom(approval)),
         ("Requester", e(", ".join(approval.requesters) or "none (approver group decides)")),
     ]
     if approval.summary:

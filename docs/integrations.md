@@ -342,9 +342,26 @@ name, and stay valid across the agent's sessions. Each audited call also carries
 token, not both, so librarian knows the agent but not the person behind it. A rule's `owner`
 stands in: they (or the approver group) approve the agent's writes. Two things therefore do not
 work through kagent yet: APIs that use each person's own sign-in, and "only the requester may
-approve". (With kagent's token propagation switched on, the agent's runtime also sends the
-user's name in an `X-User-Id` header. librarian does not use it: it is set inside the sandbox
-and nothing signs it, so an agent could send any name.)
+approve".
+
+**What kagent says about the person.** With kagent's token propagation switched on
+(`config.runtimeDefaults.tokenPropagation.enabled=true` when installing it), the agent's
+runtime sends the signed-in user's name in an `X-User-Id` header beside the actor's token. It
+is set inside the sandbox, where the agent itself can run commands, and nothing signs it: an
+agent could send any name. librarian therefore ignores it unless you ask for it to be shown:
+
+```yaml
+# librarian values
+substrate:
+  kagent:
+    claimedUserHeader: X-User-Id        # config: substrate.claimed_user_header
+```
+
+The approval page, the Slack card and the audit trail then say what it is: "On behalf of:
+nobody librarian has proof of. The agent's platform names kim@example.com: nothing signs that,
+and it does not make them the requester." It helps the rule's owner see whose conversation a
+write came from. It never makes that person the requester, and never reaches an API that acts
+as the person.
 
 **Waiting on a person.** A write that needs approval answers `pending` at once; the agent can
 end its turn (the actor is suspended, at no cost) and ask `write_status` later. The approval
@@ -400,6 +417,7 @@ no search domains, so `librarian.librarian.svc` does not resolve there.
 | `audience` | What tokens must be minted for (`librarian`). A token for any other service is refused, so a service that receives an actor's token cannot replay it here |
 | `ca_file` | CA bundle for fetching the issuer's keys. The in-cluster issuer's certificate comes from the cluster signer `servicedns.podcert.ate.dev/identity`; the chart projects its ClusterTrustBundle |
 | `kagent_url` | kagent's controller. Set: callers are Agents (`namespace/name`), and tokens must also carry the audience `kagent-agent-info`. Unset: callers are actors |
+| `claimed_user_header` | A header in which the platform names the person at the agent without proof (kagent: `X-User-Id`). Shown to approvers and recorded as what the agent's side says; used for nothing else. Unset: ignored |
 | `rules[].match` | `namespace`, `name` (globs) and `labels` of the Agent; `atespace` and `actor` (globs) of the actor. Every field given must match; `{}` matches everyone |
 | `rules[]` | `apis` (default all), `write_apis` (default none), `can_onboard`, `owner`, `agent` (a caller name to record instead), `approval_wait_seconds`, `limits` (what the agents may do inside an API: [README](../README.md#limits-inside-an-api)): the same meaning as under `callers` |
 

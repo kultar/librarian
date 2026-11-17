@@ -86,6 +86,13 @@ high-value target. This document lists what we defend against, how, and what is 
   data the same caller is allowed to read and include it in the answer. Per-agent API allowlists
   and limits inside an API bound this to what the caller could already read through `execute`.
 
+- **People are steered too, by what they are shown.** An approver reads what the agent wrote:
+  its reason, its arguments, the name of an API it onboarded. On the pages all of it is
+  escaped. In Slack, `<...>` is markup: a mention that pings a whole channel, a link with any
+  words over it ("approved by security: open here"). Every text librarian sends to Slack is
+  therefore escaped where it leaves; only its own mentions and links are markup. (Before
+  0.22 an agent's text went into the card as it was.)
+
 - **Documentation is input too.** When learning from docs, the model has no tools and only fills
   a fixed structure. Each operation must quote the page (checked against the fetched text, outside
   `<script>`); the host is the onboarding caller's `base_url`, never the docs'; read/write comes
@@ -299,8 +306,10 @@ audited; and the operator, through the database, the config and the registry dir
   what the rule for that namespace allows, no more. A rule's field names are checked strictly,
   because a misspelt `match` would otherwise match every agent. A person is never taken from
   what the agent's side sends unsigned: kagent can add the signed-in user's name in an
-  `X-User-Id` header, set inside the sandbox where the agent itself runs commands, and
-  librarian ignores it.
+  `X-User-Id` header, set inside the sandbox where the agent itself runs commands. librarian
+  ignores it by default. With `substrate.claimed_user_header` it is shown to the approver and
+  recorded, always worded as a claim, with control characters removed and its length
+  bounded; it is never the requester of a write, and never the person an API acts as.
 - **Residual risks there:** the token is a bearer credential valid for up to an hour (Substrate
   has no revocation), so anything between the gateway and librarian that can read it can use
   it: that hop is plain HTTP in-cluster unless a mesh encrypts it, so limit who can reach

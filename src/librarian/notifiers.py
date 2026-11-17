@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+import secrets
+from typing import Any, cast
 
 import httpx
 
@@ -20,6 +21,49 @@ from librarian.credentials import CredentialRequest, Notifier, RequestState
 log = logging.getLogger(__name__)
 
 SLACK_API = "https://slack.com/api"
+
+# Slack reads "<...>" in a message as markup: a mention that pings people, a link with any
+# words over it. What an agent, an API or a spec wrote must never become that, so every
+# text is escaped where it leaves for Slack. librarian's own markup is wrapped in a mark
+# that only this process knows, and is the one thing left as it is.
+_MARK = f"\x00{secrets.token_hex(8)}\x00"
+
+
+def own(markup: str) -> str:
+    """Slack markup librarian itself wrote: a mention, a link of its own."""
+    return f"{_MARK}{markup}{_MARK}"
+
+
+def slack_text(text: str) -> str:
+    """A text as it may be sent to Slack: nothing in it is markup but what `own` marked."""
+    parts = text.split(_MARK)
+    return "".join(
+        part if n % 2 and n < len(parts) - 1 else _as_text(part)  # odd: between two marks
+        for n, part in enumerate(parts)
+    )
+
+
+def _as_text(part: str) -> str:
+    part = part.split("\x00", 1)[0]  # what is left of a mark that a text was cut short in
+    return part.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def slack_payload(node: Any, *, top: bool = True) -> Any:
+    """What is sent to Slack's API, with every text it will read as markup made safe."""
+    if isinstance(node, dict):
+        fields = cast(dict[str, Any], node)
+        read_as_markup = top or fields.get("type") == "mrkdwn"
+        return {
+            key: slack_text(value)
+            if key == "text" and isinstance(value, str) and read_as_markup
+            else slack_payload(value, top=False)
+            for key, value in fields.items()
+        }
+    if isinstance(node, list):
+        return [slack_payload(item, top=False) for item in cast(list[Any], node)]
+    return node.replace(_MARK, "") if isinstance(node, str) else node
+
+
 _SLACK_GROUP_ID = re.compile(r"^S[A-Z0-9]{6,}$")
 
 
@@ -162,7 +206,7 @@ class SlackNotifier(Notifier):
         try:
             response = await self.client.post(
                 f"{self.api_base}/{method}",
-                json=payload,
+                json=slack_payload(payload),
                 headers={"Authorization": f"Bearer {self.bot_token}"},
             )
             data: dict[str, Any] = response.json()
@@ -242,7 +286,7 @@ class SlackNotifier(Notifier):
             except (httpx.HTTPError, ValueError):
                 self._user_ids[email] = None
         user_id = self._user_ids[email]
-        return f"<@{user_id}>" if user_id else email
+        return own(f"<@{user_id}>") if user_id else email
 
     async def write_opened(self, approval: WriteApproval, link: str) -> None:
         self._links[approval.id] = link
@@ -310,7 +354,7 @@ class SlackNotifier(Notifier):
                 "text": (
                     f":zap: Auto-approved write: {who} ran {approval_like.method} "
                     f"`{approval_like.operation}` on {approval_like.api_name} "
-                    f"({used} of {cap} today). <{link}|Require approval again>"
+                    f"({used} of {cap} today). " + own(f"<{link}|Require approval again>")
                 ),
             },
         )
@@ -422,9 +466,9 @@ class SlackNotifier(Notifier):
         user = await self._user_id(request.principal)
         text = (
             f":key: *{request.api_name}* needs you to sign in, so that *{request.agent}* can "
-            f"act as you there. <{link}|Sign in to {request.api_name}> (one-time link, "
-            f"{int(CONSENT_MINUTES)} minutes). Only what you can see is shared; agents never "
-            "see your token."
+            f"act as you there. {own(f'<{link}|')}Sign in to {request.api_name}{own('>')} "
+            f"(one-time link, {int(CONSENT_MINUTES)} minutes). Only what you can see is "
+            "shared; agents never see your token."
         )
         target = user or self.default_channel
         if user is None:
@@ -443,8 +487,8 @@ class SlackNotifier(Notifier):
         )
 
     async def _user_id(self, email: str) -> str | None:
-        mention = await self._user_mention(email)
-        return mention[2:-1] if mention.startswith("<@") else None
+        await self._user_mention(email)  # looks the person up, once
+        return self._user_ids.get(email)
 
 
 CONSENT_MINUTES = 30
@@ -588,7 +632,7 @@ def _api_changed_text(api: str, title: str, details: list[str], link: str | None
     if len(details) > 10:
         lines.append(f"• ... and {len(details) - 10} more")
     if link:
-        lines.append(f"<{link}|Review the proposed update>")
+        lines.append(own(f"<{link}|Review the proposed update>"))
     return "\n".join(lines)
 
 
@@ -612,6 +656,18 @@ def write_outcome_text(approval: WriteApproval) -> str:
 def _what(approval: WriteApproval) -> str:
     """What an approval is for, in a few words: the operation, or how big a plan."""
     return f"plan of {len(approval.steps)} writes" if approval.steps else approval.operation
+
+
+def _for_whom(approval: WriteApproval) -> str:
+    """Who a write is for. A name the agent's platform sent without proof is said to be
+    exactly that."""
+    if approval.principal:
+        return approval.principal
+    if approval.claimed_for:
+        return (
+            f"(no person with proof; the agent's platform names {approval.claimed_for}, unverified)"
+        )
+    return "(no person; autonomous)"
 
 
 def _needed(approval: WriteApproval) -> str:
@@ -663,13 +719,13 @@ def write_blocks(
             f"*Plan:* {len(approval.steps)} writes, in order\n{listed}"
             + (f"\n…and {more} more" if more > 0 else ""),
             f"*Agent:*\n{approval.agent}",
-            f"*For:*\n{approval.principal or '(no person; autonomous)'}",
+            f"*For:*\n{_for_whom(approval)}",
         ]
     else:
         fields = [
             f"*Operation:*\n`{approval.operation}`\n{approval.method} {approval.path}",
             f"*Agent:*\n{approval.agent}",
-            f"*For:*\n{approval.principal or '(no person; autonomous)'}",
+            f"*For:*\n{_for_whom(approval)}",
             f"*Arguments:*\n`{json.dumps(request.args)[:500]}`",
         ]
     if request.reason:
@@ -718,7 +774,7 @@ def write_blocks(
 def mention(group: str | None) -> str:
     if not group:
         return ""
-    return f"<!subteam^{group}>" if _SLACK_GROUP_ID.match(group) else group
+    return own(f"<!subteam^{group}>") if _SLACK_GROUP_ID.match(group) else group
 
 
 def resolution_text(request: CredentialRequest) -> str:

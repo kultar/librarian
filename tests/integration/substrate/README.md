@@ -162,7 +162,8 @@ kind delete cluster --name lib-substrate
   (it refuses a server configured for both). With token propagation switched on
   (`config.runtimeDefaults.tokenPropagation.enabled=true` when installing kagent) the runtime
   adds an `X-User-Id` header beside the actor's token; nothing signs it and it is set inside the
-  sandbox, so librarian does not take it for the person.
+  sandbox, so librarian does not take it for the person. With
+  `substrate.kagent.claimedUserHeader: X-User-Id` it shows the name on the approval, as a claim.
 - With an actor token, kagent's controller does not list the server's tools (the
   `RemoteMCPServer` is accepted with discovery disabled): agents discover them at run time, and
   kagent's tool picker stays empty for librarian.

@@ -266,6 +266,12 @@ class SubstrateSettings(BaseModel):
     # must then also include `kagent-agent-info`.
     kagent_url: str | None = None
     kagent_cache_seconds: float = Field(default=60, ge=0, le=3600)
+    # A request header in which the agents' platform names the person at the agent
+    # (kagent with token propagation on: "X-User-Id"). It is set inside the sandbox,
+    # where the agent itself runs commands, and nothing signs it. So it is only shown to
+    # approvers and recorded, as what the agent's side says: never the requester of a
+    # write, never the person an API acts as. Empty: the header is ignored.
+    claimed_user_header: str = ""
     # First match wins. An agent no rule matches is refused.
     rules: list[ActorRule] = Field(default_factory=list[ActorRule])
 

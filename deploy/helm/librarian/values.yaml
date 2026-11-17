@@ -121,6 +121,11 @@ substrate:
     # Off: plain Substrate, where rules match on `atespace` and `actor`.
     enabled: true
     url: http://kagent-controller.kagent.svc:8083
+    # The header in which kagent's runtime names the signed-in user, when kagent is
+    # installed with token propagation on: X-User-Id. Nothing signs it and it is set inside
+    # the sandbox, so librarian only shows it to approvers and records it, as what the
+    # agent's side says. Empty: ignored.
+    claimedUserHeader: ""
     remoteMCPServer:
       create: true          # needs kagent's CRDs in the cluster
       name: librarian

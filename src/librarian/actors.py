@@ -269,6 +269,18 @@ class ActorAuthenticator:
         )
 
 
+MAX_CLAIMED = 200
+
+
+def claimed_user(value: str | None) -> str | None:
+    """A name the agents' platform sent without proof, made fit to show and to record:
+    printable, on one line, of bounded length. None when nothing of it is left."""
+    if not value:
+        return None
+    shown = " ".join("".join(ch if ch.isprintable() else " " for ch in value).split())
+    return shown[:MAX_CLAIMED] or None
+
+
 def _matches(rule: ActorRule, actor: Actor) -> bool:
     """Every field the rule gives must match; an empty match is every actor."""
     match = rule.match

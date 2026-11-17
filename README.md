@@ -250,6 +250,10 @@ Two things keep it well-behaved behind any of them:
 Through kagent librarian knows the agent, not the person behind it (kagent sends an MCP server
 one or the other). A rule's `owner` approves that agent's writes; APIs that use each person's
 own sign-in, and "only the requester may approve", need a person and do not work there yet.
+What kagent can add is the signed-in user's name in a header nothing signs. With
+`substrate.claimed_user_header: X-User-Id` librarian shows it to the approver and records it,
+worded as what it is ("the agent's platform names kim@example.com: nothing signs that"), and
+uses it for nothing else.
 
 ## Observability
 
@@ -961,6 +965,7 @@ name in capitals, with `__` between the levels (`writes.max_grant_days` is
 | `substrate.leeway_seconds` | `30` | Clock difference tolerated when checking a token's times |
 | `substrate.kagent_url` |  | kagent's controller. Set: the caller is the kagent Agent behind a session, not the session |
 | `substrate.kagent_cache_seconds` | `60` | How long the answer to "which Agent is this session" is reused |
+| `substrate.claimed_user_header` |  | A request header in which the agents' platform names the person at the agent (kagent with token propagation on: `X-User-Id`). Nothing signs it, so it is only shown to approvers and recorded as what the agent's side says: never the requester, never the person an API acts as. Unset: ignored |
 | `substrate.rules[].match.namespace` |  | The kagent Agent's namespace (a glob pattern). Every field given must match; an empty `match` is every agent |
 | `substrate.rules[].match.name` |  | The kagent Agent's name (a glob pattern) |
 | `substrate.rules[].match.labels` |  | Labels the kagent Agent must carry |

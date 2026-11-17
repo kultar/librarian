@@ -61,7 +61,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from librarian import __version__, plans, telemetry
-from librarian.actors import ActorAuthenticator, ActorError
+from librarian.actors import ActorAuthenticator, ActorError, claimed_user
 from librarian.approvals import WriteApproval
 from librarian.calls import Caller, CallRequest, WriteRequest
 from librarian.config import PrincipalSettings
@@ -563,6 +563,10 @@ class CallerAuthMiddleware(BaseHTTPMiddleware):
                 except ActorError as exc:
                     self.actors.refused(exc)
                     return JSONResponse({"error": str(exc)}, status_code=exc.status)
+                named_in = self.actors.settings.claimed_user_header
+                if named_in:  # what the agent's platform says, with nothing to prove it
+                    said = claimed_user(request.headers.get(named_in))
+                    caller = caller.model_copy(update={"claimed_for": said})
             else:
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
         caller = caller.model_copy(
