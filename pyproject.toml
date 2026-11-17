@@ -34,6 +34,9 @@ dependencies = [
 
 [project.scripts]
 librarian = "librarian.cli:app"
+# The same command under the package's name: `uvx librarian-a2a serve` is how a client
+# that found librarian in the MCP Registry starts it (see server.json).
+librarian-a2a = "librarian.cli:app"
 
 [project.optional-dependencies]
 postgres = [

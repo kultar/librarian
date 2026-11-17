@@ -106,7 +106,8 @@ def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) 
             id="capabilities",
             name="List capabilities",
             description=(
-                'Which APIs and read operations are available. {"skill":"capabilities",'
+                "Which APIs and read operations are available, and, where the agent may "
+                'ask for changes, which operations write. {"skill":"capabilities",'
                 '"query":"optional keywords"}.'
             ),
             tags=["discovery"],

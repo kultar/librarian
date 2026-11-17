@@ -112,7 +112,10 @@ def build_mcp(librarian: Librarian) -> MCPServer:
     @server.tool(annotations=read_only)
     async def capabilities(ctx: Context, query: str | None = None) -> dict[str, Any]:
         """List the APIs you may use and their read operations, best matches first when a
-        query is given (e.g. "jira issue comments")."""
+        query is given (e.g. "jira issue comments"). Where you may ask for changes, the
+        operations that write are listed too (`write_operations`): use them with `write`
+        or `write_plan`. `enabled: false` means nobody has allowed writes through that
+        operation yet; asking for one asks the approvers to."""
         return {"apis": librarian.capabilities(query, _caller(ctx))}
 
     @server.tool(annotations=read_only)

@@ -1,7 +1,9 @@
 # Releasing
 
-1. Bump `version` in `pyproject.toml` and `__version__` in `src/librarian/__init__.py`, run
-   `uv lock`, and merge to `main` with CI green.
+1. Bump `version` in `pyproject.toml` and `__version__` in `src/librarian/__init__.py`, the
+   chart's `version` and `appVersion`, and the three versions in `server.json`; run `uv lock`,
+   and merge to `main` with CI green. (`tests/test_listing.py` fails when one of them is
+   behind.)
 2. Tag and push: `git tag v0.4.0 && git push origin v0.4.0`.
    (Or run the **release** workflow manually with the tag; pushes made with an automation token
    do not trigger workflows.)
@@ -15,7 +17,11 @@ The release workflow then:
   version (Chart.yaml `version` and `appVersion` must equal the release version, or the job fails).
   The first push creates the package private: make `charts/librarian` public once under
   GitHub → Packages, as the image is;
-- publishes `librarian-a2a` to PyPI **if** enabled (below).
+- publishes `librarian-a2a` to PyPI **if** enabled (below);
+- publishes `server.json` to the [MCP Registry](https://registry.modelcontextprotocol.io) as
+  `io.github.kultar/librarian`, after the PyPI package and the image exist: the registry checks
+  that both name this server (`mcp-name:` in the README, a label in the Dockerfile). It signs
+  in with GitHub's own identity for this repository; there is no token to keep.
 
 ## One-time setup
 

@@ -1374,8 +1374,40 @@ class Librarian:
                 and (limits is None or limits.reaches(op))
             ]
 
-        def shown(entry: ApiEntry) -> list[Operation]:
-            return rank(entry, query, reads(entry), limit=20) if query else reads(entry)[:50]
+        def writes(entry: ApiEntry) -> list[Operation]:
+            """The changes this caller may ask for there. Asking is all it may do: each
+            one still needs a person's approval or a grant."""
+            if not caller.may_write(entry.id):
+                return []
+            limits = caller.limits_for(entry.id)
+            return [
+                op
+                for op in entry.operations
+                if op.access is not Access.READ
+                and not self.observations.suspended(entry, op)
+                and (limits is None or limits.reaches(op))
+            ]
+
+        def shown(entry: ApiEntry, ops: list[Operation]) -> list[Operation]:
+            return rank(entry, query, ops, limit=20) if query else ops[:50]
+
+        def changes(entry: ApiEntry) -> dict[str, Any]:
+            """Named so that an agent does not have to guess an operation to find out
+            that it writes. `enabled`: somebody has allowed writes through it."""
+            ops = writes(entry)
+            if not ops:
+                return {}
+            return {
+                "write_operations": [
+                    {
+                        "operation": op.id,
+                        "summary": op.summary[:160],
+                        "enabled": op.writable and entry.write_auth is not None,
+                    }
+                    for op in shown(entry, ops)
+                ],
+                "total_write_operations": len(ops),
+            }
 
         def limited(entry: ApiEntry) -> dict[str, Any]:
             limits = caller.limits_for(entry.id)
@@ -1389,9 +1421,10 @@ class Librarian:
                 "status": e.status.value,
                 "base_url": e.base_url,
                 "read_operations": [
-                    {"operation": op.id, "summary": op.summary[:160]} for op in shown(e)
+                    {"operation": op.id, "summary": op.summary[:160]} for op in shown(e, reads(e))
                 ],
                 "total_read_operations": len(reads(e)),
+                **changes(e),
                 "credential_ready": None if e.secret_ref is None else "unknown",
                 "learned_from": e.source.kind,
                 **limited(e),

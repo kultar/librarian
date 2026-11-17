@@ -18,6 +18,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from librarian.approvals import ApprovalState
+from librarian.calls import Caller
 from librarian.config import CallerKey
 from librarian.secrets import FileSecretStore
 from librarian.server import create_app
@@ -102,6 +103,34 @@ async def test_capabilities_respects_the_callers_allowlist(connect: Connect) -> 
     async with connect() as session:
         apis = data(await session.call_tool("capabilities", {}))["apis"]
     assert {a["api"] for a in apis} == {"tracker", "weather", "status"}
+
+
+async def test_capabilities_names_the_changes_an_agent_may_ask_for(
+    connect: Connect, librarian: Librarian
+) -> None:
+    """An agent has to know which operation makes a change before it can ask for it.
+    Where it may ask for writes it is told, with whether anybody has allowed writes through
+    that operation yet. Where it may only read, writes are not mentioned."""
+    async with connect() as session:
+        apis = {a["api"]: a for a in data(await session.call_tool("capabilities", {}))["apis"]}
+        found = data(await session.call_tool("capabilities", {"query": "add a comment"}))
+    tracker = apis["tracker"]
+    by_name = {op["operation"]: op for op in tracker["write_operations"]}
+    assert by_name["addComment"]["enabled"] is True
+    assert tracker["total_write_operations"] == len(tracker["write_operations"]) >= 1
+    assert "addComment" not in {op["operation"] for op in tracker["read_operations"]}
+    assert not {op["operation"] for op in tracker["read_operations"]} & set(by_name)
+    for other in ("weather", "status"):  # no `write_apis` there: nothing about writes
+        assert "write_operations" not in apis[other]
+    # Looked for in words, the operation that writes is found like one that reads.
+    hit = next(a for a in found["apis"] if a["api"] == "tracker")
+    assert hit["write_operations"][0]["operation"] == "addComment"
+
+    # Not enabled by anybody: named all the same, and said to be so.
+    assert by_name["renameProject"]["enabled"] is False
+    # An agent that may not write there is told nothing about writes.
+    reader = librarian.capabilities(caller=Caller(agent="b"))
+    assert all("write_operations" not in a for a in reader)
 
 
 async def test_execute_with_select(

@@ -9,6 +9,9 @@ COPY src ./src
 RUN uv sync --frozen --no-dev --extra aws --extra postgres --extra otel
 
 FROM python:3.12-slim
+# The name this image's MCP server has in the MCP Registry (see server.json): the registry
+# lists the image only if the image itself says so.
+LABEL io.modelcontextprotocol.server.name="io.github.kultar/librarian"
 RUN useradd --uid 10001 --create-home librarian \
     && mkdir -p /data/registry /data/.librarian/secrets \
     && chown -R librarian:librarian /data \

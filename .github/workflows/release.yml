@@ -129,6 +129,58 @@ jobs:
           echo "${{ github.token }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           helm push "librarian-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
 
+  mcp-registry:
+    # librarian's MCP endpoint in the MCP Registry (registry.modelcontextprotocol.io), as
+    # server.json describes it. The registry lists a package only if the package says it is
+    # this server (the README on PyPI, a label on the image), so this runs after both.
+    needs: [build, image, pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # the registry takes GitHub's word that this is this repository
+      contents: read
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      MCP_PUBLISHER_VERSION: v1.8.9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: server.json must describe this release
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          server = json.load(open("server.json"))
+          named = {server["version"]} | {
+              package.get("version") or package["identifier"].rsplit(":", 1)[-1]
+              for package in server["packages"]
+          }
+          if named != {os.environ["VERSION"]}:
+              sys.exit(f"::error::server.json names {sorted(named)}, the release is {os.environ['VERSION']}")
+          EOF
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+      - run: ./mcp-publisher login github-oidc
+      - name: Publish (the package index can need a moment to show the new version)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if ./mcp-publisher publish; then exit 0; fi
+            echo "attempt ${attempt} failed; waiting"
+            sleep 30
+          done
+          exit 1
+
   pypi:
     # Enable once PyPI trusted publishing is configured for this repo (see RELEASING.md):
     # repository variable PYPI_PUBLISH = true.

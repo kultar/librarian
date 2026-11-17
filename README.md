@@ -23,6 +23,8 @@ credential out.
 
 > Status: **alpha (v0.21)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
+<!-- mcp-name: io.github.kultar/librarian -->
+
 ## Why
 
 - **One choke point.** Every call from every agent goes through one deterministic policy engine and
@@ -81,6 +83,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
+uvx librarian-a2a serve                    # or run it without installing (same CLI)
 docker pull ghcr.io/kultar/librarian:0.21.0
 ```
 
@@ -114,7 +117,7 @@ GitHub is written to, never asked: nothing merged or edited there changes what a
 | Skill | What it does | LLM? |
 |---|---|---|
 | `execute` | Run one read operation: `{"skill":"execute","api":"jira","operation":"getIssue","args":{"issueIdOrKey":"ABC-1"}}`. Optional `select` (dotted paths, e.g. `["fields.summary"]`) and `max_pages` | No |
-| `capabilities` | List APIs and read operations: `{"skill":"capabilities","query":"issues"}` | No |
+| `capabilities` | List APIs and read operations: `{"skill":"capabilities","query":"issues"}`. An agent that may ask for writes on an API also gets its `write_operations`, each with whether writes through it are `enabled` | No |
 | `onboard` | Learn an API: `{"skill":"onboard","api":"jira","spec_url":"https://..."}`, `"base_url"` to auto-discover, or `"docs_url"` + `"base_url"` when there is no spec | No |
 | `write` | Change data, with human approval or a grant: `{"skill":"write","api":"jira","operation":"addComment","args":{...},"body":{...},"reason":"why"}`. Optional `idempotency_key`: a repeat returns the first result instead of running again. The answer says how it ran (approved by whom, under which grant, or automatically) | No |
 | `plan` | Several writes on one API, approved as one and made in order: `{"skill":"plan","api":"github","reason":"why","steps":[{"id":"blob","operation":"...","args":{...},"body":{...}}, ...]}`. A later step takes a value an earlier one returned with `{"$from":"blob.sha"}` ([more](#several-writes-as-one-plan)) | No |
@@ -246,6 +249,19 @@ Two things keep it well-behaved behind any of them:
 - **An agent can wait for a person.** Where nothing can wake an agent when an approval
   arrives (a kagent session, a chat turn), it asks `write_status` with `wait_seconds` and has
   the outcome in the same turn (`mcp_max_wait_seconds`).
+
+Two things help an agent find librarian and use it well:
+
+- **A skill.** [`skills/librarian`](skills/librarian/SKILL.md) is an Agent Skill: one
+  `SKILL.md` that tells an agent how to read through librarian, how to ask for a change and
+  wait for the person, and what to do with each answer (`too_large`, `pending_approval`,
+  `write_not_enabled`, a refusal). A kagent Agent takes it by its git commit
+  ([integrations](docs/integrations.md#the-skill)); any harness that reads Agent Skills can
+  use the same folder.
+- **The MCP Registry.** librarian is listed in the
+  [MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.kultar/librarian`,
+  from [`server.json`](server.json), with every release: the PyPI package
+  (`uvx librarian-a2a serve`) and the image, each serving MCP at `http://127.0.0.1:8080/mcp`.
 
 Through kagent librarian knows the agent, not the person behind it (kagent sends an MCP server
 one or the other). A rule's `owner` approves that agent's writes; APIs that use each person's

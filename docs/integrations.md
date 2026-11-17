@@ -17,6 +17,29 @@ Things a client must handle:
   as strings so they keep their precision.
 - **Principal**: pass the person the agent acts for as message metadata `{"principal": "..."}`.
 
+## Any MCP client
+
+The same skills are MCP tools at `/mcp` (Streamable HTTP, JSON answers, no session): give the
+client that address and `Authorization: Bearer <the agent's key>`. For Claude Code, for
+example: `claude mcp add --transport http librarian http://localhost:8080/mcp --header
+"Authorization: Bearer <key>"`.
+
+librarian is listed in the [MCP Registry](https://registry.modelcontextprotocol.io) as
+`io.github.kultar/librarian`. The entry ([`server.json`](../server.json)) names two ways to
+start it, both serving MCP at `http://127.0.0.1:8080/mcp`: `uvx librarian-a2a serve`, and the
+image `ghcr.io/kultar/librarian`. Started like that, with no configuration, librarian has no
+callers and accepts everyone who can reach it, which on your own machine is you: for anything
+shared, configure `callers`.
+
+### The skill
+
+[`skills/librarian`](../skills/librarian/SKILL.md) is an
+[Agent Skill](https://agentskills.io): a `SKILL.md` an agent reads when a task calls for it.
+It says what the tool descriptions have no room for: how to ask only for the fields needed,
+what to do with `too_large`, how to give a reason an approver can judge, how to wait for the
+decision instead of asking again, and that a refusal is a decision and not an obstacle. Copy
+the folder to where your harness looks for skills, or point at it in git (kagent: below).
+
 ## LiteLLM (agent gateway)
 
 librarian works behind LiteLLM both as an **MCP server** and as an **A2A agent**, tested end to
@@ -311,6 +334,21 @@ spec:
 Nothing else is needed: kagent adds librarian to that agent's egress policy and has the gateway
 inject the token. The agent discovers the tools itself, at run time, so they do not show in
 kagent's tool picker.
+
+**The skill.** An Agent can be given [librarian's skill](#the-skill) by the commit it is at:
+
+```yaml
+  skills:
+    - name: librarian
+      source:
+        git:
+          url: https://github.com/kultar/librarian
+          commit: <the full commit id of the release you run>
+        path: skills/librarian
+```
+
+kagent fetches that folder into the agent's sandbox, and the agent reads it when a task needs
+an API.
 
 **Some of the tools, and kagent's own approval.** A binding can name the tools an agent gets,
 and kagent can hold a tool call for the person in the conversation before it is made:
