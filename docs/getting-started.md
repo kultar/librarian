@@ -118,6 +118,29 @@ The approval page shows exactly what will be sent and why. Click **Approve this 
 Writes only ever run on approved entries, for operations an approver enabled, with a separate
 write key, after approval.
 
+**Several writes, one decision.** A change that takes several writes can be asked for as one
+plan: the approver sees all of them together and approves once, and a later step can use what
+an earlier one returned.
+
+```bash
+./ask '{"skill":"plan","api":"demo","reason":"Trying out a plan","steps":[{"id":"first","operation":"addComment","args":{"id":"42"},"body":{"text":"Looks good"}},{"id":"second","operation":"addComment","args":{"id":"43"},"body":{"text":"Same here","seen":{"$from":"first.json.text"}}}]}'
+# "state": "TASK_STATE_AUTH_REQUIRED"
+
+docker compose logs librarian | grep -o 'http://localhost:8080/approvals/[^ ]*' | tail -1
+```
+
+The page lists both requests in order; `{"$from": "first.json.text"}` is marked as not known
+yet. Click **Approve this plan**, then:
+
+```bash
+./ask task <the plan's task id>
+# "state": "TASK_STATE_COMPLETED": both steps are "made", and the second was sent with
+# "seen": "Looks good", taken from what the demo API answered to the first
+```
+
+The first step that fails ends a plan, and nothing is undone:
+[Several writes as one plan](../README.md#several-writes-as-one-plan).
+
 ## 5. Connect a real agent
 
 librarian speaks **A2A** (at `/`) and **MCP** (at `/mcp`), with the same keys and rules. For
@@ -129,8 +152,8 @@ claude mcp add --transport http librarian http://localhost:8080/mcp \
 ```
 
 Then ask Claude Code something like *"use librarian to find how many APIs APIs.guru tracks"*.
-Over MCP nothing blocks on a person: a write returns `pending_approval`, and librarian finishes
-it after approval (`write_status` reports the result).
+Over MCP nothing blocks on a person: a write (or a plan, `write_plan`) returns
+`pending_approval`, and librarian finishes it after approval (`write_status` reports the result).
 
 For agents behind the **LiteLLM** gateway, or running on **kagent / Agent Substrate** (where
 they need no key at all), see [docs/integrations.md](integrations.md).

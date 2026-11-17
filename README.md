@@ -21,7 +21,7 @@ credential out.
                                └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.20)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
+> Status: **alpha (v0.21)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
 ## Why
 
@@ -81,7 +81,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
-docker pull ghcr.io/kultar/librarian:0.20.0
+docker pull ghcr.io/kultar/librarian:0.21.0
 ```
 
 ### What happens on a request
@@ -900,7 +900,7 @@ uv run pytest
   end of a file) is not sent, and a key that cannot be sent is refused without being named:
   the HTTP client's own error quoted it, to the log and, for a write, to the agent
 
-- **v0.21** (in progress, not released): hardening against APIs that misbehave. An agent is
+- **v0.21**: hardening against APIs that misbehave. An agent is
   told when an API cannot be reached or does not finish answering, in those words and, for a
   write, with whether the request can have reached the API ("was not sent" or "may have
   reached it"), instead of "internal error". One request has a time limit as a whole. An
@@ -914,8 +914,8 @@ uv run pytest
   own identity, or a role assumed for the API). An API's authentication can be described in
   full in the console.
   Limits inside an API: an agent's rule can name the operations it may use and the values its
-  arguments may take (`limits`), enforced by the policy engine for reads, writes and planned
-  calls.
+  arguments may take (`limits`), enforced by the policy engine for reads, writes and the
+  planner's calls.
   Several writes as one plan (`plan` over A2A, `write_plan` over MCP): the approver sees every
   request of a change together and approves once; later steps take what earlier ones
   returned; each step is checked again before it is sent; the first failure ends the plan
