@@ -40,7 +40,7 @@
     <h1>One librarian for every API your agents&nbsp;use.</h1>
     <p class="lede">Agents ask librarian for data instead of carrying their own API keys. It learns an API the first time one is needed, asks a person for the key once, serves reads within policy, and holds every write for a person's approval unless an approver decided in advance.</p>
     <div class="install"><pre><code>pip install librarian-a2a
-docker pull ghcr.io/kultar/librarian:0.22.0</code></pre></div>
+docker pull ghcr.io/kultar/librarian:0.22.1</code></pre></div>
     <div class="actions">
       <a class="btn" href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Try it in ten minutes</a>
       <a class="btn quiet" href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploy it for a team</a>
@@ -179,7 +179,7 @@ docker compose up -d
         <h3>For your team</h3>
         <p>A Helm chart with oauth2-proxy sign-in, Postgres for the registry and every decision, AWS Secrets Manager for keys, and a GitHub repository that receives a commit for each approved decision. Two or more replicas, no volumes, nothing exposed to the internet.</p>
 <pre><code>helm install librarian oci://ghcr.io/kultar/charts/librarian \
-  --version 0.22.0 -n librarian -f values.yaml
+  --version 0.22.1 -n librarian -f values.yaml
 helm test librarian -n librarian</code></pre>
         <a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a>
       </div>
@@ -216,7 +216,7 @@ substrate:
     <table>
       <thead><tr><th>Skill</th><th>What it does</th></tr></thead>
       <tbody>
-        <tr><td><code>capabilities</code></td><td>Which APIs and read operations this agent may use.</td></tr>
+        <tr><td><code>capabilities</code></td><td>Which APIs and operations this agent may use, and the arguments each one takes.</td></tr>
         <tr><td><code>execute</code></td><td>Run one read operation, with optional field selection and pagination.</td></tr>
         <tr><td><code>onboard</code></td><td>Teach librarian an API: a spec URL, a docs URL, or just a base URL.</td></tr>
         <tr><td><code>write</code></td><td>Change data, after a person approves it, a grant covers it, or an approver chose automatic approval for that operation. If nobody has enabled the operation yet, approvers are asked. The answer says how it ran: who approved, which grant, or automatic.</td></tr>
@@ -273,6 +273,7 @@ substrate:
         <li>At home behind agentgateway and on kagent: tested as an MCP server and an A2A agent behind the gateway, a route on your Gateway from the chart, and an agent that can wait for a person's decision in the same turn</li>
         <li>An answer too large to send comes back as its outline, agents are told which operations write, and nothing an agent wrote is read as markup in Slack</li>
         <li>An Agent Skill that teaches agents librarian's tools, and an entry in the MCP Registry</li>
+        <li>Agents are told what each operation takes, and one that gets a name or an argument wrong is told the right one</li>
       </ul></div>
       <div><h3>Next</h3><ul>
         <li>Console actions that answer at once everywhere, with model guidance and Slack updates finishing in the background as the record already does</li>

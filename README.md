@@ -84,7 +84,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
 uvx librarian-a2a serve                    # or run it without installing (same CLI)
-docker pull ghcr.io/kultar/librarian:0.22.0
+docker pull ghcr.io/kultar/librarian:0.22.1
 ```
 
 ### What happens on a request
@@ -289,6 +289,13 @@ The JSONL audit log is separate and always on.
 - **Operation search.** Requests are matched to operations with BM25 ranking over operation ids
   (split into words: `getIssueWatchers` -> issue, watch), tags, paths and summaries. On Jira's
   620-operation API, "who is watching an issue" finds `getIssueWatchers` first.
+- **What `capabilities` lists.** With a `query`: the ten APIs that fit it best, and of each
+  the 20 best-matching reads (and the 20 best-matching writes, where the agent may ask for
+  writes). Without one: every API the agent may use, with the first 50 of each. Each
+  operation comes with the arguments it takes, and `total_read_operations` and
+  `total_write_operations` say how many there are, so an agent that does not see what it
+  needs asks again in other words. On GitHub's API, an answer to a query is about 3 KB for
+  an agent that only reads and 7 KB for one that may also ask for writes.
 - **Answers an agent can take.** `select` keeps only the fields an agent names
   (`["issues.key", "issues.fields.summary"]`). Over MCP, an answer that would make a tool
   result of more than `mcp_max_result_bytes` (1 MB as sent, about 480 KB of data) is not
@@ -1273,6 +1280,12 @@ uv run pytest
   closed (on SQLite the process could fail to exit). The README names every command,
   setting, tool and kind of authentication, the chart's README every value, and tests keep
   it so
+- **v0.22.1**: from the first real agent that was given the skill and a plain task: it had
+  to guess what an operation takes. `capabilities` names each operation's arguments
+  (`args`; `team?` may be left out) and says when it takes a body; a refusal over arguments
+  says what the operation takes; an operation written another way (`add_comment` for
+  `addComment`) is answered with the one that exists; and a search whose words fit an API
+  but none of its operations lists them all the same instead of none
 
 ### Next
 
