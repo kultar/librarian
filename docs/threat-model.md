@@ -250,6 +250,11 @@ audited; and the operator, through the database, the config and the registry dir
   data only if everything downstream can handle it: JSON nested deeper than 100 levels is
   passed on as text, `NaN` and `Infinity` as `null`, half a Unicode surrogate pair as the
   replacement character, and nothing a terminal would act on reaches the log.
+- **What goes back to an agent is bounded too.** Over MCP a tool result of more than
+  `mcp_max_result_bytes` is not sent: the agent gets the answer's outline and asks for less.
+  An agent that waits for a decision (`write_status` with `wait_seconds`) waits at most
+  `mcp_max_wait_seconds`, and while it does librarian looks at the database every two seconds,
+  which is less than the agent asking again and again would cost.
 - **A write always ends.** Once a replica has taken an approved write to send it, its approval
   reaches a final state whatever happens: the API's answer, "not sent", "may have reached the
   API", or, if the replica stopped in the middle, "interrupted" (closed after fifteen minutes,
@@ -274,6 +279,11 @@ audited; and the operator, through the database, the config and the registry dir
   stored with tasks. In `required` mode a claimed principal without a token is refused.
 - **Residual risk:** a token is a bearer credential; an agent holding a user's librarian-audience
   token can act as that user until it expires. Keep lifetimes short.
+- **Behind a gateway that signs people in** (agentgateway, LiteLLM) the gateway's own key says
+  only that a request came through the gateway. Who the person is, librarian takes from the
+  person's token, which the gateway passes on and librarian verifies itself: a gateway cannot
+  make librarian believe in a person it holds no valid token for. It does hold the tokens
+  that pass through it, so the residual risk above applies to the gateway as well.
 - **Agents on Agent Substrate / kagent** are identified by an actor JWT that the platform's
   egress gateway puts into the request; the agent never holds it. librarian checks it like a
   principal token (signature against the cluster issuer's keys, issuer, expiry) and also that:
@@ -287,7 +297,10 @@ audited; and the operator, through the database, the config and the registry dir
   What the agent may then do comes only from `substrate.rules` in librarian's config, never
   from the token or from metadata on the Agent: whoever can edit Agents in a namespace gets
   what the rule for that namespace allows, no more. A rule's field names are checked strictly,
-  because a misspelt `match` would otherwise match every agent.
+  because a misspelt `match` would otherwise match every agent. A person is never taken from
+  what the agent's side sends unsigned: kagent can add the signed-in user's name in an
+  `X-User-Id` header, set inside the sandbox where the agent itself runs commands, and
+  librarian ignores it.
 - **Residual risks there:** the token is a bearer credential valid for up to an hour (Substrate
   has no revocation), so anything between the gateway and librarian that can read it can use
   it: that hop is plain HTTP in-cluster unless a mesh encrypts it, so limit who can reach

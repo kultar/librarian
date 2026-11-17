@@ -205,6 +205,20 @@ def plan_steps() -> list[dict[str, Any]]:
     ]
 
 
+async def tool(base: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """One MCP tool call to one replica, as the agent with the key `key-a`."""
+    http = httpx2.AsyncClient(headers={"Authorization": "Bearer key-a"}, timeout=60)
+    async with (
+        http,
+        streamable_http_client(f"{base}/mcp", http_client=http) as (read, write),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
+        result = await session.call_tool(name, arguments)
+        assert not result.is_error, result.content
+        return result.structured_content or {}
+
+
 def decide(base: str, link: str, action: str = "once") -> httpx.Response:
     """What an approver does with a link: press a button on the page it opens."""
     approval_id, token = re.search(r"/approvals/([0-9a-f]+)\?t=(\w+)", link).groups()  # type: ignore[union-attr]
@@ -254,19 +268,6 @@ async def test_a_plan_over_mcp_reads_the_same_on_both_replicas() -> None:
     """Nothing waits on a person over MCP: librarian makes the plan itself once approved.
     Asked how it stands, the replica that makes it and the one that only reads the record
     say the same."""
-
-    async def tool(base: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        http = httpx2.AsyncClient(headers={"Authorization": "Bearer key-a"}, timeout=60)
-        async with (
-            http,
-            streamable_http_client(f"{base}/mcp", http_client=http) as (read, write),
-            ClientSession(read, write) as session,
-        ):
-            await session.initialize()
-            result = await session.call_tool(name, arguments)
-            assert not result.is_error, result.content
-            return result.structured_content or {}
-
     asked = await tool(
         A, "write_plan", {"api": "echo", "reason": "integration test", "steps": plan_steps()}
     )
@@ -289,6 +290,41 @@ async def test_a_plan_over_mcp_reads_the_same_on_both_replicas() -> None:
     assert seen[A]["state"] == seen[B]["state"] == "executed", seen
     check_plan_made(seen[A]["steps"])
     assert seen[A]["steps"] == seen[B]["steps"]
+
+
+async def test_an_agent_waiting_on_one_replica_has_the_outcome_the_other_made() -> None:
+    """Asked for on A, which also makes it once approved. The agent's next call lands on B
+    and waits there (`wait_seconds`): B learns of the decision and of the result only from
+    the database, and answers when the write has ended, not when its time is up."""
+    asked = await tool(
+        A,
+        "write",
+        {
+            "api": "echo",
+            "operation": "postComment",
+            "args": {"key": "PAY-9"},
+            "body": {"body": "waited for"},
+            "reason": "integration test",
+        },
+    )
+    assert asked["status"] == "pending_approval", asked
+    approval_id: str = asked["approval"]
+    asking = {"approval": approval_id, "wait_seconds": 40}
+    waiting = asyncio.create_task(tool(B, "write_status", asking))
+    await asyncio.sleep(1.5)
+    assert not waiting.done()  # nobody has decided yet
+    link = ""
+    for _ in range(40):
+        link = logged_link("librarian-a", "approvals")
+        if f"/approvals/{approval_id}?" in link:
+            break
+        await asyncio.sleep(0.5)
+    started = time.monotonic()
+    assert "Approved" in decide(A, link).text
+    status = await asyncio.wait_for(waiting, 30)
+    assert status["state"] == "executed", status
+    assert json.loads(status["result"]["data"]["data"]) == {"body": "waited for"}
+    assert time.monotonic() - started < 15
 
 
 def test_pending_request_and_its_link_survive_a_restart() -> None:
