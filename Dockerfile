@@ -17,6 +17,9 @@ RUN useradd --uid 10001 --create-home librarian \
     && chown -R librarian:librarian /data \
     && chmod 700 /data/.librarian /data/.librarian/secrets
 COPY --from=build --chown=librarian:librarian /app /app
+# The Agent Skill that teaches an agent to use librarian's tools. A platform that takes
+# skills from an image (kagent, by digest) finds it here: path `skills/librarian`.
+COPY skills /skills
 # No LIBRARIAN_* variables here: environment variables override the config file,
 # so image defaults would silently win over a deployment's config. Instead the
 # process runs in /data, where the built-in relative defaults (registry/,

@@ -255,9 +255,9 @@ Two things help an agent find librarian and use it well:
 - **A skill.** [`skills/librarian`](skills/librarian/SKILL.md) is an Agent Skill: one
   `SKILL.md` that tells an agent how to read through librarian, how to ask for a change and
   wait for the person, and what to do with each answer (`too_large`, `pending_approval`,
-  `write_not_enabled`, a refusal). A kagent Agent takes it by its git commit
-  ([integrations](docs/integrations.md#the-skill)); any harness that reads Agent Skills can
-  use the same folder.
+  `write_not_enabled`, a refusal). It is in librarian's image as well, which is where a
+  kagent Agent takes it from, by digest ([integrations](docs/integrations.md#the-skill)); any
+  harness that reads Agent Skills can use the folder.
 - **The MCP Registry.** librarian is listed in the
   [MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.kultar/librarian`,
   from [`server.json`](server.json), with every release: the PyPI package

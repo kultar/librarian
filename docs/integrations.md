@@ -38,7 +38,8 @@ shared, configure `callers`.
 It says what the tool descriptions have no room for: how to ask only for the fields needed,
 what to do with `too_large`, how to give a reason an approver can judge, how to wait for the
 decision instead of asking again, and that a refusal is a decision and not an obstacle. Copy
-the folder to where your harness looks for skills, or point at it in git (kagent: below).
+the folder to where your harness looks for skills. It is also in librarian's image, at
+`/skills/librarian`, for platforms that take skills from an image (kagent: below).
 
 ## LiteLLM (agent gateway)
 
@@ -335,20 +336,22 @@ Nothing else is needed: kagent adds librarian to that agent's egress policy and 
 inject the token. The agent discovers the tools itself, at run time, so they do not show in
 kagent's tool picker.
 
-**The skill.** An Agent can be given [librarian's skill](#the-skill) by the commit it is at:
+**The skill.** kagent takes a skill from a container image by its digest, and librarian's
+image carries [its skill](#the-skill) at `/skills/librarian`:
 
 ```yaml
   skills:
     - name: librarian
       source:
-        git:
-          url: https://github.com/kultar/librarian
-          commit: <the full commit id of the release you run>
+        oci: ghcr.io/kultar/librarian@sha256:<the digest of the release you run>
         path: skills/librarian
 ```
 
-kagent fetches that folder into the agent's sandbox, and the agent reads it when a task needs
-an API.
+`docker buildx imagetools inspect ghcr.io/kultar/librarian:<version>` prints the digest, and
+each release's notes name it. kagent mounts the folder into the agent's sandbox, and the agent
+reads it when a task needs an API. (Taking the same folder from git, by commit, did not work
+with kagent 1.0.1 when we tried: the sandbox in which an Agent is prepared could not resolve
+the git host, with or without an `EgressPolicy` for it.)
 
 **Some of the tools, and kagent's own approval.** A binding can name the tools an agent gets,
 and kagent can hold a tool call for the person in the conversation before it is made:
