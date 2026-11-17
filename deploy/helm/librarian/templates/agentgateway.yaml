@@ -1,0 +1,68 @@
+{{- $g := .Values.agentgateway -}}
+{{- if $g.enabled }}
+{{- if not $g.gateway.name -}}
+{{- fail "agentgateway.gateway.name is required: the Gateway librarian is attached to" -}}
+{{- end }}
+{{- $name := include "librarian.fullname" . -}}
+{{- $host := printf "%s.%s.svc" $name .Release.Namespace -}}
+# librarian behind agentgateway: what the gateway is talking to, and the route to it.
+# An MCP server at /mcp. librarian keeps no MCP session, so any replica answers any request.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: {{ $name }}-mcp
+  labels:
+    {{- include "librarian.labels" . | nindent 4 }}
+spec:
+  mcp:
+    sessionRouting: Stateless
+    targets:
+      - name: librarian
+        static:
+          host: {{ $host }}
+          port: {{ .Values.service.a2aPort }}
+          path: /mcp
+          protocol: StreamableHTTP
+---
+# An A2A agent on every other path. The gateway rewrites the agent card, so that it names
+# the address agents reached it at.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: {{ $name }}-a2a
+  labels:
+    {{- include "librarian.labels" . | nindent 4 }}
+spec:
+  a2a:
+    host: {{ $host }}
+    port: {{ .Values.service.a2aPort }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "librarian.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ $g.gateway.name }}
+      {{- with $g.gateway.namespace }}
+      namespace: {{ . }}
+      {{- end }}
+      {{- with $g.gateway.sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+  {{- with $g.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - matches:
+        - path: {type: Exact, value: /mcp}
+      backendRefs:
+        - {group: agentgateway.dev, kind: AgentgatewayBackend, name: {{ $name }}-mcp}
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs:
+        - {group: agentgateway.dev, kind: AgentgatewayBackend, name: {{ $name }}-a2a}
+{{- end }}

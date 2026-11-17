@@ -142,6 +142,21 @@ substrate:
   # - match: {}                         # every other agent: reads and learning, no writes
   #   apis: ["*"]
 
+# Behind agentgateway (agentgateway.dev). The chart attaches librarian to a Gateway you
+# already run: an HTTPRoute, and two AgentgatewayBackends that tell the gateway what it is
+# talking to (an MCP server at /mcp, an A2A agent on every other path). Agents then use the
+# gateway's address, and the agent card names it. Needs the Gateway API and agentgateway's
+# CRDs in the cluster. What the gateway adds (signing people in, rules, rate limits) is set
+# on its side, with an AgentgatewayPolicy for this HTTPRoute. See docs/integrations.md.
+agentgateway:
+  enabled: false
+  gateway:
+    name: ""                # the Gateway to attach to (required)
+    namespace: ""           # default: the release namespace. In another one, the Gateway's
+                            # listener has to allow routes from here (allowedRoutes).
+    sectionName: ""         # one listener of it (default: every listener that allows it)
+  hostnames: []             # e.g. [librarian.example.com] (default: the listener's hosts)
+
 # Sign-in for approvers. Runs oauth2-proxy as a sidecar in front of the approval pages
 # (and the console at the pages host's root, for the approver group) and switches
 # librarian to approvers.mode=trusted_header. Agents keep using the A2A

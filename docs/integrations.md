@@ -101,6 +101,148 @@ prompted`, the default with `model_base_url`), because some providers reject the
 that structured output otherwise needs. [`examples/compose`](../examples/compose) runs librarian
 and LiteLLM together.
 
+## agentgateway
+
+[agentgateway](https://agentgateway.dev) is a proxy for agent traffic (MCP, A2A, model APIs),
+run on its own or on Kubernetes with the Gateway API. librarian works behind it as an **MCP
+server** and as an **A2A agent**, with nothing changed in librarian. Both ways of putting it
+in front are tested against agentgateway v1.7.0
+([`tests/integration/agentgateway`](../tests/integration/agentgateway), in the weekly
+integration run). (Agent Substrate's egress is agentgateway too: for agents that run in
+kagent, see [the next section](#agent-substrate-and-kagent).)
+
+### librarian authenticates: each agent's key passes through
+
+The gateway routes, observes and limits. Each agent keeps its own key, so librarian knows which
+agent is calling and applies that agent's rules.
+
+```yaml
+# agentgateway config.yaml
+binds:
+- port: 3000
+  listeners:
+  - routes:
+    - name: librarian-mcp
+      matches:
+      - path: {exact: /mcp}
+      backends:
+      - mcp:
+          statefulMode: stateless        # librarian keeps no MCP sessions
+          targets:
+          - name: librarian
+            mcp: {host: http://librarian:8080/mcp}
+    - name: librarian-a2a
+      matches:
+      - path: {pathPrefix: /}
+      policies:
+        a2a: {}                          # rewrites the agent card to the gateway's address
+      backends:
+      - host: librarian:8080
+```
+
+Agents use the gateway's address with `Authorization: Bearer <their key>`, at `/mcp` (MCP) or
+`/` (A2A). With one MCP target the tools keep their names (`execute`, `write`, ...). What
+librarian refuses (a wrong key, a policy decision) reaches the agent as librarian said it.
+
+### The gateway signs people in
+
+For people with an MCP client (an IDE, a chat app). The gateway does the OAuth sign-in with
+your identity provider, calls librarian with one key of its own, and passes the person's token
+on. librarian checks that token itself, so it knows the person with proof and not on the
+gateway's word: their writes are theirs to approve, and APIs that act as the person use their
+own sign-in.
+
+```yaml
+# agentgateway config.yaml: the route for people
+    - name: librarian-mcp-people
+      matches:
+      - path: {exact: /mcp}
+      - path: {exact: /.well-known/oauth-protected-resource/mcp}
+      - path: {exact: /.well-known/oauth-authorization-server/mcp}
+      policies:
+        mcpAuthentication:               # an MCP client without a token is told where to sign in
+          mode: strict
+          issuer: https://idp.example.com/realms/acme
+          audiences: [librarian]
+          jwks: {url: https://idp.example.com/realms/acme/protocol/openid-connect/certs}
+          provider: {keycloak: {}}
+          resourceMetadata:
+            resource: https://agents.example.com/mcp
+            scopesSupported: [openid, email]
+        mcpAuthorization:
+          rules:                         # which tools people get: here, all but one
+          - 'mcp.tool.name != "onboard"'
+        transformations:
+          request:
+            set:                         # the person's token, for librarian to check itself
+              x-principal-token: jwt.rawToken.unredacted()
+        backendAuth:
+          key: {file: /secrets/librarian-key}   # the gateway's own caller key
+      backends:
+      - mcp:
+          statefulMode: stateless
+          targets:
+          - name: librarian
+            mcp: {host: http://librarian:8080/mcp}
+```
+
+```yaml
+# librarian config
+callers:
+  - agent: agentgateway                  # every call through the gateway arrives as this caller
+    key_ref: librarian/callers/agentgateway
+    write_apis: [jira]
+principals:
+  mode: optional                         # or required: see Verified principals below
+  issuers:
+    - issuer: https://idp.example.com/realms/acme
+      audience: librarian
+      claim: email
+```
+
+The A2A route takes the same `transformations` and `backendAuth`, with `jwtAuth` in place of
+`mcpAuthentication` (the tested configuration has both routes).
+
+### On Kubernetes
+
+The Helm chart attaches librarian to a Gateway that agentgateway's controller runs:
+
+```yaml
+# librarian values
+agentgateway:
+  enabled: true
+  gateway: {name: agents, namespace: agentgateway-system}
+```
+
+It creates an `HTTPRoute` and two `AgentgatewayBackend`s: an MCP server at `/mcp` and an A2A
+agent on every other path. Agents then use the Gateway's address. Tested on kind with
+agentgateway v1.7.0 and Gateway API v1.6.3: tools listed and called over MCP, a read, A2A
+messages, the agent card naming the gateway, and librarian's refusal of a missing key passed
+on. In another namespace than the Gateway's, its listener has to allow routes from librarian's
+(`allowedRoutes`). What the gateway adds (sign-in, rules, rate limits) is attached on its side,
+with an `AgentgatewayPolicy` that targets the `HTTPRoute` (named like the release); this
+project has tested those policies in the standalone configuration above, not on Kubernetes.
+
+### Things that matter behind agentgateway
+
+- **Large answers over MCP.** The gateway holds an MCP server's whole answer (2 MiB by default)
+  and hands it to the client as one event, which clients limit too (the MCP Python SDK: 1 MiB).
+  Past either, the agent only learns that the message could not be sent. librarian therefore
+  never sends a tool result of more than `mcp_max_result_bytes` (1 MB): the agent gets the
+  answer's outline and asks for less with `select`. To allow more, raise that setting and the
+  gateway's `frontendPolicies.http.maxBufferSize` together. A2A answers are not held this way
+  (3 MB passed).
+- **Timeouts.** agentgateway sets no request timeout unless you do. If you set one
+  (`policies.timeout`), keep it above `fetch_timeout_seconds` (100) for plain-language
+  requests and above `mcp_max_wait_seconds` (50) for agents that wait for a decision.
+- **The agent card** names the address the request came in on (`policies: {a2a: {}}` rewrites
+  it), so agents that read the card keep talking to the gateway.
+- **Answers arrive as events.** The gateway answers MCP clients with `text/event-stream`, also
+  where librarian answered JSON. MCP clients read both.
+- **Who the caller is.** With keys passed through, the audit names each agent. With the
+  gateway signing people in, every call is by the caller `agentgateway`, for a named and
+  verified person: give that caller the APIs people may use.
+
 ## Agent Substrate and kagent
 
 [Agent Substrate](https://github.com/agent-substrate/substrate) runs each agent session as an
@@ -147,9 +289,11 @@ it is in (`substrate.kagent.remoteMCPServer.namespace`, by default librarian's).
 
 Tested end to end on kind (Kubernetes 1.35) with kagent 1.0.1 and Agent Substrate 1.0.0: an
 agent learning an API and reading from it, a write approved by the rule's owner, a second
-session of the same agent writing under the grant that approval created, and the refusals
-below. The steps and manifests are in
-[`tests/integration/substrate`](../tests/integration/substrate).
+session of the same agent writing under the grant that approval created, a plan of two writes
+approved once and waited for in one tool call, an agent given only some of the tools, kagent's
+own approval in front of librarian's, and the refusals below; on kagent's default harness, and
+the read and the plan on its Claude-based one (`claude-default`) as well. The steps and
+manifests are in [`tests/integration/substrate`](../tests/integration/substrate).
 
 Give an agent the tools by naming the server in its template:
 
@@ -168,6 +312,27 @@ Nothing else is needed: kagent adds librarian to that agent's egress policy and 
 inject the token. The agent discovers the tools itself, at run time, so they do not show in
 kagent's tool picker.
 
+**Some of the tools, and kagent's own approval.** A binding can name the tools an agent gets,
+and kagent can hold a tool call for the person in the conversation before it is made:
+
+```yaml
+  tools:
+    - mcp:                                # reads, and asking how a write stands
+        server: {kind: RemoteMCPServer, name: librarian, namespace: librarian}
+        tools: [capabilities, execute, write_status, enable_status]
+    - mcp:                                # writes: kagent asks the person first
+        server: {kind: RemoteMCPServer, name: librarian, namespace: librarian}
+        tools: [write, write_plan]
+        requireApproval: true
+```
+
+That is a second gate, in front of librarian's, and the two know different things. kagent
+asks whoever is in the conversation whether the agent may make that tool call (its UI shows
+the question; the `kagent` CLI cannot answer one). librarian then asks the approver its policy
+names, shows them the request as it will be sent to the API, and can turn the answer into a
+grant. Use kagent's where the person talking to the agent should see each write before anyone
+else is asked.
+
 **Who the caller is.** An actor is one session, so librarian records the *Agent*:
 `payments/release-notes`. Grants, rate limits, the console and the audit trail are about that
 name, and stay valid across the agent's sessions. Each audited call also carries the session
@@ -177,12 +342,18 @@ name, and stay valid across the agent's sessions. Each audited call also carries
 token, not both, so librarian knows the agent but not the person behind it. A rule's `owner`
 stands in: they (or the approver group) approve the agent's writes. Two things therefore do not
 work through kagent yet: APIs that use each person's own sign-in, and "only the requester may
-approve".
+approve". (With kagent's token propagation switched on, the agent's runtime also sends the
+user's name in an `X-User-Id` header. librarian does not use it: it is set inside the sandbox
+and nothing signs it, so an agent could send any name.)
 
 **Waiting on a person.** A write that needs approval answers `pending` at once; the agent can
 end its turn (the actor is suspended, at no cost) and ask `write_status` later. The approval
 does not need the agent to be running. The same holds for a plan (`write_plan`): librarian
-makes its writes once it is approved, whether or not the agent is there.
+makes its writes once it is approved, whether or not the agent is there. Nothing can wake a
+kagent session when the decision arrives, so an agent that should finish the job in one turn
+asks `write_status` with `wait_seconds` (say 45): the call answers as soon as the write has
+ended, or after that time with where it stands. librarian waits at most
+`mcp_max_wait_seconds` (50), which fits inside the 120 seconds the chart gives a tool call.
 
 ### Plain Agent Substrate
 
@@ -244,7 +415,10 @@ Agents with their own key (`callers`) keep working beside this.
   encrypts it: kagent cannot yet trust a private CA for an MCP server. Restrict who can reach
   librarian's Service with a NetworkPolicy if other workloads share the cluster network.
 - **Timeouts.** kagent's default for an MCP server is 30 seconds; the chart sets 120, because a
-  plain-language request may run for `fetch_timeout_seconds` (100).
+  plain-language request may run for `fetch_timeout_seconds` (100) and an agent may wait
+  `mcp_max_wait_seconds` (50) for a decision.
+- **Large answers.** A tool result is at most `mcp_max_result_bytes` (1 MB as sent): past
+  that the agent gets the answer's outline and asks for the fields it needs with `select`.
 - **Why an agent was refused** is in librarian's log (`refused a Substrate caller (HTTP 403):
   ...`, each reason at most once a minute). kagent itself only reports that discovering the
   tools failed with "Forbidden" or "Unauthorized", and leaves the toolset out of that run.

@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, get_args, get_origin
+from typing import Any, cast, get_args, get_origin
 
 import pytest
 import typer
+import yaml
 from pydantic import BaseModel
 
 from librarian import cli
@@ -142,6 +143,51 @@ def test_every_field_of_a_registry_entry_is_in_the_format_reference() -> None:
     assert len(fields) > 80
     missing = {name for name in fields if not re.search(rf"\b{re.escape(name)}\b", reference)}
     assert missing == set(), "fields of an entry that docs/registry.md does not name"
+
+
+def chart_values(node: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    """Every value of the chart with its default: `ingress.a2a.host`. `config` is one
+    value here: what is in it are librarian's settings."""
+    if isinstance(node, dict) and node and prefix != "config.":
+        values: list[tuple[str, Any]] = []
+        for key, value in cast(dict[str, Any], node).items():
+            values += chart_values(value, f"{prefix}{key}.")
+        return values
+    return [(prefix.rstrip("."), node)]
+
+
+def test_every_value_of_the_chart_is_in_the_chart_readme_and_none_that_is_gone() -> None:
+    """The README says the chart's values are described in full in the chart's README."""
+    assert (
+        "Every\nvalue of the chart is described\n"
+        "in [deploy/helm/librarian/README.md](deploy/helm/librarian/README.md#values)" in README
+    )
+    chart = Path(__file__).parent.parent / "deploy" / "helm" / "librarian"
+    values = dict(chart_values(yaml.safe_load((chart / "values.yaml").read_text("utf-8"))))
+    described = (chart / "README.md").read_text("utf-8")
+    tables = described[described.index("\n## Values\n") : described.index("\n## Tested\n")]
+    rows = dict(re.findall(r"^\| `([^`]+)` \| (?:`([^`]*)`)? ?\|", tables, flags=re.MULTILINE))
+    assert len(values) > 90
+
+    def row_for(path: str) -> str | None:
+        """The row that describes a value: its own, or the one of a map it is part of."""
+        parts = path.split(".")
+        return next(
+            (name for n in range(len(parts), 0, -1) if (name := ".".join(parts[:n])) in rows),
+            None,
+        )
+
+    missing = {path for path in values if row_for(path) is None}
+    assert missing == set(), "values the chart's README does not describe"
+    stale = {row for row in rows if not any(p == row or p.startswith(row + ".") for p in values)}
+    assert stale == set(), "values the chart's README describes that do not exist"
+    for path, default in values.items():
+        if path not in rows or path == "config":
+            continue  # described as part of a map, in words
+        if rows[path]:  # a default is given: it is the one in values.yaml
+            assert yaml.safe_load(rows[path]) == default, path
+        else:  # none is given: there is none
+            assert default in ("", None, [], {}), path
 
 
 def test_every_kind_of_authentication_is_in_the_readme() -> None:

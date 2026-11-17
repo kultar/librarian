@@ -125,6 +125,9 @@ log = logging.getLogger(__name__)
 
 SYSTEM_CALLER = Caller(agent="librarian", authenticated=True)
 
+# How often someone waiting for a write that has been decided looks whether it was made.
+SETTLE_POLL_SECONDS = 0.25
+
 AuthRequiredHook = Callable[[CredentialRequest | ConsentRequest], Awaitable[None]]
 
 EntryChange = Callable[[ApiEntry], ApiEntry]
@@ -1027,6 +1030,23 @@ class Librarian:
                 "before sending it again.",
                 unknown=True,
             ) from None
+
+    async def settled(self, approval: WriteApproval, seconds: float) -> WriteApproval:
+        """Wait, at most `seconds`, for a write or plan asked for without waiting to end:
+        made, failed, denied or expired. Whichever replica decides and sends it."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + seconds
+        unsettled = (ApprovalState.PENDING, ApprovalState.APPROVED, ApprovalState.EXECUTING)
+        while approval.state in unsettled:
+            left = deadline - loop.time()
+            if left <= 0:
+                break
+            if approval.state is ApprovalState.PENDING:
+                approval = await self.approvals.wait(approval.id, max_wait=left)
+            else:  # decided: being sent, here or by another replica
+                await asyncio.sleep(min(left, SETTLE_POLL_SECONDS))
+                approval = await self.approvals.load(approval.id) or approval
+        return approval
 
     def write_status(self, approval: WriteApproval) -> dict[str, Any]:
         status: dict[str, Any] = {

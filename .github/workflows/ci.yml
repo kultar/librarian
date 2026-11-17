@@ -77,6 +77,18 @@ jobs:
           plain="$(helm template t deploy/helm/librarian --set substrate.enabled=true,substrate.kagent.enabled=false)"
           if echo "$plain" | grep -q 'RemoteMCPServer\|kagent_url'; then echo "kagent rendered while off"; exit 1; fi
           if helm template t deploy/helm/librarian | grep -q 'substrate'; then echo "substrate rendered while off"; exit 1; fi
+      - name: Behind agentgateway
+        run: |
+          out="$(helm template t deploy/helm/librarian --set agentgateway.enabled=true,agentgateway.gateway.name=agents,agentgateway.gateway.namespace=gw)"
+          echo "$out" | grep -q 'kind: HTTPRoute' || { echo "no HTTPRoute"; exit 1; }
+          [ "$(echo "$out" | grep -c 'kind: AgentgatewayBackend')" -ge 2 ] || { echo "not two backends"; exit 1; }
+          echo "$out" | grep -q 'host: t-librarian.default.svc' || { echo "$out" | grep 'host:'; exit 1; }
+          echo "$out" | grep -q 'sessionRouting: Stateless' || { echo "MCP backend is not stateless"; exit 1; }
+          echo "$out" | grep -A1 'parentRefs' | grep -q 'name: agents' || { echo "$out" | grep -A3 parentRefs; exit 1; }
+          if helm template t deploy/helm/librarian --set agentgateway.enabled=true 2>/dev/null; then
+            echo "agentgateway without a Gateway must be refused"; exit 1
+          fi
+          if helm template t deploy/helm/librarian | grep -q 'agentgateway'; then echo "agentgateway rendered while off"; exit 1; fi
       - name: The record needs no git-sync
         run: |
           out="$(helm template t deploy/helm/librarian -f deploy/helm/librarian/ci/record-only-values.yaml)"

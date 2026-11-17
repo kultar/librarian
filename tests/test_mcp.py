@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
@@ -229,6 +230,85 @@ async def test_write_returns_pending_then_runs_after_approval(
     assert status["result"]["data"] == {"id": 5}
     sent = [r for r in router.requests if r.method == "POST"]
     assert len(sent) == 1 and sent[0].headers["authorization"] == "Bearer write-key"
+
+
+COMMENT = {
+    "api": "tracker",
+    "operation": "addComment",
+    "args": {"key": "PAY-1"},
+    "body": {"body": "via MCP"},
+    "reason": "mcp test",
+}
+
+
+async def test_write_status_waits_for_the_outcome_when_asked_to(
+    connect: Connect, librarian: Librarian, router: Router, secrets_store: FileSecretStore
+) -> None:
+    """An agent whose session nobody can wake (one on kagent) waits for the decision
+    inside its turn: one call that answers when the write has ended."""
+    await secrets_store.put("tracker/write", "write-key")
+    router.add(
+        "POST", f"{BASE}/v1/issues/PAY-1/comments", lambda r: httpx.Response(201, json={"id": 5})
+    )
+    async with connect() as session:
+        pending = data(await session.call_tool("write", COMMENT))
+        assert pending["status"] == "pending_approval"
+        # The answer itself says how: an agent does not have to know librarian's manual.
+        assert "with wait_seconds (up to 50) it waits for the decision" in pending["message"]
+        asked = {"approval": pending["approval"], "wait_seconds": 20}
+        waiting = asyncio.create_task(session.call_tool("write_status", asked))
+        await asyncio.sleep(0.3)
+        assert not waiting.done()  # nobody has decided: it waits
+        started = time.monotonic()
+        await librarian.approvals.approve(pending["approval"], "ops@x.test")
+        status = data(await asyncio.wait_for(waiting, 10))
+        assert status["state"] == "executed" and status["result"]["data"] == {"id": 5}
+        assert time.monotonic() - started < 5  # it answered when the write ended, not later
+        # Asked again, it answers at once: there is nothing left to wait for.
+        started = time.monotonic()
+        again = data(await session.call_tool("write_status", asked))
+        assert again["state"] == "executed" and time.monotonic() - started < 2
+    assert len([r for r in router.requests if r.method == "POST"]) == 1
+
+
+async def test_write_status_waits_no_longer_than_it_was_asked_or_allowed_to(
+    connect: Connect, librarian: Librarian, secrets_store: FileSecretStore
+) -> None:
+    await secrets_store.put("tracker/write", "write-key")
+    async with connect() as session:
+        pending = data(await session.call_tool("write", COMMENT))
+        approval = pending["approval"]
+
+        async def asked(seconds: int) -> tuple[str, float]:
+            started = time.monotonic()
+            answer = await asyncio.wait_for(
+                session.call_tool("write_status", {"approval": approval, "wait_seconds": seconds}),
+                8,
+            )
+            return data(answer)["state"], time.monotonic() - started
+
+        try:
+            state, took = await asked(1)
+            assert state == "pending" and 0.9 < took < 4
+            # However long an agent asks for, librarian waits no longer than it is set to...
+            librarian.settings.mcp_max_wait_seconds = 1
+            state, took = await asked(3600)
+            assert state == "pending" and 0.9 < took < 4
+            # ...and not at all when that is switched off.
+            librarian.settings.mcp_max_wait_seconds = 0
+            state, took = await asked(3600)
+            assert state == "pending" and took < 0.9
+            again = data(await session.call_tool("write", COMMENT))  # the same request
+            assert again["approval"] == approval and "wait_seconds" not in again["message"]
+            # A refusal ends the wait as an approval does.
+            librarian.settings.mcp_max_wait_seconds = 50
+            refused = asyncio.create_task(asked(20))
+            await asyncio.sleep(0.3)
+            await librarian.approvals.deny(approval, "ops@x.test")
+            state, took = await asyncio.wait_for(refused, 10)
+            assert state == "denied" and took < 5
+        finally:  # whatever went wrong above, no request is left waiting in the server
+            await librarian.approvals.expire(approval, "the test is over")
 
 
 async def test_write_to_a_not_enabled_operation_asks_the_approvers(

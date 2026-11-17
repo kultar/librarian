@@ -27,6 +27,29 @@ cover the call:
 
 `capabilities` shows an agent only the operations it can reach, with its limits.
 
+**`execute` answers `too_large` with an `outline` and no data.**
+The answer would have made an MCP tool result of more than `mcp_max_result_bytes` (1 MB as
+sent, which is about 480 KB of data: a result carries an answer twice, as structured content
+and as text). The outline lists the answer's fields and how many items its lists have: call
+again with `select` for the fields needed, narrow the request with the operation's arguments,
+or read fewer pages. Results that large fail on the way otherwise, with errors that name no
+reason: an MCP client reading the result as one event stops at 1 MiB ("Server-sent event
+exceeded the 1048576 byte limit"), and agentgateway holds at most 2 MiB of an MCP answer
+("failed to send message"). To allow more, raise the setting together with those limits
+(agentgateway: `frontendPolicies.http.maxBufferSize`). A2A answers are not affected.
+
+**"cannot save API ...: librarian has no database and cannot write to its registry folder".**
+Onboarding, an approval or any other change has to be kept somewhere. Without `database_url`
+that is the registry folder, and it is mounted read-only here (a ConfigMap, a checkout). Set
+`database_url` (the chart and the quickstart do), or `registry_overlay_dir` to a folder
+librarian can write to.
+
+**An agent keeps asking `write_status`, or gives up before the approval arrives.**
+Have it ask once with `wait_seconds` (e.g. 45): the call answers when the write has ended, or
+after that time with where it stands. librarian waits at most `mcp_max_wait_seconds` (50);
+keep that under the request timeout of the MCP client and of any gateway in between, or the
+call fails there first.
+
 **"operation ... is not a read" / "is not enabled for writes"**
 Reads only run operations classified as reads (GET, or reviewed). Writes need a verified entry,
 `writable: true` on the operation, a `write_auth` credential, and the caller's `write_apis`.
@@ -373,6 +396,38 @@ agent discovers the tools at run time, so kagent's tool picker never lists them.
 
 **Calls work but everything is recorded as one caller per session, or grants never apply.**
 `substrate.kagent_url` is not set, so the caller is the actor (one session) instead of the Agent.
+
+**The agent says a write is pending and the conversation ends there.**
+Nothing can wake a kagent session when the approval arrives. Either ask the agent again later
+("how does that write stand?": it calls `write_status`), or have it wait in the same turn:
+`write_status` with `wait_seconds`. The write itself does not need the agent: librarian makes
+it once it is approved.
+
+**kagent shows "input required" for a librarian tool call.**
+The Agent's binding of that tool has `requireApproval: true`: kagent holds the call for the
+person in the conversation, before librarian is asked at all. Answer it in kagent's UI (the
+`kagent` CLI cannot). librarian's own approval, by the approver its policy names, comes after.
+
+## agentgateway
+
+**An MCP client gets "failed to send message" for a large read.**
+See `too_large` under [Agents and calls](#agents-and-calls): librarian does not send results
+that large any more. On 0.21 or earlier, ask for less with `select`, or raise the gateway's
+`frontendPolicies.http.maxBufferSize`.
+
+**The agent card names librarian's own address, not the gateway's.**
+The A2A route lacks `policies: {a2a: {}}` (standalone), or the route's backend is the plain
+Service instead of the `AgentgatewayBackend` with `a2a` (Kubernetes; the chart's
+`agentgateway.enabled` creates it).
+
+**People signed in by the gateway are refused by librarian (401).**
+The gateway's `mcpAuthentication` accepted the token, and librarian checks the same token
+again: `principals.issuers` must name the same issuer, with the audience the token carries
+and a `jwks_url` librarian can reach. The message says which check failed.
+
+**Every call through the gateway is refused (401 "unauthorized").**
+Nothing put a key librarian knows into `Authorization`. Either the agent sends its own
+(`callers`), or the gateway adds one (`backendAuth`) and a caller for the gateway exists.
 
 ## Kubernetes
 

@@ -5,10 +5,12 @@ responses (no session affinity, so it works behind gateways such as LiteLLM and
 across replicas). Callers authenticate exactly like A2A callers (per-agent bearer
 keys, optional X-Principal-Token), and the same policy engine decides every call.
 
-MCP tool calls should return promptly, so nothing here waits on a human:
+MCP tool calls should return promptly, so nothing here waits on a human unless the
+agent asks for it:
 - a missing credential returns `credential_pending` (approvers are notified);
 - a write that needs approval returns `pending_approval`; the librarian runs it
-  once approved, and `write_status` reports the outcome;
+  once approved, and `write_status` reports the outcome (and waits for it, a bounded
+  time, when asked to with `wait_seconds`);
 - a write on an operation nobody has enabled yet returns `write_not_enabled`
   (approvers are asked to enable it; `enable_status` says where it stands);
 - `fetch` stops at its time budget and marks the answer `partial`, with the
@@ -55,7 +57,9 @@ and, where allowed, writes that a human approves.
 
 Typical flow: `capabilities` (optionally with a query) to see which APIs and operations
 exist -> `execute` to run a read operation (use `select` to keep only the fields you
-need) -> `write` to request a change, then `write_status` until it is executed.
+need; an answer too large to hand over comes back as `too_large` with an outline of its
+fields) -> `write` to request a change, then `write_status` until it is executed (with
+`wait_seconds` it waits for the decision, so you need not ask again and again).
 A change that takes several writes (create a blob, a tree, a commit, a branch, a pull
 request) goes in one `write_plan`: a human approves all of it once.
 `fetch` answers a plain-language request when a planner model is configured.
@@ -75,12 +79,18 @@ def _write_outcome(outcome: WriteOutcome | WriteApproval, librarian: Librarian) 
             if outcome.steps
             else f"this {outcome.operation} on {outcome.api_name}"
         )
+        wait = librarian.settings.mcp_max_wait_seconds
         return {
             "status": "pending_approval",
             "approval": outcome.id,
             "message": (
-                f"A human must approve {what}. "
-                "Call write_status with this approval id to get the result."
+                f"A human must approve {what}. Call write_status with this approval id to "
+                "get the result"
+                + (
+                    f": with wait_seconds (up to {wait}) it waits for the decision."
+                    if wait
+                    else "."
+                )
             ),
             **{k: v for k, v in librarian.write_status(outcome).items() if k != "approval"},
         }
@@ -275,18 +285,24 @@ def build_mcp(librarian: Librarian) -> MCPServer:
         return _write_outcome(outcome, librarian)
 
     @server.tool(annotations=read_only)
-    async def write_status(ctx: Context, approval: str) -> dict[str, Any]:
+    async def write_status(ctx: Context, approval: str, wait_seconds: int = 0) -> dict[str, Any]:
         """State of a write or a plan you requested: pending, approved, executing, executed
         (with the result), failed, denied or expired. For a plan, `steps` lists each step
         with what it answered and its state: waiting, being sent, made, failed, not sent,
         or unknown (it may or may not have reached the API: check before sending it
-        again). Given an `enable_request` id instead, answers like `enable_status`."""
+        again). `wait_seconds` waits that long (librarian caps it) for the write to end
+        before answering: use it once, instead of asking again and again, when a person
+        is likely to decide soon. Given an `enable_request` id instead, answers like
+        `enable_status`."""
         found = await librarian.approvals.load(approval)
         if found is None or found.agent != _caller(ctx).agent:
             try:
                 return await librarian.enable_status(approval, _caller(ctx))
             except LibrarianError:
                 raise ToolError(f"no write approval {approval!r} for this agent") from None
+        wait = min(wait_seconds, librarian.settings.mcp_max_wait_seconds)
+        if wait > 0:
+            found = await librarian.settled(found, wait)
         return librarian.write_status(found)
 
     @server.tool(annotations=read_only)

@@ -429,6 +429,11 @@ class Settings(BaseSettings):
     # an MCP client reading the result as one event stops at 1 MiB, and agentgateway holds
     # at most 2 MiB of one. 0: no limit.
     mcp_max_result_bytes: int = Field(default=1_000_000, ge=0)
+    # The longest `write_status` waits for a write to end when an agent asks it to
+    # (`wait_seconds`), in seconds. An agent whose session nobody can wake (one on kagent)
+    # can then wait for a decision inside its turn instead of asking again and again. Keep
+    # it under the request timeout of your MCP clients and gateways. 0: never wait.
+    mcp_max_wait_seconds: int = Field(default=50, ge=0)
     allow_provisional: bool = True
     # Let onboarding and provisional entries reach private/internal addresses.
     # Keep off unless every caller is trusted (SSRF protection).

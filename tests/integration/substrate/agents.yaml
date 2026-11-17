@@ -1,5 +1,6 @@
-# Three agents: one a rule admits for reads, one a rule admits for writes (by label),
-# and one no rule matches.
+# Four agents: one a rule admits for reads, one a rule admits for writes (by label), one
+# no rule matches, and one whose writes kagent itself holds for the person in the
+# conversation before librarian is asked.
 apiVersion: api.kagent.dev/v1alpha3
 kind: Agent
 metadata:
@@ -72,3 +73,31 @@ spec:
               kind: RemoteMCPServer
               name: librarian
               namespace: librarian
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata:
+  name: lib-careful
+  namespace: kagent
+  labels:
+    librarian-test/role: writer
+spec:
+  harnessRef:
+    name: kagent-default
+  template:
+    inline:
+      modelConfig:
+        name: default-model-config
+      systemPrompt: |
+        You use web APIs only through the librarian tools. Call the tool the user names with
+        exactly the arguments they give and report exactly what it returned.
+      tools:
+        # Only some of librarian's tools: reads, and asking how a write stands.
+        - mcp:
+            server: {kind: RemoteMCPServer, name: librarian, namespace: librarian}
+            tools: [capabilities, execute, write_status, enable_status]
+        # Writes: kagent asks the person in the conversation before the call is made.
+        - mcp:
+            server: {kind: RemoteMCPServer, name: librarian, namespace: librarian}
+            tools: [write, write_plan]
+            requireApproval: true

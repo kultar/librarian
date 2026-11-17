@@ -53,7 +53,7 @@ out to; the only thing that connects *in* is approvers' browsers.
 
 | From | To | Notes |
 |---|---|---|
-| Agents, LiteLLM | `librarian.librarian.svc:8080` (A2A at `/`, MCP at `/mcp`) | Inside the cluster. For agents elsewhere, `ingress.a2a` on an internal address. |
+| Agents, LiteLLM | `librarian.librarian.svc:8080` (A2A at `/`, MCP at `/mcp`) | Inside the cluster. For agents elsewhere, `ingress.a2a` on an internal address, or a route on your [agentgateway](integrations.md#agentgateway) (`agentgateway.enabled`). |
 | Approvers' browsers | the approval pages (`ingress.pages`, at `publicUrl`) | Only approvers need to reach them: an **internal** address on your VPN or office network is enough. |
 
 Nothing else connects in. Slack only shows a link (no webhooks or interactive buttons), the

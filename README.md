@@ -76,7 +76,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 |---|---|
 | Try it on my laptop (10 minutes, Docker) | [docs/getting-started.md](docs/getting-started.md) |
 | Run it for my team (Kubernetes, step by step) | [docs/deploy.md](docs/deploy.md) (no internet exposure needed: [network](docs/deploy.md#network-what-must-reach-what)) |
-| Connect agents (LiteLLM, kagent and Agent Substrate, MCP clients, A2A) | [docs/integrations.md](docs/integrations.md) |
+| Connect agents (LiteLLM, agentgateway, kagent and Agent Substrate, MCP clients, A2A) | [docs/integrations.md](docs/integrations.md) |
 | Fix something | [docs/troubleshooting.md](docs/troubleshooting.md) |
 
 ```bash
@@ -122,13 +122,16 @@ GitHub is written to, never asked: nothing merged or edited there changes what a
 
 The same skills are available as **MCP tools** at `/mcp` (Streamable HTTP, same caller keys):
 `capabilities`, `execute`, `fetch`, `write`, `write_plan`, `write_status`, `enable_status`,
-`onboard`. MCP calls never wait on a human: writes and plans return `pending_approval` and
-librarian finishes them once approved (`write_status` reports where a write stands and, once
-run, its result dated as of execution; for a plan, every step), or `write_not_enabled` when
-nobody has enabled that operation yet (approvers are asked; `enable_status` says where the
-request stands). librarian
-works behind the **LiteLLM** gateway as both an MCP server and an A2A agent
-([docs/integrations.md](docs/integrations.md#litellm-agent-gateway)).
+`onboard`. MCP calls do not wait on a human unless the agent asks: writes and plans return
+`pending_approval` and librarian finishes them once approved (`write_status` reports where a
+write stands and, once run, its result dated as of execution; for a plan, every step), or
+`write_not_enabled` when nobody has enabled that operation yet (approvers are asked;
+`enable_status` says where the request stands). An agent that wants the outcome within its
+turn asks `write_status` with `wait_seconds`: it answers as soon as the write has ended, or
+after that time (at most `mcp_max_wait_seconds`, 50) with where it stands. librarian
+works behind the **LiteLLM** and **agentgateway** gateways as both an MCP server and an A2A
+agent, and as the tool server of **kagent** agents: see
+[Gateways and agent platforms](#gateways-and-agent-platforms).
 
 Results are A2A artifacts with the data plus **provenance**: which API and operation, the URL
 (secrets redacted), when, for which calling agent and principal, and which credential reference.
@@ -222,6 +225,31 @@ substrate:
 
 See [integrations](docs/integrations.md#agent-substrate-and-kagent); the Helm chart sets it up
 with `substrate.enabled`.
+
+## Gateways and agent platforms
+
+librarian is one more server behind whatever already carries your agents' traffic. Each of
+these is tested, and [docs/integrations.md](docs/integrations.md) has the configuration:
+
+| | What works | Tested |
+|---|---|---|
+| **[LiteLLM](docs/integrations.md#litellm-agent-gateway)** | librarian as an MCP server and an A2A agent behind the gateway, which holds one key for librarian; LiteLLM as librarian's own model gateway | Every week against a real LiteLLM (`tests/integration/litellm`), and in a real deployment |
+| **[agentgateway](docs/integrations.md#agentgateway)** | librarian as an MCP server and an A2A agent behind it, two ways: each agent's own key passes through, or the gateway signs people in and librarian checks the same token itself. On Kubernetes the Helm chart attaches librarian to your Gateway (`agentgateway.enabled`) | Every week against agentgateway v1.7.0 (`tests/integration/agentgateway`); the chart option by hand on kind |
+| **[kagent and Agent Substrate](docs/integrations.md#agent-substrate-and-kagent)** | Agents call librarian's tools with no key of their own (above); the chart registers librarian as a `RemoteMCPServer`. Rules per Agent, plans, a subset of the tools per agent, kagent's own approval in front of librarian's | By hand on kind with kagent 1.0.1 and Agent Substrate 1.0.0 ([the recipe](tests/integration/substrate)) |
+
+Two things keep it well-behaved behind any of them:
+
+- **An answer never breaks on the way.** Gateways and MCP clients stop at a megabyte or two
+  and say only that a message could not be sent. A tool result that large is never sent: the
+  agent gets the answer's outline and asks for less (`mcp_max_result_bytes`, under
+  [Big APIs](#big-apis)).
+- **An agent can wait for a person.** Where nothing can wake an agent when an approval
+  arrives (a kagent session, a chat turn), it asks `write_status` with `wait_seconds` and has
+  the outcome in the same turn (`mcp_max_wait_seconds`).
+
+Through kagent librarian knows the agent, not the person behind it (kagent sends an MCP server
+one or the other). A rule's `owner` approves that agent's writes; APIs that use each person's
+own sign-in, and "only the requester may approve", need a person and do not work there yet.
 
 ## Observability
 
@@ -901,6 +929,7 @@ name in capitals, with `__` between the levels (`writes.max_grant_days` is
 | `request_timeout_seconds` | `30` | How long connecting to an API, or waiting for the next part of its answer, may take. One request as a whole may take twice this |
 | `max_response_bytes` | `2000000` | An answer longer than this is cut off and marked `truncated` |
 | `mcp_max_result_bytes` | `1000000` | The largest MCP tool result `execute` sends, in bytes as sent (an answer travels twice in one, as structured content and as text). A larger one comes back as its outline and how to ask for less; `0`: no limit |
+| `mcp_max_wait_seconds` | `50` | The longest `write_status` waits for a write to end when an agent asks it to (`wait_seconds`). Keep it under the request timeout of your MCP clients and gateways; `0`: never wait |
 | `allow_provisional` | `true` | Whether a learned API can be read from before a person has approved it |
 | `onboarding_enabled` | `true` | Whether agents may teach librarian new APIs at all |
 | `allow_private_networks` | `false` | Let learned APIs reach private addresses. For a laptop; otherwise use `internal_hosts` |
@@ -1042,6 +1071,16 @@ name in capitals, with `__` between the levels (`writes.max_grant_days` is
 |---|---|---|
 | `otel_enabled` | `false` | Send traces and metrics with OpenTelemetry (endpoint from the standard `OTEL_EXPORTER_OTLP_*` variables) |
 | `otel_service_name` | `librarian` | The service name they carry |
+
+### The Helm chart
+
+`deploy/helm/librarian` runs all of this on Kubernetes: the pod, the sign-in in front of the
+pages (`oauth2Proxy`), hand-written entries from git (`registry.gitSync`), the record on GitHub
+(`githubApp`), agents on Agent Substrate and kagent (`substrate`), a route on your agentgateway
+(`agentgateway`), ingresses and telemetry. `config` in its values is the settings above. Every
+value of the chart is described
+in [deploy/helm/librarian/README.md](deploy/helm/librarian/README.md#values), and
+[docs/deploy.md](docs/deploy.md) goes through a deployment step by step.
 
 ## Security
 
