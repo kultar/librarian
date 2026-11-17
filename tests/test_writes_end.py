@@ -10,7 +10,6 @@ of the same request is never sent beside one that is still open.
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +20,7 @@ from librarian.approvals import ApprovalState, WriteApproval
 from librarian.calls import Caller, CallResult, WriteRequest
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian, WriteRefused
-from tests.conftest import BASE, RecordingNotifier, Router
+from tests.conftest import ANY_AGE, BASE, RecordingNotifier, Router
 from tests.test_state import replica
 
 KIM = Caller(agent="notes-bot", principal="kim@x.test", write_apis=("tracker",))
@@ -68,7 +67,7 @@ async def test_a_write_a_stopped_replica_left_open_is_closed_as_unknown(
     with pytest.raises(WriteRefused, match="still being run"):
         await second.request_write(COMMENT, KIM)
 
-    assert await second.approvals.close_interrupted(timedelta(0)) == 1
+    assert await second.approvals.close_interrupted(ANY_AGE) == 1
     closed = await second.approvals.load(approval.id)
     assert closed is not None and closed.state is ApprovalState.FAILED
     assert closed.note and "may or may not have reached Issue Tracker" in closed.note
@@ -81,7 +80,7 @@ async def test_a_write_a_stopped_replica_left_open_is_closed_as_unknown(
     assert router.requests == []  # librarian never guesses and sends it again itself
 
     # Closing happens once, whichever replica gets there first.
-    assert await second.approvals.close_interrupted(timedelta(0)) == 0
+    assert await second.approvals.close_interrupted(ANY_AGE) == 0
     # Now that it has ended, the agent may ask again (and a person decides again).
     again = await second.request_write(COMMENT, KIM)
     assert isinstance(again, WriteApproval) and again.id != approval.id

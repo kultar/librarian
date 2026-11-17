@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,12 @@ from librarian.secrets import FileSecretStore
 from librarian.service import Librarian
 
 BASE = "https://api.example.test"
+
+# For `close_interrupted`: whatever was taken, however recently. A threshold of zero is
+# not that: where a machine's clock is set back a few seconds in the middle of a test (a
+# virtual machine being put right against its host does that), a write taken a moment
+# ago looks as if it were taken in the future, and is left alone.
+ANY_AGE = timedelta(days=-1)
 
 TRACKER: dict[str, Any] = {
     "id": "tracker",

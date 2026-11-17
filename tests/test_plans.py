@@ -29,7 +29,7 @@ from librarian.registry.models import ApiEntry
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian, LibrarianError, WriteNotEnabled, WriteRefused
 from librarian.web import approval_routes
-from tests.conftest import TRACKER, RecordingNotifier, Router, write_entries
+from tests.conftest import ANY_AGE, TRACKER, RecordingNotifier, Router, write_entries
 from tests.surfaces import approve_the_write, mcp_at, served
 from tests.test_hostile_api import DATABASES, emptied, on_database
 
@@ -785,7 +785,7 @@ async def test_a_plan_a_stopped_replica_left_open_says_how_far_it_got(
     await gone(first)  # ...and the replica is stopped
 
     second = await replicas()
-    assert await second.approvals.close_interrupted(timedelta(0)) == 1
+    assert await second.approvals.close_interrupted(ANY_AGE) == 1
     closed = await second.approvals.load(approval.id)
     assert closed is not None and closed.state is ApprovalState.FAILED
     assert closed.note == (
@@ -834,7 +834,7 @@ async def test_a_plan_left_open_ends_as_what_was_recorded_says(
     approval = await claimed_plan(first)
     approval.step_results += [{"ok": ok, "status_code": 201 if ok else 422} for ok in answered]
     assert await first.approvals.progress(approval)
-    assert await second.approvals.close_interrupted(timedelta(0)) == 1
+    assert await second.approvals.close_interrupted(ANY_AGE) == 1
     closed = await second.approvals.load(approval.id)
     assert closed is not None and (closed.state, closed.note) == (state, note)
 
@@ -866,7 +866,7 @@ async def test_a_plan_closed_as_interrupted_sends_nothing_more(
     async def and_meanwhile(entry: Any, op: Any, request: Any, caller: Any, **more: Any) -> Any:
         result = await send(entry, op, request, caller, **more)
         if op.id == "createTree":
-            assert await second.approvals.close_interrupted(timedelta(0)) == 1
+            assert await second.approvals.close_interrupted(ANY_AGE) == 1
         return result
 
     monkeypatch.setattr(first.executor, "execute_write", and_meanwhile)
