@@ -9,8 +9,8 @@ import pytest
 from librarian.audit import MemoryAuditSink
 from librarian.calls import ArgValue, Caller, CallRequest
 from librarian.executor import PolicyDenied
-from librarian.policy import PolicyEngine, RateLimiter
-from librarian.registry import ApiEntry, Registry
+from librarian.policy import PolicyEngine, RateLimiter, takes
+from librarian.registry import ApiEntry, Operation, Parameter, ParamLocation, Registry
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian
 from tests.conftest import BASE, OPEN, TRACKER, Router, write_entries
@@ -60,6 +60,45 @@ def test_denials(engine: PolicyEngine, request_: CallRequest, reason: str) -> No
     else:
         assert not decision.allowed
         assert reason in decision.reason
+
+
+@pytest.mark.parametrize(
+    ("named", "body", "said"),
+    [
+        ([("key", True)], False, "It takes: key."),
+        ([("key", True)], True, "It takes: key and a body."),
+        (
+            [("key", True), ("team", False)],
+            False,
+            "It takes: key, team? (a ? marks one that may be left out).",
+        ),
+        (
+            [("key", True), ("team", False)],
+            True,
+            "It takes: key, team? and a body (a ? marks one that may be left out).",
+        ),
+        ([], True, "It takes: a body."),
+        ([], False, "It takes no arguments."),
+    ],
+)
+def test_what_an_operation_takes_is_said_as_it_is(
+    named: list[tuple[str, bool]], body: bool, said: str
+) -> None:
+    """The sentence a refused agent reads next. It explains the ? only where there is
+    one, and an operation that takes nothing is not said to take "no arguments (a ? ...)"."""
+    op = Operation(
+        id="op",
+        method="POST" if body else "GET",
+        path="/things",
+        parameters=[
+            Parameter.model_validate(
+                {"name": name, "in": ParamLocation.QUERY, "required": required}
+            )
+            for name, required in named
+        ],
+        accepts_body=body,
+    )
+    assert takes(op) == said
 
 
 def test_reviewed_read_requires_verified_entry(tmp_path: Path) -> None:

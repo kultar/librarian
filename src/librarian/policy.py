@@ -310,9 +310,13 @@ def arguments(op: Operation) -> list[str]:
 
 def takes(op: Operation) -> str:
     """What an operation takes, said where an agent got it wrong."""
-    named = ", ".join(arguments(op)) or "no arguments"
-    body = " and a body" if op.accepts_body else ""
-    return f"It takes: {named}{body} (a ? marks one that may be left out)."
+    named = arguments(op)
+    parts = ([", ".join(named)] if named else []) + (["a body"] if op.accepts_body else [])
+    if not parts:
+        return "It takes no arguments."
+    optional = any(not p.required for p in op.parameters)
+    note = " (a ? marks one that may be left out)" if optional else ""
+    return f"It takes: {' and '.join(parts)}{note}."
 
 
 def _plain(name: str) -> str:

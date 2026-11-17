@@ -164,12 +164,17 @@ async def test_an_agent_is_told_what_an_operation_takes_and_does_not_have_to_gue
         wrong_name = {"api": "tracker", "operation": "addComment", "args": {"issue": "PAY-1"}}
         assert said(await session.call_tool("write", wrong_name)) == (
             "Error executing tool write: refused: unknown arguments for 'addComment': issue. "
-            "It takes: key and a body (a ? marks one that may be left out)."
+            "It takes: key and a body."
         )
         left_out = {"api": "tracker", "operation": "getIssue"}
         assert said(await session.call_tool("execute", left_out)).endswith(
-            "missing required argument 'key' for 'getIssue'. It takes: key (a ? marks one "
-            "that may be left out)."
+            "missing required argument 'key' for 'getIssue'. It takes: key."
+        )
+        # The ? is explained where there is one to explain.
+        misnamed = {"api": "tracker", "operation": "listIssues", "args": {"squad": "payments"}}
+        assert said(await session.call_tool("execute", misnamed)).endswith(
+            "unknown arguments for 'listIssues': squad. It takes: team?, state?, X-Trace? "
+            "(a ? marks one that may be left out)."
         )
         for tool, written, meant in (
             ("execute", "get_issue", "getIssue"),
