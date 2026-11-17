@@ -462,7 +462,14 @@ async def test_pending_approvals_and_grants_survive_restart(tmp_path: Any, route
     await approve_when_open(first, remember=True, pin=["key"])
     await asyncio.wait_for(task, 5)
     pending = asyncio.create_task(first.write(comment("PAY-2"), KIM))
-    await asyncio.sleep(0.1)
+    # Until its approval is in the database, waiting for a person. Not for a tenth of a
+    # second (a busy machine needs longer), and not until the replica has it in memory:
+    # that is a moment before it is saved.
+    assert first.state is not None
+    for _ in range(500):
+        if await first.state.list_docs("approval", ApprovalState.PENDING.value):
+            break
+        await asyncio.sleep(0.01)
     pending.cancel()
     await first.aclose()
 
