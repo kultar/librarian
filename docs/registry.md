@@ -51,11 +51,16 @@ operations:
 ### Fields librarian sets when learning
 
 ```yaml
+updated_at: 2026-11-16T09:00:00Z  # when the entry last changed
 source:
   kind: docs                      # openapi | docs | inferred (model knowledge) | manual
   url: https://example.com/docs/api/
   pages: [https://example.com/docs/api/, https://example.com/docs/api/reference]
+  fetched_at: 2026-11-01T08:00:00Z   # when it was learned from there
   content_hash: 3f1c...           # fingerprint used to notice changes
+  checked_at: 2026-11-16T08:00:00Z   # when it was last compared with the source
+  found_by: homepage              # given | well-known | homepage | search: how the source was found
+  trust: official                 # official (the API's own domain) | docs-host | third-party
 operations:
   - id: get_widgets_id
     origin: docs                  # spec | docs | model | manual
@@ -65,6 +70,8 @@ operations:
                                   # in the state database
     suspended: null               # a reason here refuses the operation until removed
     warning: null                 # shown to callers with every result
+    response_shape: [id, name]    # field paths seen in a successful answer: the baseline for
+                                  # noticing that the API's answers changed shape
 ```
 
 ## Acting as the person
@@ -72,8 +79,49 @@ operations:
 `auth.type: oauth2_user` makes librarian the OAuth client for the API and each person sign in
 once (see the README's "Acting as the person"). Fields: `authorization_url`, `token_url`
 (both https), `scopes`, `client_id`, `client_secret_ref` (optional; a secret reference, never
-under `librarian/`), `pkce` (default true), `extra_authorize_params`. Only verified entries may
+under `librarian/`), `revocation_url` (optional; when set, disconnecting a person also revokes
+their tokens there), `pkce` (default true), `extra_authorize_params`. Only verified entries may
 use it. The same type works for `write_auth`.
+
+## Credentials made for each call
+
+Three kinds of `auth` (and `write_auth`) where nothing long-lived is sent to the API; the
+README's "Credentials made for each call" says what each does. Only verified entries may use
+them.
+
+```yaml
+auth:
+  type: oauth2_client             # a token made from a client id and secret
+  secret_ref: orders/client-secret   # the client secret; sent to token_url only
+  token_url: https://login.example.com/oauth/token   # https
+  client_id: librarian
+  scopes: [orders.read]           # give reads and writes different scopes
+  audience: https://orders.example.com   # optional: some providers want one
+  client_auth: body               # body (default) | basic: how id and secret reach token_url
+  extra_token_params: {}          # more form fields for the token request
+```
+
+```yaml
+auth:
+  type: github_app                # a token made per call from a GitHub App's key
+  secret_ref: github/app-key      # the App's private key (PEM)
+  app_id: "123456"                # the App id, or its client id
+  installation_id: null           # optional: for operations that name no owner
+  permissions: null               # optional: ask for exactly these ({contents: read}) instead
+                                  # of what the installation has
+  owner_param: owner              # the arguments that name the owner, the repository and the
+  repo_param: repo                # organisation in this API's operations: the installation
+  org_param: org                  # is found from them
+```
+
+```yaml
+auth:
+  type: aws_sigv4                 # every request is signed; nothing is stored
+  service: execute-api            # the signing name: execute-api, s3, es, lambda, ...
+  region: eu-west-1
+  role_arn: null                  # optional: a role librarian assumes for this API
+  external_id: null               # optional: the external id that role asks for
+```
 
 ## Discovery and glossary
 

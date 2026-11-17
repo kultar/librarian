@@ -46,7 +46,6 @@ database defaults apply only when the user did not set them.
 {{- $_ := set $c "host" "0.0.0.0" -}}
 {{- $_ := set $c "port" 8080 -}}
 {{- $_ := set $c "pages_port" 8081 -}}
-{{- $_ := set $c "state_dir" "/data" -}}
 {{- $_ := set $c "replicas" (int .Values.replicaCount) -}}
 {{- if .Values.oauth2Proxy.enabled -}}
 {{- /* Only the proxy sidecar can reach the pages; it sets the identity headers. */ -}}

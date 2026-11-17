@@ -140,8 +140,9 @@ caller polls or subscribes to the task as usual.
 ## Configuration
 
 Settings come from a YAML file (`--config`) and/or `LIBRARIAN_*` environment variables (env wins;
-nested keys use `__`, e.g. `LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN`). See
-[`examples/librarian.yaml`](examples/librarian.yaml) for every option.
+nested keys use `__`, e.g. `LIBRARIAN_NOTIFIER__SLACK__BOT_TOKEN`). Every setting is listed
+under [Settings](#settings); [`examples/librarian.yaml`](examples/librarian.yaml) is a
+commented example.
 
 **Models / LiteLLM.** `fetch` needs a model. Use any Pydantic AI model string
 (`model: anthropic:claude-sonnet-5-5`, with the provider's usual API-key env var), or point at any
@@ -317,6 +318,38 @@ Calls also watch for change: `Deprecation`/`Sunset` headers, repeated 404/405/41
 responses that lose most of the fields seen before are reported to the API's owners (once), and
 callers see a warning. `librarian registry recheck [api]` runs a check now;
 `librarian registry clear <api> <operation>` lifts a suspension after checking by hand.
+
+## When an API misbehaves
+
+APIs fail in ways an agent cannot act on by itself. librarian turns each into something it can:
+
+- **No answer.** When an API cannot be reached or does not finish answering, the agent is told
+  so in words, with the reason when there is one (the name did not resolve, the connection was
+  refused, its certificate was not accepted, it did not answer in time): *"Jira gave no answer:
+  it could not be reached (its host name did not resolve). Nothing was read: retry later."* For
+  a write the message ends with what matters most: *"The write was not sent"*, or *"The write
+  may have reached it: check before sending it again."*
+- **A time limit for the whole request.** Connecting, and each wait for the next part of an
+  answer, may take `request_timeout_seconds` (30); one request as a whole twice that, however
+  slowly the answer trickles in. An answer longer than `max_response_bytes` (2 MB) is cut off
+  and marked `truncated`.
+- **An answer is passed on as data only if everything after librarian can handle it.** JSON
+  nested deeper than 100 levels, cut off, or not parseable arrives as text; `NaN` and
+  `Infinity`, which are not JSON, become `null`.
+- **A credential the API sends back is removed** from the answer (`[redacted]`) before it
+  reaches the agent, a model, the audit trail or the stored result of a write.
+- **A write always ends.** Once librarian has taken an approved write to send it, its approval
+  reaches a final state that says what happened: the API's answer, "not sent", "may have
+  reached the API", or, when the replica stopped in the middle, "interrupted" (closed after 15
+  minutes, or ten times the request timeout if that is longer, and never sent again by
+  librarian). A repeat with the same `idempotency_key` is refused while the first is open.
+
+**`librarian doctor`** checks that no credential is stored where it must not be. It compares
+every credential in the secret store with every row of the database and every line of the
+audit file, in each form a credential can take there, and names what it finds by the secret's
+reference; it never prints one. `--redact` replaces the copies in the database. Versions before
+0.20 could store one, so run it once after upgrading from them
+([more](docs/troubleshooting.md#agents-and-calls)).
 
 ## Acting as the person (per-person OAuth)
 
@@ -760,11 +793,248 @@ is imported into it, and an edited file is imported again as long as nobody has 
 about that API in librarian; after that the database's entry wins and the console says the file
 is being ignored.
 
+**How librarian authenticates to an API** is part of its entry (`auth`, and `write_auth` for
+writes, which is always a credential of its own). Learned from the spec or the documentation,
+and changeable on the API's page in the console:
+
+| `type` | What the API is sent |
+|---|---|
+| `none` | Nothing |
+| `bearer` | `Authorization: Bearer <secret>` |
+| `api_key` | The secret in a header or a query parameter of your naming (`in: header` or `query`, `name`) |
+| `basic` | HTTP Basic; the secret holds `username:password` |
+| `oauth2_user` | The token of the person the agent acts for: [Acting as the person](#acting-as-the-person-per-person-oauth) |
+| `oauth2_client`, `github_app`, `aws_sigv4` | A credential made for the call: [Credentials made for each call](#credentials-made-for-each-call) |
+
+The secret is named by a reference (`secret_ref: jira/readonly`), never written into the entry.
 When learning an API, the librarian also looks for a cheap "who am I" read (`/me`, `/myself`,
 `/user`, ...) and uses it to test every new credential.
 
-Validate in CI with `uv run librarian registry validate`. Format reference:
-[docs/registry.md](docs/registry.md). Example: [`examples/registry/jira.yaml`](examples/registry/jira.yaml).
+Validate in CI with `uv run librarian registry validate`. Every field of an entry is described
+in [docs/registry.md](docs/registry.md). Example:
+[`examples/registry/jira.yaml`](examples/registry/jira.yaml).
+
+## Reference
+
+Everything that can be run or set, in one place. The sections above say what each is for.
+
+### Commands
+
+All but the `github-app` commands take `--config <file>` and read the same settings as the server.
+
+| Command | What it does |
+|---|---|
+| `librarian serve` | Run the server: A2A at `/`, MCP at `/mcp`, the pages for people and the console |
+| `librarian learn <api>` | Learn an API from a spec, its documentation or the model's knowledge, and save it as provisional |
+| `librarian call <api> <operation>` | Run one read operation locally, under the same policy as the server |
+| `librarian ask "<request>"` | Run a plain-language request locally (the `fetch` skill) |
+| `librarian discover <api>` | Run an API's discovery reads into its glossary (e.g. Jira's custom field names) |
+| `librarian doctor` | Look for credentials stored where they must never be, and for ones that cannot be used; `--redact` replaces the copies in the database |
+| `librarian registry recheck [api]` | Re-read APIs' specs or documentation now and handle what changed |
+| `librarian registry clear <api> <operation>` | Lift a suspension or warning on an operation after checking it by hand |
+| `librarian registry list` | List the APIs librarian knows, including those learned on demand |
+| `librarian registry validate` | Validate every registry file; exits non-zero on errors (for CI) |
+| `librarian registry restore` | Bring the entries in the record repository into the database: after losing it, or when moving to a new one |
+| `librarian grants list` | Standing write permissions, from approvals and from the config |
+| `librarian grants revoke <grant>` | Revoke a grant at once: the kill switch for an agent's unattended writes |
+| `librarian approvals list` | Writes and plans waiting for a person, with their links |
+| `librarian github-app create` | Create a GitHub App for the record repository in one step |
+| `librarian github-app init-repo` | Make the first commit in an empty record repository, as the App |
+| `librarian github-app check` | Check that the App can make a token and reach the record repository |
+| `librarian recipes list` | Saved recipes, most used first |
+| `librarian recipes delete <recipe>` | Forget a recipe; the planner is used again for such requests |
+
+### Settings
+
+In the YAML file given with `--config`, or as environment variables: `LIBRARIAN_` and the
+name in capitals, with `__` between the levels (`writes.max_grant_days` is
+`LIBRARIAN_WRITES__MAX_GRANT_DAYS`). The environment wins. `[]` marks a list.
+[`examples/librarian.yaml`](examples/librarian.yaml) is a file with most of them set.
+
+**The server**
+
+| Setting | Default | |
+|---|---|---|
+| `host` | `127.0.0.1` | Address the listener for agents (A2A and MCP) binds to |
+| `port` | `8080` | Its port |
+| `public_url` | `http://127.0.0.1:8080` | Where approvers' browsers reach the pages; every link librarian sends starts with it |
+| `a2a_url` |  | The A2A address advertised in the agent card, when agents and people reach librarian at different addresses. Default: `public_url` |
+| `pages_host` | `127.0.0.1` | Address of the separate listener for the pages and the console (see `pages_port`) |
+| `pages_port` |  | Serve the pages and the console on their own listener. Needed with `approvers.mode: trusted_header`, so that only the sign-in proxy reaches them; the agents' listener then serves no pages |
+| `mcp_enabled` | `true` | Serve the skills as MCP tools at `/mcp` |
+| `mcp_allowed_hosts` |  | `Host` headers accepted on `/mcp`. Empty: any (every MCP request needs a caller's key anyway) |
+| `replicas` | `1` | How many replicas run (the chart sets it). Above 1, librarian refuses to start without Postgres and the AWS secret store |
+
+**The registry and what is kept**
+
+| Setting | Default | |
+|---|---|---|
+| `registry_dir` | `registry` | Registry entries written by hand, as YAML. With a database they are imported into it |
+| `registry_overlay_dir` |  | Without a database: where librarian writes its own entries when `registry_dir` is managed elsewhere |
+| `database_url` | `sqlite+aiosqlite:///.librarian/librarian.db` | Where everything is kept. SQLite for one instance, `postgresql+asyncpg://...` for several; `null` keeps it in memory |
+| `audit_file` |  | The audit log, one JSON object per line. Unset: standard output |
+| `audit_retention_days` | `30` | How long audit events are also kept in the database, for the console's Activity page |
+| `signing_key_ref` | `librarian/signing-key` | The secret holding the key that signs links for people. Made on first start |
+| `drift.recheck_hours` | `24` | How often each API's spec or documentation is read again for changes; `0` never |
+
+**Secrets**
+
+| Setting | Default | |
+|---|---|---|
+| `secrets_backend` | `file` | `file`, or `aws` for AWS Secrets Manager |
+| `secrets_dir` | `.librarian/secrets` | With `file`: the folder, one `0600` file per secret |
+| `aws_secrets.region` |  | Default: the usual AWS configuration |
+| `aws_secrets.prefix` |  | Put in front of every reference: with `librarian/`, `jira/readonly` is the secret `librarian/jira/readonly` |
+| `aws_secrets.cache_seconds` | `60` | How long a value is kept in memory |
+
+**Calling APIs**
+
+| Setting | Default | |
+|---|---|---|
+| `rate_limit_per_minute` | `60` | Reads one agent may make on one API in a minute |
+| `request_timeout_seconds` | `30` | How long connecting to an API, or waiting for the next part of its answer, may take. One request as a whole may take twice this |
+| `max_response_bytes` | `2000000` | An answer longer than this is cut off and marked `truncated` |
+| `allow_provisional` | `true` | Whether a learned API can be read from before a person has approved it |
+| `onboarding_enabled` | `true` | Whether agents may teach librarian new APIs at all |
+| `allow_private_networks` | `false` | Let learned APIs reach private addresses. For a laptop; otherwise use `internal_hosts` |
+| `internal_hosts` |  | Host name patterns agents may learn APIs on although they resolve to private addresses |
+| `credential_wait_seconds` | `900` | How long an A2A task waits for a person to add a missing credential |
+
+**Agents with a key**
+
+| Setting | Default | |
+|---|---|---|
+| `callers[].agent` | required | The agent's name: in the audit log, on approval pages, in grants |
+| `callers[].key_ref` | required | The secret holding the key this agent sends; under `librarian/` |
+| `callers[].apis` | `["*"]` | The APIs it may use, as glob patterns |
+| `callers[].can_onboard` | `true` | Whether it may teach librarian new APIs |
+| `callers[].write_apis` |  | The APIs it may ask for writes on; each write still needs approval or a grant |
+| `callers[].owner` |  | The person who answers for it: approves its writes when it acts for nobody |
+| `callers[].approval_wait_seconds` |  | The longest a write it asked for over A2A waits for a decision; after that the request is closed as expired. Unset: `writes.approval_expire_hours` |
+| `callers[].limits` |  | What it may do inside an API: see [Limits inside an API](#limits-inside-an-api) |
+
+**Agents on Agent Substrate and kagent**
+
+| Setting | Default | |
+|---|---|---|
+| `substrate.issuer` |  | The issuer of actor tokens, e.g. `https://idp.ate-system.svc`. Setting it turns this on |
+| `substrate.audience` | `librarian` | What a token must be made for; one made for another service is refused |
+| `substrate.jwks_url` |  | Where the issuer's keys are. Default: from its discovery document |
+| `substrate.ca_file` |  | CA bundle for reaching the issuer (in a cluster: the trust bundle of its signer) |
+| `substrate.algorithms` | `["ES256", "RS256"]` | Signature algorithms accepted |
+| `substrate.leeway_seconds` | `30` | Clock difference tolerated when checking a token's times |
+| `substrate.kagent_url` |  | kagent's controller. Set: the caller is the kagent Agent behind a session, not the session |
+| `substrate.kagent_cache_seconds` | `60` | How long the answer to "which Agent is this session" is reused |
+| `substrate.rules[].match.namespace` |  | The kagent Agent's namespace (a glob pattern). Every field given must match; an empty `match` is every agent |
+| `substrate.rules[].match.name` |  | The kagent Agent's name (a glob pattern) |
+| `substrate.rules[].match.labels` |  | Labels the kagent Agent must carry |
+| `substrate.rules[].match.atespace` |  | The actor's atespace (a glob pattern), for Substrate without kagent |
+| `substrate.rules[].match.actor` |  | The actor's name (a glob pattern) |
+| `substrate.rules[].agent` |  | A caller name to record instead of `<namespace>/<name>`, e.g. one name for a team's agents |
+| `substrate.rules[].apis` | `["*"]` | As for `callers` |
+| `substrate.rules[].can_onboard` | `true` | As for `callers` |
+| `substrate.rules[].write_apis` |  | As for `callers` |
+| `substrate.rules[].owner` |  | As for `callers`: approves these agents' writes |
+| `substrate.rules[].approval_wait_seconds` |  | As for `callers` |
+| `substrate.rules[].limits` |  | As for `callers` |
+
+**The model and plain-language requests**
+
+| Setting | Default | |
+|---|---|---|
+| `model` |  | The model for plain-language requests (`fetch`) and for learning an API that has no spec. Unset: those two are not available; everything else works |
+| `model_base_url` |  | An OpenAI-compatible gateway such as LiteLLM, instead of the provider |
+| `model_api_key` |  | The key for that gateway. It is the only key ever sent there |
+| `model_api` | `openai` | The format spoken to the gateway: `openai` or `anthropic` (needed for the model's own web search) |
+| `fallback_model` |  | Tried once when the model fails or declines a request |
+| `planner_output` | `auto` | How the planner gets structured answers: `tool`, `native`, `prompted`, or `auto` |
+| `max_calls_per_fetch` | `8` | The most API calls one plain-language request may make |
+| `fetch_timeout_seconds` | `100` | The time one plain-language request may take; past it, what it has is returned, marked partial |
+| `recipes_enabled` | `true` | Save a successful plain-language request as a recipe and replay it without the model |
+
+**Learning APIs**
+
+| Setting | Default | |
+|---|---|---|
+| `learning.model` |  | A different model for learning than for `fetch` |
+| `learning.docs_max_pages` | `8` | The most documentation pages read for one API |
+| `learning.find_docs` | `true` | Given only a base URL, look for documentation in the usual places |
+| `learning.search.provider` | `off` | Search the web for an API's documentation: `off`, `model` (the model's own web search), `searxng` or `brave` |
+| `learning.search.url` |  | The SearXNG instance |
+| `learning.search.api_key` |  | The Brave Search key |
+| `learning.search.allow_third_party` | `false` | Also use pages outside the API's own domain and the well-known documentation hosts |
+| `learning.search.max_results` | `8` | How many search results are looked at |
+| `learning.model_knowledge` | `true` | Given only a base URL and no documentation, describe the API from what the model knows (reads only) |
+
+**Writes**
+
+| Setting | Default | |
+|---|---|---|
+| `writes.approvers` | `requester_or_group` | Who may approve a write: `requester`, `group`, or `requester_or_group` |
+| `writes.approval_expire_hours` | `24` | How long a write waits for a decision before it expires |
+| `writes.rate_limit_per_minute` | `10` | Writes one agent may ask for on one API in a minute; a plan counts as its number of steps |
+| `writes.max_grant_days` |  | The longest a grant may last. Unset: any length, including until revoked |
+| `writes.grants[].agent` | required | A grant from the config, for unattended agents: the agent |
+| `writes.grants[].api` | required | The API |
+| `writes.grants[].operation` | required | The operation |
+| `writes.grants[].principal` |  | Only when the agent acts for this person |
+| `writes.grants[].pinned_args` |  | Argument values the write must have |
+| `writes.grants[].max_uses_per_day` |  | A daily cap |
+| `writes.grants[].notify_owner` | `true` | Post each use to the channel |
+| `writes.announce_auto` | `false` | Post every automatically approved write to the channel |
+| `writes.announce_grants` | `true` | Post every use of a grant to the channel |
+
+**People: who an agent acts for, and who approves**
+
+| Setting | Default | |
+|---|---|---|
+| `principals.mode` | `off` | Whether the person an agent names must be proven: `off`, `optional` or `required` |
+| `principals.header` | `X-Principal-Token` | The header carrying the person's token |
+| `principals.issuers[].issuer` | required | An identity provider whose tokens are accepted |
+| `principals.issuers[].audience` | required | What its tokens must be made for |
+| `principals.issuers[].jwks_url` |  | Where its keys are. Default: from its discovery document |
+| `principals.issuers[].claim` | `email` | The claim that names the person |
+| `principals.issuers[].algorithms` | `["RS256", "ES256"]` | Signature algorithms accepted |
+| `principals.issuers[].leeway_seconds` | `30` | Clock difference tolerated |
+| `approvers.mode` | `token` | How the pages know who is deciding: `token` (whoever holds the link; local use) or `trusted_header` (a sign-in proxy in front) |
+| `approvers.user_header` | `X-Auth-Request-Email` | The header in which the proxy names the person |
+| `approvers.groups_header` | `X-Auth-Request-Groups` | The header in which it lists their groups |
+| `approvers.group` |  | The group whose members may approve |
+| `approvers.console` | `signed_in` | The console: `signed_in`, `open` (no sign-in: a laptop) or `off` |
+
+**Telling approvers**
+
+| Setting | Default | |
+|---|---|---|
+| `notifier.type` | `log` | Where requests for a person go: `log`, `slack` or `webhook` |
+| `notifier.slack.bot_token` |  | The Slack bot's token |
+| `notifier.slack.channel` | `#api-access-requests` | The channel; an API's entry can name its own |
+| `notifier.slack.approver_group` |  | A Slack user group to mention |
+| `notifier.webhook_url` |  | With `webhook`: where each event is posted as JSON |
+| `notifier.remind_after_hours` | `4` | Remind about a credential request still open after this long |
+| `notifier.expire_after_hours` | `24` | Close a credential request nobody answered after this long |
+
+**The record repository**
+
+| Setting | Default | |
+|---|---|---|
+| `publish.type` | `none` | `github` writes every approved entry and decision to a repository as a commit |
+| `publish.repo` |  | That repository, `owner/name` |
+| `publish.base_branch` | `main` | The branch written to |
+| `publish.directory` | `registry` | The folder in it |
+| `publish.token` |  | A token for it (contents and pull requests: write). Prefer `publish.github_app` |
+| `publish.github_app.app_id` | required | A GitHub App instead of a token: its id. `librarian github-app create` makes one |
+| `publish.github_app.private_key` |  | Its private key, inline |
+| `publish.github_app.private_key_file` |  | Or a file holding it |
+| `publish.github_app.installation_id` |  | Found automatically when unset |
+| `publish.api_url` | `https://api.github.com` | The GitHub API's address, for GitHub Enterprise Server |
+
+**Telemetry**
+
+| Setting | Default | |
+|---|---|---|
+| `otel_enabled` | `false` | Send traces and metrics with OpenTelemetry (endpoint from the standard `OTEL_EXPORTER_OTLP_*` variables) |
+| `otel_service_name` | `librarian` | The service name they carry |
 
 ## Security
 

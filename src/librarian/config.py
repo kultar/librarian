@@ -316,8 +316,9 @@ class CallerKey(BaseModel):
     # Human (email) responsible for this agent. Required for autonomous agents that
     # write: approvals for requests with no principal are routed to the owner.
     owner: str | None = None
-    # How long this agent's write requests wait for approval; 0 returns "pending"
-    # at once (autonomous agents poll the A2A task). None = the global default.
+    # The longest a write this agent asked for over A2A waits for a decision; past it
+    # the request is closed as expired and the agent is told. None: until the approval
+    # itself expires (writes.approval_expire_hours). Over MCP a write never waits.
     approval_wait_seconds: float | None = None
     # What this agent may do inside an API it may use, by API id (a glob pattern): which
     # operations, and which values of which arguments, e.g.
@@ -378,7 +379,6 @@ class Settings(BaseSettings):
     audit_file: Path | None = None  # stdout when unset
     # With a database, audit events are also kept there for the console; older ones are pruned.
     audit_retention_days: int = Field(default=30, ge=1)
-    state_dir: Path = Path(".librarian")
     # Durable state (credential requests, A2A tasks). SQLite for one instance;
     # postgresql+asyncpg://... (install the `postgres` extra) for several replicas.
     # Set to null to keep everything in memory.
