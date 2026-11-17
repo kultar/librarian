@@ -3,7 +3,7 @@
   "name": "io.github.kultar/librarian",
   "title": "librarian",
   "description": "Any HTTP API for your agents, without its credentials: reads in policy, writes a person approves.",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "websiteUrl": "https://librarian-agent.com",
   "repository": {
     "url": "https://github.com/kultar/librarian",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "librarian-a2a",
-      "version": "0.23.0",
+      "version": "0.23.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "streamable-http",
@@ -34,7 +34,7 @@
     },
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/kultar/librarian:0.23.0",
+      "identifier": "ghcr.io/kultar/librarian:0.23.1",
       "runtimeHint": "docker",
       "transport": {
         "type": "streamable-http",

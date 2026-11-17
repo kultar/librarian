@@ -84,7 +84,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
 uvx librarian-a2a serve                    # or run it without installing (same CLI)
-docker pull ghcr.io/kultar/librarian:0.23.0
+docker pull ghcr.io/kultar/librarian:0.23.1
 ```
 
 ### What happens on a request
@@ -1352,6 +1352,12 @@ uv run pytest
   next changes or when a person asks for a re-check, as an update that touches nothing
   else about the operations. On five large APIs, 1,343 of the 1,497 operations that take
   a body are described
+- **v0.23.1**: from live runs with what 0.23 tells agents. A list in a body is told by its
+  key and a type that says it is a list (`expand`, a `list of string`); 0.23.0 named it
+  `expand[]`, and a model sent that as the key. A body is sent as a form where the API's
+  description says it takes one (Stripe's API): a field inside another in brackets, a
+  list as that description writes lists (`body.lists` in an entry), and the approval page
+  shows the fields as they go over the wire
 
 ### Next
 
