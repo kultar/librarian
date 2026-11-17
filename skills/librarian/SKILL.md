@@ -13,7 +13,9 @@ with where it came from. What it refuses, you cannot get another way, and should
 ## Reading
 
 1. `capabilities` shows the APIs you may use and their read operations. Give it a `query` in
-   a few words ("jira issue comments") to get the best matches first.
+   a few words ("jira issue comments") to get the best matches first. Each operation names
+   the arguments it takes in `args` (`team?` is one you may leave out) and says when it takes
+   a `body`: use those names exactly, do not guess them.
 2. `execute` runs one read: `api`, `operation`, `args`.
    - Ask only for what you need: `select` takes dotted paths, and lists are followed, so
      `["issues.key", "issues.fields.summary"]` returns those two fields of every issue.

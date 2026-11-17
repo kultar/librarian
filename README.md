@@ -117,7 +117,7 @@ GitHub is written to, never asked: nothing merged or edited there changes what a
 | Skill | What it does | LLM? |
 |---|---|---|
 | `execute` | Run one read operation: `{"skill":"execute","api":"jira","operation":"getIssue","args":{"issueIdOrKey":"ABC-1"}}`. Optional `select` (dotted paths, e.g. `["fields.summary"]`) and `max_pages` | No |
-| `capabilities` | List APIs and read operations: `{"skill":"capabilities","query":"issues"}`. An agent that may ask for writes on an API also gets its `write_operations`, each with whether writes through it are `enabled` | No |
+| `capabilities` | List APIs and read operations, each with the arguments it takes (`args`; `team?` may be left out): `{"skill":"capabilities","query":"issues"}`. An agent that may ask for writes on an API also gets its `write_operations`, each with whether writes through it are `enabled` | No |
 | `onboard` | Learn an API: `{"skill":"onboard","api":"jira","spec_url":"https://..."}`, `"base_url"` to auto-discover, or `"docs_url"` + `"base_url"` when there is no spec | No |
 | `write` | Change data, with human approval or a grant: `{"skill":"write","api":"jira","operation":"addComment","args":{...},"body":{...},"reason":"why"}`. Optional `idempotency_key`: a repeat returns the first result instead of running again. The answer says how it ran (approved by whom, under which grant, or automatically) | No |
 | `plan` | Several writes on one API, approved as one and made in order: `{"skill":"plan","api":"github","reason":"why","steps":[{"id":"blob","operation":"...","args":{...},"body":{...}}, ...]}`. A later step takes a value an earlier one returned with `{"$from":"blob.sha"}` ([more](#several-writes-as-one-plan)) | No |

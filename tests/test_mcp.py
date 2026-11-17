@@ -133,6 +133,61 @@ async def test_capabilities_names_the_changes_an_agent_may_ask_for(
     assert all("write_operations" not in a for a in reader)
 
 
+def said(result: Any) -> str:
+    """What a refused tool call told the agent."""
+    assert result.is_error
+    return " ".join(getattr(part, "text", "") for part in result.content)
+
+
+async def test_an_agent_is_told_what_an_operation_takes_and_does_not_have_to_guess(
+    connect: Connect,
+) -> None:
+    """Shown the operations without their arguments, an agent guesses names until one
+    fits. It is told them where the operations are listed, and again where it got one
+    wrong; and an operation written another way is answered with the one that exists."""
+    async with connect() as session:
+        apis = {a["api"]: a for a in data(await session.call_tool("capabilities", {}))["apis"]}
+        reads = {op["operation"]: op for op in apis["tracker"]["read_operations"]}
+        writes = {op["operation"]: op for op in apis["tracker"]["write_operations"]}
+        assert reads["getIssue"]["args"] == ["key"] and "body" not in reads["getIssue"]
+        assert reads["listIssues"]["args"] == ["team?", "state?", "X-Trace?"]  # ?: may be left out
+        assert reads["searchIssues"] == {
+            "operation": "searchIssues", "summary": "", "args": [], "body": True
+        }  # fmt: skip
+        assert writes["addComment"]["args"] == ["key"] and writes["addComment"]["body"] is True
+
+        # Words that fit the API and none of its operations: they are listed all the same.
+        found = data(await session.call_tool("capabilities", {"query": "example tracker"}))
+        hit = next(a for a in found["apis"] if a["api"] == "tracker")
+        assert hit["read_operations"] and hit["write_operations"]
+
+        wrong_name = {"api": "tracker", "operation": "addComment", "args": {"issue": "PAY-1"}}
+        assert said(await session.call_tool("write", wrong_name)) == (
+            "Error executing tool write: refused: unknown arguments for 'addComment': issue. "
+            "It takes: key and a body (a ? marks one that may be left out)."
+        )
+        left_out = {"api": "tracker", "operation": "getIssue"}
+        assert said(await session.call_tool("execute", left_out)).endswith(
+            "missing required argument 'key' for 'getIssue'. It takes: key (a ? marks one "
+            "that may be left out)."
+        )
+        for tool, written, meant in (
+            ("execute", "get_issue", "getIssue"),
+            ("write", "add_comment", "addComment"),
+            ("write", "ADDCOMMENT", "addComment"),
+        ):
+            answer = said(await session.call_tool(tool, {"api": "tracker", "operation": written}))
+            assert f"unknown operation {written!r} on 'tracker'. Did you mean {meant!r}?" in answer
+        # Nothing is suggested that the agent is not shown anyway: a write to one that reads.
+        answer = said(
+            await session.call_tool("execute", {"api": "tracker", "operation": "add_comment"})
+        )
+        assert answer.endswith("unknown operation 'add_comment' on 'tracker'")
+        # ...and nothing for a name that is simply not there.
+        answer = said(await session.call_tool("execute", {"api": "tracker", "operation": "nope"}))
+        assert answer.endswith("unknown operation 'nope' on 'tracker'")
+
+
 async def test_execute_with_select(
     connect: Connect, router: Router, secrets_store: FileSecretStore
 ) -> None:

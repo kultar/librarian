@@ -87,7 +87,7 @@ from librarian.openapi import (
 from librarian.opsearch import rank
 from librarian.planner import FetchAnswer, FetchOutcome, Planner
 from librarian.plans import PlanError, PlannedStep, PlanRequest, resolve, step_key
-from librarian.policy import PolicyEngine
+from librarian.policy import PolicyEngine, arguments
 from librarian.publish import GitHubPublisher, Publisher, PublishError
 from librarian.recipes import Recipe, recipe_summary
 from librarian.recipes import learn as learn_recipe
@@ -1365,31 +1365,31 @@ class Librarian:
 
         def reads(entry: ApiEntry) -> list[Operation]:
             """The reads this caller can make there: its limits may leave some out."""
-            limits = caller.limits_for(entry.id)
-            return [
-                op
-                for op in entry.operations
-                if op.access is Access.READ
-                and not self.observations.suspended(entry, op)
-                and (limits is None or limits.reaches(op))
-            ]
+            return self.policy.listed(entry, caller, Access.READ)
 
         def writes(entry: ApiEntry) -> list[Operation]:
             """The changes this caller may ask for there. Asking is all it may do: each
             one still needs a person's approval or a grant."""
-            if not caller.may_write(entry.id):
-                return []
-            limits = caller.limits_for(entry.id)
-            return [
-                op
-                for op in entry.operations
-                if op.access is not Access.READ
-                and not self.observations.suspended(entry, op)
-                and (limits is None or limits.reaches(op))
-            ]
+            return self.policy.listed(entry, caller, Access.WRITE)
 
         def shown(entry: ApiEntry, ops: list[Operation]) -> list[Operation]:
-            return rank(entry, query, ops, limit=20) if query else ops[:50]
+            """The best matches for what was asked. Where the words fit none of an API's
+            operations, the first of them: an agent that is shown nothing starts guessing."""
+            if not query:
+                return ops[:50]
+            return rank(entry, query, ops, limit=20) or ops[:20]
+
+        def told(op: Operation) -> dict[str, Any]:
+            """One operation as an agent needs it to call it: its name, what it does, and
+            the arguments it takes (`team?` is one that may be left out)."""
+            said: dict[str, Any] = {
+                "operation": op.id,
+                "summary": op.summary[:160],
+                "args": arguments(op),
+            }
+            if op.accepts_body:
+                said["body"] = True
+            return said
 
         def changes(entry: ApiEntry) -> dict[str, Any]:
             """Named so that an agent does not have to guess an operation to find out
@@ -1399,11 +1399,7 @@ class Librarian:
                 return {}
             return {
                 "write_operations": [
-                    {
-                        "operation": op.id,
-                        "summary": op.summary[:160],
-                        "enabled": op.writable and entry.write_auth is not None,
-                    }
+                    {**told(op), "enabled": op.writable and entry.write_auth is not None}
                     for op in shown(entry, ops)
                 ],
                 "total_write_operations": len(ops),
@@ -1420,9 +1416,7 @@ class Librarian:
                 "description": e.description[:300],
                 "status": e.status.value,
                 "base_url": e.base_url,
-                "read_operations": [
-                    {"operation": op.id, "summary": op.summary[:160]} for op in shown(e, reads(e))
-                ],
+                "read_operations": [told(op) for op in shown(e, reads(e))],
                 "total_read_operations": len(reads(e)),
                 **changes(e),
                 "credential_ready": None if e.secret_ref is None else "unknown",

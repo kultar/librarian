@@ -130,6 +130,21 @@ class PolicyEngine:
         # even if they are in the registry.
         self.allowed_hosts = allowed_hosts
 
+    def listed(self, entry: ApiEntry, caller: Caller, access: Access) -> list[Operation]:
+        """The operations of an API a caller is told about: the reads it can make, or
+        (asked for `Access.WRITE`) the changes it may ask for, where it may ask for any.
+        Its limits leave out what they cannot hold, and suspended operations are left out."""
+        if access is not Access.READ and not caller.may_write(entry.id):
+            return []
+        limits = caller.limits_for(entry.id)
+        return [
+            op
+            for op in entry.operations
+            if (op.access is Access.READ) == (access is Access.READ)
+            and not self.observations.suspended(entry, op)
+            and (limits is None or limits.reaches(op))
+        ]
+
     def check(self, request: CallRequest, caller: Caller) -> Decision:
         if not caller.may_use(request.api):
             return Decision.deny(
@@ -147,7 +162,10 @@ class PolicyEngine:
 
         op = entry.operation(request.operation)
         if op is None:
-            return Decision.deny(f"unknown operation {request.operation!r} on {entry.id!r}")
+            return Decision.deny(
+                f"unknown operation {request.operation!r} on {entry.id!r}"
+                + _meant(request.operation, self.listed(entry, caller, Access.READ))
+            )
         outside = caller.outside_limits(entry.id, op, request.args)
         if outside:
             return Decision.deny(outside)
@@ -230,7 +248,11 @@ class PolicyEngine:
             return Decision.deny(f"host {entry.host!r} is not on the allowlist")
         op = entry.operation(request.operation)
         if op is None:
-            return Decision.deny(f"unknown operation {request.operation!r} on {entry.id!r}")
+            known = self.listed(entry, caller, Access.WRITE) if caller is not None else []
+            return Decision.deny(
+                f"unknown operation {request.operation!r} on {entry.id!r}"
+                + _meant(request.operation, known)
+            )
         if caller is not None:
             # Before anything an approver could be asked about: a call outside the agent's
             # limits is refused, not turned into a request to enable it.
@@ -280,16 +302,40 @@ class PolicyEngine:
         return Decision(True, "write may be requested", entry, op)
 
 
+def arguments(op: Operation) -> list[str]:
+    """An operation's arguments as an agent is shown them: `key`, and `team?` for one
+    that may be left out."""
+    return [p.name if p.required else f"{p.name}?" for p in op.parameters]
+
+
+def takes(op: Operation) -> str:
+    """What an operation takes, said where an agent got it wrong."""
+    named = ", ".join(arguments(op)) or "no arguments"
+    body = " and a body" if op.accepts_body else ""
+    return f"It takes: {named}{body} (a ? marks one that may be left out)."
+
+
+def _plain(name: str) -> str:
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def _meant(asked: str, known: list[Operation]) -> str:
+    """The operation an agent probably meant: the same name written another way
+    (`add_comment` for `addComment`), among the ones it is shown anyway."""
+    same = [op.id for op in known if _plain(op.id) == _plain(asked)]
+    return f". Did you mean {same[0]!r}?" if same else ""
+
+
 def _check_args(
     op: Operation, args: dict[str, ArgValue], unresolved: frozenset[str] = frozenset()
 ) -> str | None:
     declared = {p.name: p for p in op.parameters}
     unknown = sorted((set(args) | unresolved) - set(declared))
     if unknown:
-        return f"unknown arguments for {op.id!r}: {', '.join(unknown)}"
+        return f"unknown arguments for {op.id!r}: {', '.join(unknown)}. {takes(op)}"
     for param in op.parameters:
         if param.required and param.name not in args and param.name not in unresolved:
-            return f"missing required argument {param.name!r} for {op.id!r}"
+            return f"missing required argument {param.name!r} for {op.id!r}. {takes(op)}"
     for name, value in args.items():
         param = declared[name]
         values = value if isinstance(value, list) else [value]
