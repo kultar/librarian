@@ -51,6 +51,16 @@ the setting (`0`: no limit), keeping in mind what the agents' clients do with a 
 result: Claude Code warns above 10,000 tokens and puts text above 50,000 characters into a
 file, and over MCP the answer arrives as text of about 1.7 times its JSON size.
 
+**An agent sends a body the API refuses, or says it does not know what a body takes.**
+`capabilities` with `api` and `operation` answers with the fields of that operation's body,
+as the API's description has them. Where it answers `"body": true` instead, librarian does not
+know them. Either the API was learned before 0.23: have its description read again with
+*Re-check now* on the console's API page or `librarian registry recheck <api>` (for an
+approved API an approver then takes the update). Or it was learned from documentation pages,
+or its description does not say: write the fields into the entry by hand
+([format](registry.md)). Where the answer has `"sent_as": "form"`, the API's description
+says it takes its bodies as a form, and librarian sends JSON: the API may refuse the write.
+
 **An agent's MCP client warned about `capabilities`, or put its answer into a file (0.22.1 and earlier).**
 The same cause, before there was a limit: have the agent give a query, or upgrade.
 

@@ -216,7 +216,7 @@ substrate:
     <table>
       <thead><tr><th>Skill</th><th>What it does</th></tr></thead>
       <tbody>
-        <tr><td><code>capabilities</code></td><td>Which APIs and operations this agent may use, and the arguments each one takes: everything, the best matches for a few words, or one API. The answer stays small enough for an agent's context however many APIs there are.</td></tr>
+        <tr><td><code>capabilities</code></td><td>Which APIs and operations this agent may use, and the arguments each one takes: everything, the best matches for a few words, one API, or one operation in full with what its body holds. The answer stays small enough for an agent's context however many APIs there are.</td></tr>
         <tr><td><code>execute</code></td><td>Run one read operation, with optional field selection and pagination.</td></tr>
         <tr><td><code>onboard</code></td><td>Teach librarian an API: a spec URL, a docs URL, or just a base URL.</td></tr>
         <tr><td><code>write</code></td><td>Change data, after a person approves it, a grant covers it, or an approver chose automatic approval for that operation. If nobody has enabled the operation yet, approvers are asked. The answer says how it ran: who approved, which grant, or automatic.</td></tr>

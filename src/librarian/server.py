@@ -2,7 +2,8 @@
 
 Message format (A2A `SendMessage`):
 - a data part `{"skill": "execute", "api": ..., "operation": ..., "args": {...}}`
-- a data part `{"skill": "capabilities", "query": "...", "api": "..."}`  (both optional)
+- a data part `{"skill": "capabilities", "query": "...", "api": "...", "operation": "..."}`
+  (all optional)
 - a data part `{"skill": "onboard", "api": ..., "spec_url" | "docs_url" | "base_url": ...}`
 - a data part `{"skill": "fetch", "intent": "..."}`, or plain text (= fetch)
 An optional `"principal"` (in the data part or message metadata) names who the
@@ -108,8 +109,10 @@ def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) 
             description=(
                 "Which APIs and read operations are available, and, where the agent may "
                 'ask for changes, which operations write. {"skill":"capabilities",'
-                '"query":"optional keywords","api":"optional: one API\'s id"}. An answer '
-                "that would be too large is shortened and says how to see the rest."
+                '"query":"optional keywords","api":"optional: one API\'s id",'
+                '"operation":"optional, with api: that operation in full, with the fields '
+                'of its body"}. An answer that would be too large is shortened and says '
+                "how to see the rest."
             ),
             tags=["discovery"],
         ),
@@ -397,9 +400,12 @@ class LibrarianExecutor(AgentExecutor):
                 "result": outcome.result.model_dump(mode="json"),
             }
         if skill == "capabilities":
-            query, api = command.get("query"), command.get("api")
+            query, api, operation = (command.get(key) for key in ("query", "api", "operation"))
             return librarian.capabilities(
-                str(query) if query else None, caller, api=str(api) if api else None
+                str(query) if query else None,
+                caller,
+                api=str(api) if api else None,
+                operation=str(operation) if operation else None,
             )
         if skill == "onboard":
             api = command.get("api")

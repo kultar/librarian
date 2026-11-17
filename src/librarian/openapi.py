@@ -22,11 +22,15 @@ import yaml
 
 from librarian.net import PUBLIC, BlockedAddress, NetworkPolicy, check_url, pin
 from librarian.registry.models import (
+    BODY_FIELD,
+    MAX_BODY_FIELDS,
+    MAX_FIELD_VALUES,
     Access,
     ApiEntry,
     ApiKeyAuth,
     BasicAuth,
     BearerAuth,
+    Body,
     CredentialGuidance,
     EntryStatus,
     NoAuth,
@@ -289,6 +293,7 @@ def _operations(spec: Json) -> list[Operation]:
             if op.get("deprecated"):
                 summary = f"(deprecated) {summary}"
             access, accepts_body = classify(method.upper(), op_id, path, summary)
+            takes = [*shared, *_list(op.get("parameters"))]
             try:
                 operations.append(
                     Operation(
@@ -300,6 +305,7 @@ def _operations(spec: Json) -> list[Operation]:
                         parameters=params,
                         access=access,
                         accepts_body=accepts_body,
+                        body=_body(spec, op, takes) if accepts_body else None,
                         origin=Origin.SPEC,
                     )
                 )
@@ -341,6 +347,175 @@ def _parameters(spec: Json, raw: list[Any]) -> list[Parameter]:
             }
         )
     return list(merged.values())
+
+
+# How far into a body its fields are followed: `incident.service.id` is three deep.
+BODY_DEPTH = 3
+_FIELD_NAME = re.compile(r"^[A-Za-z0-9_$@:-]{1,64}$")
+
+
+def _body(spec: Json, op: Json, parameters: list[Any]) -> Body | None:
+    """What an operation's request body holds, as far as the description says: its
+    fields by their path, the top of the body first. None where it does not say, or
+    where the body is not an object (a list, a file)."""
+    found = _body_schema(spec, op, parameters)
+    if found is None:
+        return None
+    encoding, schema = found
+    fields, more = _fields(spec, schema)
+    if not fields:  # nothing said of it, or not an object: a list, a file, plain text
+        return None
+    try:
+        return Body.model_validate({"fields": fields, "more": more, "encoding": encoding})
+    except ValueError:
+        return None  # nothing an agent could be told safely
+
+
+def _body_schema(spec: Json, op: Json, parameters: list[Any]) -> tuple[str, Json] | None:
+    """The schema of the request body and how the API takes it. JSON where the
+    description offers it, since that is what librarian sends."""
+    if spec.get("swagger") == "2.0":
+        resolved = [_resolve(spec, item) for item in parameters]
+        in_body = next((p for p in resolved if p.get("in") == "body"), None)
+        if in_body is not None:
+            return "json", _resolve(spec, in_body.get("schema"))
+        form = [p for p in resolved if p.get("in") == "formData" and isinstance(p.get("name"), str)]
+        if not form:
+            return None
+        files = any(p.get("type") == "file" for p in form)
+        return (
+            "multipart" if files else "form",
+            {
+                "type": "object",
+                "properties": {str(p["name"]): p for p in form if p.get("type") != "file"},
+                "required": [str(p["name"]) for p in form if p.get("required") is True],
+            },
+        )
+    content = _dict(_resolve(spec, op.get("requestBody")).get("content"))
+    offered = sorted(
+        (rank, encoding, kind)
+        for kind in content
+        for rank, encoding in [_taken_as(str(kind))]
+        if encoding
+    )
+    if not offered:
+        return None
+    _, encoding, kind = offered[0]
+    return encoding, _resolve(spec, _dict(content[kind]).get("schema"))
+
+
+def _taken_as(media_type: str) -> tuple[int, str]:
+    """How a body of this media type is taken, and how much it is preferred (less is
+    more); an empty word for one that has no fields to tell (a file, plain text)."""
+    kind = media_type.lower().split(";")[0].strip()
+    if kind == "application/json":
+        return 0, "json"
+    if "json" in kind:
+        return 1, "json"
+    if kind == "application/x-www-form-urlencoded":
+        return 2, "form"
+    if kind.startswith("multipart/"):
+        return 3, "multipart"
+    return 9, ""
+
+
+def _merged(spec: Json, schema: Any, depth: int = 0) -> tuple[dict[str, Any], set[str]]:
+    """The properties of an object schema and which of them are required, through
+    `allOf` (all of its parts) and `oneOf` / `anyOf` (any of them: a field is required
+    only where every alternative requires it)."""
+    node = _resolve(spec, schema)
+    properties = dict(_dict(node.get("properties")))
+    required = {name for name in _list(node.get("required")) if isinstance(name, str)}
+    if depth > 6:  # a description that refers to itself
+        return properties, required
+    for part in _list(node.get("allOf")):
+        more, needed = _merged(spec, part, depth + 1)
+        for name, value in more.items():
+            properties.setdefault(name, value)
+        required |= needed
+    alternatives = [
+        _merged(spec, one, depth + 1)
+        for one in [*_list(node.get("oneOf")), *_list(node.get("anyOf"))]
+    ]
+    for more, _ in alternatives:
+        for name, value in more.items():
+            properties.setdefault(name, value)
+    if alternatives and all(more for more, _ in alternatives):
+        required |= set.intersection(*(needed for _, needed in alternatives))
+    return properties, required
+
+
+def _is_object(spec: Json, schema: Any) -> bool:
+    node = _resolve(spec, schema)
+    if node.get("type") == "array" or "items" in node:
+        return False
+    return node.get("type") == "object" or bool(_merged(spec, node)[0])
+
+
+def _type_word(spec: Json, schema: Any) -> str:
+    """A field's type in a word or two: `string`, `integer`, `string (date-time)`,
+    `string or integer`, `object`."""
+    node = _resolve(spec, schema)
+    kind: Any = node.get("type")
+    if isinstance(kind, list):  # OpenAPI 3.1: ["string", "null"]
+        kind = " or ".join(str(k) for k in cast(list[Any], kind) if k != "null")
+    if not kind:
+        named = [
+            _resolve(spec, one).get("type")
+            for one in [*_list(node.get("oneOf")), *_list(node.get("anyOf"))]
+        ]
+        distinct = list(dict.fromkeys(str(k) for k in named if isinstance(k, str)))
+        kind = " or ".join(distinct) or ("object" if _is_object(spec, node) else "any")
+    form = node.get("format")
+    if kind == "string" and isinstance(form, str) and form and form != "string":
+        kind = f"string ({form})"
+    return _plain(str(kind), 40) or "any"
+
+
+def _plain(text: str, limit: int) -> str:
+    """One line of printable text, cut to a length."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())[:limit].strip()
+
+
+def _fields(spec: Json, root: Json) -> tuple[list[dict[str, Any]], int]:
+    """The fields of a body, the top ones first and inside each object the required
+    ones first, and how many there were no room for."""
+    fields: list[dict[str, Any]] = []
+    left_out = 0
+    queue: list[tuple[str, Any, int]] = [("", root, 1)]
+    while queue:
+        prefix, schema, depth = queue.pop(0)
+        properties, required = _merged(spec, schema)
+        ordered = sorted(properties.items(), key=lambda item: item[0] not in required)
+        for name, raw in ordered:
+            node = _resolve(spec, raw)
+            if node.get("readOnly") is True or node.get("deprecated") is True:
+                continue  # not something to send
+            if not _FIELD_NAME.match(str(name)):
+                left_out += 1
+                continue
+            path, inner = f"{prefix}{name}", node
+            if node.get("type") == "array" or "items" in node:
+                path, inner = f"{path}[]", _resolve(spec, node.get("items"))
+            if not BODY_FIELD.match(path):
+                left_out += 1
+                continue
+            if len(fields) >= MAX_BODY_FIELDS:
+                left_out += 1
+                continue
+            listed = [_plain(str(v), 60) for v in _list(inner.get("enum"))]
+            field: dict[str, Any] = {"name": path, "type": _type_word(spec, inner)}
+            if name in required:
+                field["required"] = True
+            if 0 < len(listed) <= MAX_FIELD_VALUES and all(listed):
+                field["values"] = listed
+            said = _plain(str(node.get("description") or ""), 160)
+            if said:
+                field["description"] = said
+            fields.append(field)
+            if depth < BODY_DEPTH and _is_object(spec, inner):
+                queue.append((f"{path}.", inner, depth + 1))
+    return fields, left_out
 
 
 def classify(method: str, op_id: str, path: str, summary: str) -> tuple[Access, bool]:

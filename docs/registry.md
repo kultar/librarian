@@ -72,7 +72,23 @@ operations:
     warning: null                 # shown to callers with every result
     response_shape: [id, name]    # field paths seen in a successful answer: the baseline for
                                   # noticing that the API's answers changed shape
+  - id: createIssue
+    accepts_body: true
+    body:                         # what the body holds, read from the API's description
+      fields:                     # (at most 40, the top of the body first)
+        - {name: title, type: string, required: true, description: The title of the issue}
+        - {name: "labels[]", type: string}            # a list (quote a name with brackets)
+        - {name: state, type: string, values: [open, closed]}   # the values it takes
+        - {name: assignee.login, type: string}        # a field inside another
+        - {name: "tree[].path", type: string}         # a field of every item of a list
+      more: 3                     # how many fields the description has beyond these
+      encoding: form              # how the API takes it: json (default) | form | multipart
 ```
+
+`body` is what agents are told an operation's body holds
+([README](../README.md#big-apis)); nothing is checked against it. It is read from an OpenAPI
+or Swagger description (not from documentation pages), and you can write it by hand. A field
+inside another is `required` whenever that other one is given.
 
 ## Acting as the person
 

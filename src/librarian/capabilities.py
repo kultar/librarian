@@ -17,12 +17,18 @@ from typing import Any
 
 import pydantic_core
 
+from librarian.registry.models import Body, Operation
+
 # How many operations a list holds: the best matches where the agent gave words, the
 # first ones where it gave none.
 MATCHES = 20
 FIRST = 50
 # What the lists are cut to, in turn, until the answer fits.
 SHORTER = (30, 20, 10, 5, 3, 1, 0)
+
+# How many fields of a body an operation names where it is listed; all of them are told
+# when the agent asks about that operation.
+BODY_NAMES = 10
 
 Fits = Callable[[dict[str, Any]], bool]
 
@@ -155,3 +161,64 @@ def _note(most: int, keep: Listed | None, *, searched: bool, one: bool) -> str:
         else "the APIs are named without their operations"
     )
     return f"{SHORT}{left} ({TOTALS}). {ONE_API}"
+
+
+def body_names(body: Body) -> dict[str, Any]:
+    """A body in a list of operations: its first fields by name (`title`, `draft?` for
+    one that may be left out, `labels[]` for a list, `author.name` for a field inside
+    another), and how many more there are."""
+    names = [field.name if field.required else f"{field.name}?" for field in body.fields]
+    more = len(names) - BODY_NAMES + body.more
+    return {"body": names[:BODY_NAMES], **({"body_more": more} if more > 0 else {})}
+
+
+def described(
+    api: str, op: Operation, *, enabled: bool | None, descriptions: int = 160
+) -> dict[str, Any]:
+    """One operation in full, for an agent about to call it: every argument with what it
+    is, and what its body holds. `enabled`: for one that writes, whether anybody has
+    allowed writes through it. `descriptions`: how much of each is kept."""
+
+    def words(text: str) -> dict[str, str]:
+        return {"description": text[:descriptions]} if text and descriptions else {}
+
+    told: dict[str, Any] = {
+        "api": api,
+        "operation": op.id,
+        "summary": op.summary[:500],
+        "method": op.method,
+        "path": op.path,
+        "kind": "read" if enabled is None else "write",
+        **({} if enabled is None else {"enabled": enabled}),
+        "args": [
+            {
+                "name": p.name,
+                "in": p.location.value,
+                "type": p.type,
+                "required": p.required,
+                **words(p.description),
+                **({"may_contain_slashes": True} if p.allow_slash else {}),
+            }
+            for p in op.parameters
+        ],
+    }
+    if op.accepts_body:
+        told["body"] = True  # it takes one; what it holds is not known
+    if op.body is not None:
+        told["body"] = {
+            "fields": [
+                {
+                    "name": field.name,
+                    "type": field.type,
+                    "required": field.required,
+                    **({"values": field.values} if field.values else {}),
+                    **words(field.description),
+                }
+                for field in op.body.fields
+            ],
+            **({"more": op.body.more} if op.body.more else {}),
+            **({"sent_as": op.body.encoding} if op.body.encoding != "json" else {}),
+        }
+    if op.warning:
+        told["warning"] = op.warning
+    return told

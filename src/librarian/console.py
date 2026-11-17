@@ -25,6 +25,7 @@ from starlette.routing import Route
 from librarian.approvals import ApprovalError, Grant, WriteApproval
 from librarian.audit import AuditEvent
 from librarian.calls import Caller
+from librarian.capabilities import body_names
 from librarian.config import ApproverSettings
 from librarian.credentials import CredentialRequest, RequestState
 from librarian.enablement import EnableWriteRequest
@@ -38,6 +39,7 @@ from librarian.registry.models import (
     ApiKeyAuth,
     AuthSpec,
     AwsSigV4Auth,
+    Body,
     EntryStatus,
     GitHubAppTokenAuth,
     OAuth2ClientAuth,
@@ -824,6 +826,14 @@ def _needs_attention(librarian: Librarian, entry: ApiEntry, op: Operation) -> bo
     return op.access is Access.UNKNOWN or librarian.observations.suspended(entry, op) is not None
 
 
+def _body_line(body: Body) -> str:
+    """What agents are told an operation's body holds, in a line."""
+    told = body_names(body)
+    more = f" and {told['body_more']} more" if "body_more" in told else ""
+    how = f" (the API takes it as {body.encoding})" if body.encoding != "json" else ""
+    return f"Body: {', '.join(told['body'])}{more}{how}"
+
+
 def _op_table(
     librarian: Librarian, entry: ApiEntry, ops: list[Operation], token: str, origins: bool
 ) -> str:
@@ -831,6 +841,7 @@ def _op_table(
         f"<tr><td>{_method(op)}</td>"
         f"<td><code>{e(op.id)}</code>"
         + (f"<br><span class=muted>{e(op.summary[:120])}</span>" if op.summary else "")
+        + (f"<br><span class=muted>{e(_body_line(op.body))}</span>" if op.body else "")
         + f"</td><td><code>{e(op.path)}</code></td><td>{_access(op)}</td>"
         + (f"<td>{e(op.origin.value)}</td>" if origins else "")
         + f"<td>{_op_flags(librarian, entry, op, token)}</td></tr>"
@@ -956,7 +967,8 @@ def _actions(
         cards.append(
             "<div class=card><h2>Re-check the source</h2><p class=muted>Re-read the spec or "
             "documentation now and handle any change (a change to an approved API waits "
-            "for an approver)."
+            "for an approver). An API learned by an earlier version also gets what this "
+            "one reads from the same description: what its request bodies hold."
             f"</p>{_form(f'{base}/recheck', token, 'Re-check now', 'quiet')}</div>"
         )
     if entry.status is EntryStatus.PROVISIONAL:
@@ -1488,7 +1500,7 @@ def console_routes(librarian: Librarian) -> list[Route]:
             link = f" <a href='{e(status.url)}'>The commit</a>." if status.url else ""
             return notice("ok", "Written to the record", f"{e(api_id)}.{link}{back(api_id)}")
         if action == "recheck":
-            report = await librarian.recheck(api_id)
+            report = await librarian.recheck(api_id, reread=True)
             what = e(report.detail or ", ".join(report.actions) or report.status)
             icon = "bad" if report.status == "error" else "ok"
             return notice(icon, f"Re-check: {report.status}", what + back(api_id))

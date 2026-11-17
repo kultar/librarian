@@ -117,7 +117,7 @@ GitHub is written to, never asked: nothing merged or edited there changes what a
 | Skill | What it does | LLM? |
 |---|---|---|
 | `execute` | Run one read operation: `{"skill":"execute","api":"jira","operation":"getIssue","args":{"issueIdOrKey":"ABC-1"}}`. Optional `select` (dotted paths, e.g. `["fields.summary"]`) and `max_pages` | No |
-| `capabilities` | List APIs and read operations, each with the arguments it takes (`args`; `team?` may be left out): `{"skill":"capabilities","query":"issues"}`, and with `"api":"jira"` that API alone. An agent that may ask for writes on an API also gets its `write_operations`, each with whether writes through it are `enabled`. An answer too large for an agent's context is shortened and says how to see the rest ([more](#big-apis)) | No |
+| `capabilities` | List APIs and read operations, each with the arguments it takes (`args`; `team?` may be left out): `{"skill":"capabilities","query":"issues"}`, with `"api":"jira"` that API alone, and with `"api"` and `"operation"` that operation in full, with what its body holds. An agent that may ask for writes on an API also gets its `write_operations`, each with whether writes through it are `enabled`. An answer too large for an agent's context is shortened and says how to see the rest ([more](#big-apis)) | No |
 | `onboard` | Learn an API: `{"skill":"onboard","api":"jira","spec_url":"https://..."}`, `"base_url"` to auto-discover, or `"docs_url"` + `"base_url"` when there is no spec | No |
 | `write` | Change data, with human approval or a grant: `{"skill":"write","api":"jira","operation":"addComment","args":{...},"body":{...},"reason":"why"}`. Optional `idempotency_key`: a repeat returns the first result instead of running again. The answer says how it ran (approved by whom, under which grant, or automatically) | No |
 | `plan` | Several writes on one API, approved as one and made in order: `{"skill":"plan","api":"github","reason":"why","steps":[{"id":"blob","operation":"...","args":{...},"body":{...}}, ...]}`. A later step takes a value an earlier one returned with `{"$from":"blob.sha"}` ([more](#several-writes-as-one-plan)) | No |
@@ -300,6 +300,27 @@ The JSONL audit log is separate and always on.
   `total_read_operations` and `total_write_operations` say how many there are. On GitHub's
   API, an answer to a query is about 3 KB for an agent that only reads and 7 KB for one that
   may also ask for writes.
+- **What a request body holds.** An agent that is told only that an operation takes a body
+  has to guess what goes in it: from what it knows of a public API, from nothing for an
+  internal one. librarian reads it from the API's description and tells it. Asked about one
+  API (`api`), each operation names the first fields of its body: `"body": ["head", "base",
+  "title?", "labels[]?", "author.name?"]` (`?`: may be left out; `[]`: a list; a dot: a field
+  inside another), with `body_more` when there are more than ten. Asked about one operation
+  (`api` and `operation`), it gets all of it: every argument with its type and description,
+  and every field of the body with its type, the values it takes and what it is for (up to
+  40 fields, three levels deep). Nothing is checked against this: the API accepts or refuses
+  a body, and descriptions leave fields out. `body: true` means the operation takes a body
+  and the description does not say what is in it. Three limits to know:
+  - It is read from OpenAPI and Swagger descriptions, not from documentation pages or a
+    model's knowledge, and you can write it into an entry by hand
+    ([the format](docs/registry.md)).
+  - An API learned before 0.23 gets it when its description next changes, or at once when a
+    person asks: *Re-check now* on the console's API page, or `librarian registry recheck
+    <api>`. For an approved API that is an update an approver takes, like any other; it
+    touches nothing else about the operations.
+  - librarian sends a body as JSON. Where the description says the API takes a form
+    (Stripe's does, for every operation), the fields are told with `"sent_as": "form"`: such
+    an API may refuse the JSON librarian sends.
 - **An answer that fits in an agent's context.** `capabilities` is the first thing an agent
   asks, and all of it goes into the agent's context. The answer stays under
   `capabilities_max_bytes` (16,000 bytes of JSON: over MCP up to about 28,000 characters of

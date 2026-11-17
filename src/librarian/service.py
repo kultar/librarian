@@ -46,7 +46,16 @@ from librarian.audit import (
     JsonlAuditSink,
 )
 from librarian.calls import Caller, CallRequest, CallResult, WriteRequest
-from librarian.capabilities import FIRST, MATCHES, Fits, Listed, shortened, size
+from librarian.capabilities import (
+    FIRST,
+    MATCHES,
+    Fits,
+    Listed,
+    body_names,
+    described,
+    shortened,
+    size,
+)
 from librarian.config import Settings
 from librarian.credentials import CredentialBroker, CredentialRequest, Notifier, RequestState
 from librarian.docs import (
@@ -60,7 +69,7 @@ from librarian.docs import (
     extract_from_knowledge,
     extract_write_guidance,
 )
-from librarian.drift import Change, diff, proposed_update, worst
+from librarian.drift import Change, diff, only_bodies, proposed_update, told, worst
 from librarian.enablement import EnableState, EnableWriteBroker, EnableWriteRequest
 from librarian.errors import ApiUnavailable, LibrarianError
 from librarian.executor import CredentialMissing, Executor, PolicyDenied
@@ -1360,21 +1369,33 @@ class Librarian:
         caller: Caller = SYSTEM_CALLER,
         *,
         api: str | None = None,
+        operation: str | None = None,
         fits: Fits | None = None,
     ) -> dict[str, Any]:
         """What a caller may use, as the `capabilities` skill answers it: `apis`, and a
         `note` where the answer had to be shortened.
 
-        With `api`, that API alone. With a `query`, the ten APIs that fit it best and of
-        each the operations that fit; without one, every API and the first operations of
-        each. The answer stays under `capabilities_max_bytes` and under what `fits` allows
-        (the MCP endpoint passes what a tool result may hold): its lists of operations
-        are cut until it does, and the note says how to see what was left out.
+        With `api`, that API alone, and its operations say what their bodies hold. With
+        `api` and `operation`, that operation in full. With a `query`, the ten APIs that
+        fit it best and of each the operations that fit; without one, every API and the
+        first operations of each. The answer stays under `capabilities_max_bytes` and
+        under what `fits` allows (the MCP endpoint passes what a tool result may hold):
+        its lists of operations are cut until it does, and the note says how to see what
+        was left out.
         """
+        budget = self.settings.capabilities_max_bytes
+
+        def small_enough(answer: dict[str, Any]) -> bool:
+            return (not budget or size(answer) <= budget) and (fits is None or fits(answer))
+
+        if operation and not api:
+            raise LibrarianError("to ask about one operation, name its API too (api)")
         if api:
             known = self.policy.api(api, caller)
             if not known.allowed or known.entry is None:
                 raise PolicyDenied(known.reason)
+            if operation:
+                return self._one_operation(known.entry, caller, operation, small_enough)
             entries = [known.entry]
         elif query:
             entries = [h.entry for h in self.registry.search(query, limit=10)]
@@ -1400,6 +1421,10 @@ class Librarian:
             }
             if op.accepts_body:
                 said["body"] = True
+            if api and op.body is not None:
+                # Asked about this API: what the body holds, by name. (Among several
+                # APIs it would take the room of the operations themselves.)
+                said |= body_names(op.body)
             return said
 
         def listed(entry: ApiEntry) -> Listed:
@@ -1436,14 +1461,26 @@ class Librarian:
                 },
             )
 
-        budget = self.settings.capabilities_max_bytes
-
-        def small_enough(answer: dict[str, Any]) -> bool:
-            return (not budget or size(answer) <= budget) and (fits is None or fits(answer))
-
         return shortened(
             [listed(e) for e in entries], small_enough, searched=bool(query), one=bool(api)
         )
+
+    def _one_operation(
+        self, entry: ApiEntry, caller: Caller, operation: str, small_enough: Fits
+    ) -> dict[str, Any]:
+        """One operation in full: what `capabilities` answers when asked about it."""
+        found = self.policy.shown(entry, caller, operation)
+        op = found.operation
+        if not found.allowed or op is None:
+            raise PolicyDenied(found.reason)
+        enabled = None if op.access is Access.READ else op.writable and entry.write_auth is not None
+        answer = described(entry.id, op, enabled=enabled)
+        for kept in (60, 0):  # an operation with a great many arguments: say less of each
+            if small_enough(answer):
+                break
+            answer = described(entry.id, op, enabled=enabled, descriptions=kept)
+            answer["note"] = "Shortened to keep this answer small: the descriptions are cut."
+        return answer
 
     async def onboard(
         self,
@@ -1651,7 +1688,7 @@ class Librarian:
             # Against the entry as it is now, so decisions made since are kept.
             nonlocal count
             changes = diff(base, fresh)
-            count = len(changes)
+            count = len(told(changes))
             updated = proposed_update(base, fresh, changes)
             note = f"\n{by} approved an update from the API's source ({count} change(s))."
             return updated.model_copy(update={"notes": (updated.notes + note)[:8000]})
@@ -2750,8 +2787,13 @@ class Librarian:
         )
         return refs
 
-    async def recheck(self, api_id: str) -> RecheckReport:
-        """Re-read an entry's spec or docs; handle any change by risk (see drift.py)."""
+    async def recheck(self, api_id: str, *, reread: bool = False) -> RecheckReport:
+        """Re-read an entry's spec or docs; handle any change by risk (see drift.py).
+
+        A source that is byte for byte what it was is not read again, unless `reread`:
+        a person asking has that done, so that an API learned by an earlier version
+        gets what this one reads from the same description (what request bodies hold).
+        """
         entry = self.registry.get(api_id)
         if entry is None:
             raise LibrarianError(f"unknown API {api_id!r}")
@@ -2765,7 +2807,7 @@ class Librarian:
             if source.kind == "openapi":
                 spec = await fetch_spec(source.url, client, net=net)
                 current_hash = spec_hash(spec)
-                if current_hash == last:
+                if current_hash == last and not reread:
                     return RecheckReport(api_id, "unchanged")
                 fresh = entry_from_spec(
                     spec,
@@ -2782,7 +2824,7 @@ class Librarian:
                     max_pages=max(len(source.pages), 1),
                 )
                 current_hash = spec_hash(crawl.spec) if crawl.spec else crawl.content_hash
-                if current_hash == last:
+                if current_hash == last and not (reread and crawl.spec is not None):
                     return RecheckReport(api_id, "unchanged")
                 if crawl.spec is not None:
                     fresh = entry_from_spec(
@@ -2821,14 +2863,17 @@ class Librarian:
         await self._remember_hash(api_id, current_hash)
         changes = diff(entry, fresh)
         if not changes:
-            return RecheckReport(api_id, "unchanged", detail="source changed; operations did not")
+            why = "read again; nothing in it is new" if current_hash == last else None
+            return RecheckReport(
+                api_id, "unchanged", detail=why or "source changed; operations did not"
+            )
         actions, review = await self._apply_changes(entry, fresh, changes)
         if review is None:
             # No review card went out (a provisional entry, or it could not be sent).
             await self._notify_change(
                 entry,
                 f"{entry.name} changed ({worst(changes)})",
-                [f"[{c.severity}] {c.detail}" for c in changes] + actions,
+                told(changes) + actions,
                 f"{self.settings.public_url.rstrip('/')}/apis/{entry.id}",
                 urgent=worst(changes) != "additive",
             )
@@ -2836,7 +2881,7 @@ class Librarian:
             AuditEvent(
                 event="api_changed",
                 api=api_id,
-                detail=f"{len(changes)} change(s), worst {worst(changes)}",
+                detail=f"{len(told(changes))} change(s), worst {worst(changes)}",
                 extra={"review": review, "actions": actions},
             )
         )
@@ -2849,6 +2894,12 @@ class Librarian:
         id of the review opened for an approver, if any."""
         actions: list[str] = []
         if entry.status is EntryStatus.PROVISIONAL:
+            if only_bodies(changes):
+                # The API is what it was: what its request bodies hold is added, and
+                # everything else about the entry is left as people have it.
+                await self.registry.save(proposed_update(entry, fresh, changes))
+                actions.append("what its request bodies hold was added to the entry")
+                return actions, None
             # Nobody approved it yet: take the fresh copy (keeping owners and auth). The
             # review still open for it shows the entry as it is now.
             updated = _keep_human_fields(entry, fresh)
@@ -2870,7 +2921,7 @@ class Librarian:
                 actions.append(f"callers of {op.id} are warned: {change.detail}")
         await self._save_update(entry.id, fresh)
         proposal = proposed_update(entry, fresh, changes)
-        ranked = sorted(changes, key=lambda c: c.severity != "safety")
+        listed = told(changes)
         try:
             review = await self.reviews.open(
                 kind="update",
@@ -2878,11 +2929,11 @@ class Librarian:
                 api_name=entry.name,
                 host=entry.host,
                 learned_by="librarian (re-check of the source)",
-                summary=f"{len(changes)} change(s) at {entry.source.url or 'its source'}; "
+                summary=f"{len(listed)} change(s) at {entry.source.url or 'its source'}; "
                 f"the worst is {worst(changes)}",
                 auth=_auth_words(entry),
                 warnings=actions,
-                changes=[f"[{c.severity}] {c.detail}" for c in ranked][:200],
+                changes=listed[:200],
                 needs_review=[op.id for op in proposal.operations if op.access is Access.UNKNOWN],
                 channel=entry.owners.channel,
                 approver_group=entry.owners.approver_group,

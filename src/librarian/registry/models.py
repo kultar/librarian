@@ -123,6 +123,58 @@ class Parameter(StrictModel):
         return self
 
 
+# A field of a request body, by its path from the top of the body: `title`,
+# `author.name`, `labels[]` (a list), `tree[].path` (a field of every item of a list).
+BODY_FIELD = re.compile(r"^[A-Za-z0-9_$@:-]{1,64}(\[\])?(\.[A-Za-z0-9_$@:-]{1,64}(\[\])?){0,3}$")
+MAX_BODY_FIELDS = 40
+MAX_FIELD_VALUES = 12
+
+
+class BodyField(StrictModel):
+    """One field of a request body, as the API's description has it."""
+
+    name: str = Field(max_length=270)
+    type: str = Field(default="string", min_length=1, max_length=40)
+    # Has to be in the body. For a field inside another one: whenever that one is given.
+    required: bool = Field(default=False, exclude_if=lambda value: value is False)
+    # The values it may take, where the description lists few enough to name them all.
+    values: list[str] = Field(
+        default_factory=list[str], max_length=MAX_FIELD_VALUES, exclude_if=lambda value: not value
+    )
+    description: str = Field(default="", max_length=200, exclude_if=lambda value: not value)
+
+    @field_validator("name")
+    @classmethod
+    def _a_path(cls, value: str) -> str:
+        if not BODY_FIELD.match(value):
+            raise ValueError(f"not the path of a body field: {value!r}")
+        return value
+
+    @field_validator("values")
+    @classmethod
+    def _short_values(cls, values: list[str]) -> list[str]:
+        if any(len(value) > 60 or not value.isprintable() for value in values):
+            raise ValueError("a value of a body field is at most 60 printable characters")
+        return values
+
+
+class Body(StrictModel):
+    """What an operation's request body holds, as the API's description says.
+
+    It is there to be told: an agent that is only told that an operation takes a body
+    has to guess what goes in it. Nothing is checked against it. A body is the API's to
+    accept or refuse, and descriptions leave fields out.
+    """
+
+    fields: list[BodyField] = Field(default_factory=list[BodyField], max_length=MAX_BODY_FIELDS)
+    # How many fields the description has beyond the ones kept here.
+    more: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
+    # How the description says the API takes the body, where that is not as JSON.
+    encoding: Literal["json", "form", "multipart"] = Field(
+        default="json", exclude_if=lambda value: value == "json"
+    )
+
+
 class Pagination(StrictModel):
     """How to fetch more pages of an operation's results.
 
@@ -182,6 +234,9 @@ class Operation(StrictModel):
     read_basis: ReadBasis | None = None
     # Only meaningful for reviewed reads that need a JSON body (POST search).
     accepts_body: bool = False
+    # What that body holds, where the API's description says. Omitted from dumps when
+    # unknown, so entries written here still load on versions that do not have it.
+    body: Body | None = Field(default=None, exclude_if=lambda value: value is None)
     pagination: Pagination | None = None  # overrides the entry's default
     # Writes: a reviewer must opt each write operation in. Even then every call
     # needs human approval (or a matching grant) and a write credential.
@@ -252,6 +307,8 @@ class Operation(StrictModel):
             self.read_basis = None
         if self.accepts_body and self.method in READ_METHODS:
             raise ValueError(f"operation {self.id!r}: GET/HEAD operations cannot take a body")
+        if self.body is not None and not self.accepts_body:
+            raise ValueError(f"operation {self.id!r}: a body is described but not accepted")
         if self.writable and self.access is not Access.WRITE:
             raise ValueError(
                 f"operation {self.id!r}: only access: write operations can be writable"

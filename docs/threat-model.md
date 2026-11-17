@@ -263,7 +263,12 @@ audited; and the operator, through the database, the config and the registry dir
   operations the registry holds, so learning one more large API cannot push every agent's
   first answer out of its context. What it leaves out it says, and it names only what that
   caller may use: the hint for an API or operation written another way is taken from the
-  same list.
+  same list. What a request body holds comes from the API's description, like an
+  operation's summary, and is held to a shape: a field's name is a path of plain
+  characters, its values are short and printable, at most 40 fields and 160 characters of
+  description each. It is told, never enforced, so a wrong or a hostile description can
+  mislead an agent about a body and cannot make librarian send or allow anything: a write
+  is still the request a person reads and approves.
   An agent that waits for a decision (`write_status` with `wait_seconds`) waits at most
   `mcp_max_wait_seconds`, and while it does librarian looks at the database every two seconds,
   which is less than the agent asking again and again would cost.

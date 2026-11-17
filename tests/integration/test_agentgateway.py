@@ -245,6 +245,16 @@ async def test_what_an_agent_may_use_is_asked_through_the_gateway() -> None:
         wrong = await session.call_tool("capabilities", {"api": "Echo"})
         assert wrong.is_error
         assert "Did you mean 'echo'?" in " ".join(getattr(p, "text", "") for p in wrong.content)
+        # What the body of a write holds: by name with the API, in full with the operation.
+        assert one["apis"][0]["write_operations"][0]["body"] == ["body", "labels[]?"]
+        full = await told(session, "capabilities", {"api": "echo", "operation": "postComment"})
+        assert full["kind"] == "write" and full["args"][0]["name"] == "key"
+        assert full["body"]["fields"][0] == {
+            "name": "body",
+            "type": "string",
+            "required": True,
+            "description": "The text of the comment",
+        }
 
 
 async def test_an_answer_too_large_for_the_gateway_is_answered_with_its_outline() -> None:

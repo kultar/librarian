@@ -24,6 +24,7 @@ from a2a.types import (
 from google.protobuf.json_format import ParseDict
 from google.protobuf.struct_pb2 import Struct
 
+from librarian.config import CallerKey
 from librarian.secrets import FileSecretStore
 from librarian.server import build_agent_card, create_app
 from librarian.service import Librarian
@@ -169,6 +170,20 @@ async def test_capabilities_for_one_api_and_shortened(
     assert wrong.final == TaskState.TASK_STATE_REJECTED
     assert wrong.texts[-1] == "Refused: unknown API 'Tracker'. Did you mean 'tracker'?"
 
+    # One operation in full. This agent may not ask for writes, so one that writes is
+    # not there for it; one that may is told what its body holds.
+    asked = {"skill": "capabilities", "api": "tracker", "operation": "addComment"}
+    hidden = await send(librarian, http, [new_data_part(asked)])
+    assert hidden.final == TaskState.TASK_STATE_REJECTED
+    assert hidden.texts[-1] == "Refused: unknown operation 'addComment' on 'tracker'"
+    read = (await send(librarian, http, [new_data_part({**asked, "operation": "getIssue"})])).data
+    assert read[-1]["kind"] == "read" and read[-1]["args"][0]["name"] == "key"
+    missing = await send(
+        librarian, http, [new_data_part({"skill": "capabilities", "operation": "addComment"})]
+    )
+    assert missing.final == TaskState.TASK_STATE_FAILED
+    assert any("name its API too" in text for text in missing.texts)
+
     # A large API beside the others, and room for less than all of it.
     write_entries(librarian.settings.registry_dir, large_api("alpha", 60))
     librarian.load()
@@ -254,8 +269,6 @@ def test_json_safe_preserves_large_integers() -> None:
 
 
 async def test_caller_profiles_limit_capabilities_and_onboarding(librarian: Librarian) -> None:
-    from librarian.config import CallerKey
-
     librarian.settings.callers = [
         CallerKey(
             agent="agent-a",
@@ -319,8 +332,6 @@ async def test_execute_select_over_a2a(
 async def test_write_end_to_end_over_a2a(
     librarian: Librarian, router: Router, secrets_store: FileSecretStore
 ) -> None:
-    from librarian.config import CallerKey
-
     await secrets_store.put("tracker/write", "write-key")
     router.add(
         "POST", f"{BASE}/v1/issues/PAY-1/comments", lambda r: httpx.Response(201, json={"id": 9})
@@ -340,6 +351,11 @@ async def test_write_end_to_end_over_a2a(
         base_url=librarian.settings.public_url,
         headers={"Authorization": "Bearer key-a"},
     ) as http:
+        # Before it writes, an agent can ask what the operation's body holds.
+        asked = {"skill": "capabilities", "api": "tracker", "operation": "addComment"}
+        full = (await send(librarian, http, [new_data_part(asked)])).data[-1]
+        assert full["operation"] == "addComment" and full["kind"] == "write"
+        assert [f["name"] for f in full["body"]["fields"]] == ["body", "visibility", "mentions[]"]
         outcome = await send(
             librarian,
             http,

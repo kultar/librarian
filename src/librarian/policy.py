@@ -169,6 +169,19 @@ class PolicyEngine:
             if entry.status is not EntryStatus.BLOCKED and caller.may_use(entry.id)
         ]
 
+    def shown(self, entry: ApiEntry, caller: Caller, operation: str) -> Decision:
+        """The operation a caller asks to be told about, where it is one it is shown
+        anyway (`listed`). Any other is not there for that caller."""
+        reads = self.listed(entry, caller, Access.READ)
+        writes = self.listed(entry, caller, Access.WRITE)
+        op = next((op for op in [*reads, *writes] if op.id == operation), None)
+        if op is None:
+            return Decision.deny(
+                f"unknown operation {operation!r} on {entry.id!r}"
+                + _meant(operation, [known.id for known in [*reads, *writes]])
+            )
+        return Decision(True, "shown", entry, op)
+
     def check(self, request: CallRequest, caller: Caller) -> Decision:
         known = self.api(request.api, caller)
         entry = known.entry

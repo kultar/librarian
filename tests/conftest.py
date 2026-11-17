@@ -85,6 +85,13 @@ TRACKER: dict[str, Any] = {
             "access": "write",
             "writable": True,
             "accepts_body": True,
+            "body": {
+                "fields": [
+                    {"name": "body", "required": True, "description": "The text of the comment"},
+                    {"name": "visibility", "values": ["public", "team"]},
+                    {"name": "mentions[]"},
+                ]
+            },
             "parameters": [{"name": "key", "in": "path"}],
         },
         {

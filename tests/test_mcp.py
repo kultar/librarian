@@ -229,6 +229,56 @@ async def test_capabilities_for_one_api_and_never_more_than_a_tool_result_holds(
         assert answer["note"].startswith("Shortened to keep this answer small: ")
 
 
+async def test_an_agent_about_to_write_asks_what_the_body_holds(connect: Connect) -> None:
+    """Told only that an operation takes a body, an agent guesses what goes in it. With
+    the API it gets the names; with the operation, everything the description says."""
+    async with connect() as session:
+        everything = data(await session.call_tool("capabilities", {}))
+        tracker = next(a for a in everything["apis"] if a["api"] == "tracker")
+        among_all = {op["operation"]: op for op in tracker["write_operations"]}
+        assert among_all["addComment"]["body"] is True  # no room for more among all APIs
+
+        listed = data(await session.call_tool("capabilities", {"api": "tracker"}))
+        writes = {op["operation"]: op for op in listed["apis"][0]["write_operations"]}
+        assert writes["addComment"]["body"] == ["body", "visibility?", "mentions[]?"]
+        assert "body" not in writes["deleteIssue"]
+
+        asked = {"api": "tracker", "operation": "addComment"}
+        full = data(await session.call_tool("capabilities", asked))
+        assert (full["operation"], full["kind"], full["enabled"]) == ("addComment", "write", True)
+        assert (full["method"], full["path"]) == ("POST", "/issues/{key}/comments")
+        assert full["args"] == [{"name": "key", "in": "path", "type": "string", "required": True}]
+        assert full["body"] == {
+            "fields": [
+                {
+                    "name": "body",
+                    "type": "string",
+                    "required": True,
+                    "description": "The text of the comment",
+                },
+                {
+                    "name": "visibility",
+                    "type": "string",
+                    "required": False,
+                    "values": ["public", "team"],
+                },
+                {"name": "mentions[]", "type": "string", "required": False},
+            ]
+        }
+        read = data(await session.call_tool("capabilities", {**asked, "operation": "getIssue"}))
+        assert read["kind"] == "read" and "body" not in read and "enabled" not in read
+
+        wrong = await session.call_tool("capabilities", {**asked, "operation": "add_comment"})
+        assert said(wrong) == (
+            "Error executing tool capabilities: refused: unknown operation 'add_comment' on "
+            "'tracker'. Did you mean 'addComment'?"
+        )
+        alone = await session.call_tool("capabilities", {"operation": "addComment"})
+        assert said(alone) == (
+            "Error executing tool capabilities: to ask about one operation, name its API too (api)"
+        )
+
+
 async def test_execute_with_select(
     connect: Connect, router: Router, secrets_store: FileSecretStore
 ) -> None:

@@ -15,6 +15,7 @@ from librarian.approvals import ApprovalError
 from librarian.calls import Caller, CallRequest
 from librarian.config import Settings
 from librarian.doctor import examine
+from librarian.drift import told
 from librarian.executor import CredentialMissing, PolicyDenied
 from librarian.registry.models import Access
 from librarian.service import SOURCE_LABELS, Librarian, LibrarianError
@@ -492,7 +493,11 @@ def registry_recheck(
     api_id: Annotated[str | None, typer.Argument(help="One API (default: all)")] = None,
     config: ConfigOption = None,
 ) -> None:
-    """Re-read APIs' specs or docs now and report (and handle) any changes."""
+    """Re-read APIs' specs or docs now and report (and handle) any changes.
+
+    A description is read again in full even where it has not changed, so an API learned
+    by an earlier version gets what this one reads from it (what request bodies hold).
+    """
 
     async def run() -> None:
         librarian = Librarian(_settings(config))
@@ -500,13 +505,13 @@ def registry_recheck(
         try:
             ids = [api_id] if api_id else [e.id for e in librarian.registry.all()]
             for item in ids:
-                report = await librarian.recheck(item)
+                report = await librarian.recheck(item, reread=True)
                 typer.echo(
                     f"{report.api:<24} {report.status}"
                     + (f"  {report.detail}" if report.detail else "")
                 )
-                for change in report.changes:
-                    typer.echo(f"    [{change.severity}] {change.detail}")
+                for line in told(report.changes):
+                    typer.echo(f"    {line}")
                 for action in report.actions:
                     typer.echo(f"    -> {action}")
                 if report.review:

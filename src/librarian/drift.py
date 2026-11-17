@@ -5,6 +5,10 @@ same source, sort the differences by risk, and build what a reviewer should see.
 - breaking  removed operations, new required parameters, moved paths: calls will fail
 - safety    an operation's HTTP method changed: what was a read may now change data
 
+What a request body holds is told to agents, not enforced, so a change in it is listed
+(as additive) and holds no operation back, whatever it is: the API refuses a body it no
+longer takes, in its own words.
+
 Approved entries are never changed here. The service suspends risky operations
 (observations) and asks an approver to approve the update; see `Librarian.recheck`.
 """
@@ -16,9 +20,12 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from librarian.registry.models import ApiEntry, Operation
+from librarian.registry.models import ApiEntry, Body, Operation
 
 Severity = Literal["additive", "breaking", "safety"]
+# What is said of an operation whose body was not described before and now is. Many
+# operations get it at once (an API learned before bodies were read), so it is told once.
+DESCRIBED = "its request body is now described"
 _RANK: dict[str, int] = {"additive": 0, "breaking": 1, "safety": 2}
 
 
@@ -28,6 +35,8 @@ class Change(BaseModel):
     new_operation: str | None = None  # id in the fresh entry, when matched
     severity: Severity
     detail: str
+    # It is about what the operation's request body holds, and about nothing else.
+    body: bool = False
 
 
 def diff(current: ApiEntry, fresh: ApiEntry) -> list[Change]:
@@ -97,7 +106,61 @@ def _compare(old: Operation, new: Operation) -> list[Change]:
             found.append(change("breaking", f"parameter {key[1]!r} is now required"))
     for key in before.keys() - after.keys():
         found.append(change("breaking", f"{key[0].value} parameter {key[1]!r} was removed"))
+    body = _body_change(old.body, new.body)
+    if body:
+        found.append(change("additive", body).model_copy(update={"body": True}))
     return found
+
+
+def _body_change(old: Body | None, new: Body | None) -> str | None:
+    """What changed in what a request body holds, in a sentence."""
+    if old is None or new is None:
+        if old is None and new is not None:
+            return DESCRIBED
+        return "its request body is no longer described" if old is not None else None
+    before = {field.name: field for field in old.fields}
+    after = {field.name: field for field in new.fields}
+    parts = [
+        (
+            "now needs",
+            [
+                n
+                for n, f in after.items()
+                if f.required and not (n in before and before[n].required)
+            ],
+        ),
+        ("now also takes", [n for n, f in after.items() if n not in before and not f.required]),
+        ("no longer takes", [n for n in before if n not in after]),
+    ]
+    said = [f"{what} {_some(names)}" for what, names in parts if names]
+    return f"its request body {'; '.join(said)}" if said else None
+
+
+def _some(names: list[str], most: int = 5) -> str:
+    listed = ", ".join(repr(name) for name in names[:most])
+    return f"{listed} and {len(names) - most} more" if len(names) > most else listed
+
+
+def told(changes: list[Change]) -> list[str]:
+    """The changes as a reviewer reads them, the gravest first. The operations whose
+    bodies are described for the first time are one line, however many there are."""
+    described = [c for c in changes if c.body and c.detail.endswith(DESCRIBED)]
+    others = [c for c in changes if c not in described]
+    ranked = sorted(others, key=lambda c: -_RANK[c.severity])
+    lines = [f"[{c.severity}] {c.detail}" for c in ranked]
+    if len(described) > 3:
+        lines.append(
+            f"[additive] the request bodies of {len(described)} operations are now described"
+        )
+    else:
+        lines += [f"[{c.severity}] {c.detail}" for c in described]
+    return lines
+
+
+def only_bodies(changes: list[Change]) -> bool:
+    """Whether all that changed is what request bodies hold: nothing about how any
+    operation is called, so nothing a person decided is in question."""
+    return bool(changes) and all(change.body for change in changes)
 
 
 def worst(changes: list[Change]) -> Severity | None:
@@ -138,6 +201,14 @@ def proposed_update(current: ApiEntry, fresh: ApiEntry, changes: list[Change]) -
             operations.append(old)
             continue
         new = fresh_ops[target]
+        if only_bodies(found):
+            # The operation is what it was: only what agents are told of its body is new.
+            # Everything decided about it stays as it is (how it is approved, slashes
+            # in its path, what was seen of it), which rebuilding it would put back.
+            operations.append(
+                old.model_copy(update={"body": new.body if old.accepts_body else None})
+            )
+            continue
         same_request = new.method == old.method
         keep: dict[str, object] = {"id": old.id, "pagination": old.pagination}
         if same_request:
@@ -148,6 +219,8 @@ def proposed_update(current: ApiEntry, fresh: ApiEntry, changes: list[Change]) -
                 "writable": old.writable,
                 "rememberable": old.rememberable,
             }
+            if not old.accepts_body:
+                keep["body"] = None  # no body is taken here, whatever the source describes
         operations.append(
             Operation.model_validate(
                 {**new.model_dump(mode="json", by_alias=True), **_dumpable(keep)}

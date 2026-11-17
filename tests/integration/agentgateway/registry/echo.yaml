@@ -23,5 +23,9 @@ operations:
     access: write
     writable: true
     accepts_body: true
+    body:
+      fields:
+        - {name: body, type: string, required: true, description: The text of the comment}
+        - {name: "labels[]", type: string}
     summary: Echo a write
     parameters: [{name: key, in: path}]

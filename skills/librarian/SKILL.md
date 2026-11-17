@@ -42,6 +42,12 @@ fact came from when it matters.
   that operation yet (see `write_not_enabled` below).
 - `write` asks for one change: `api`, `operation`, `args`, `body`, and a `reason`. A person
   reads the reason before approving, so say in one sentence what you are doing and why.
+- What goes in the `body`: ask `capabilities` with `api` and `operation`. It answers with
+  every field of the body (`labels[]` is a list, `author.name` a field inside `author`),
+  its type, whether it is required and the values it takes. Do this before the write
+  instead of guessing the fields: a person should not be asked to approve a body the API
+  will refuse. `body: true` means the body's fields are not known to librarian; then use
+  what you know of the API, and say so in the `reason`.
 - Several writes that belong together (a branch, a commit, a pull request) go in one
   `write_plan`: the person sees all of them and approves once, and librarian makes them in
   order. Where a later step needs what an earlier one returned, write
