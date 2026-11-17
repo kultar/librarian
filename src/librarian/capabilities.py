@@ -17,7 +17,7 @@ from typing import Any
 
 import pydantic_core
 
-from librarian.registry.models import Body, Operation
+from librarian.registry.models import Body, BodyField, Operation
 
 # How many operations a list holds: the best matches where the agent gave words, the
 # first ones where it gave none.
@@ -163,11 +163,23 @@ def _note(most: int, keep: Listed | None, *, searched: bool, one: bool) -> str:
     return f"{SHORT}{left} ({TOTALS}). {ONE_API}"
 
 
+def _key(field: BodyField) -> str:
+    """A field as an agent writes it: the keys that lead to it, with a dot between.
+    Where one of them is a list, the field is in each of its items (as in `select`).
+    The brackets an entry marks a list with are not part of any key, and an agent that
+    is shown `expand[]` writes just that as the key."""
+    return field.name.replace("[]", "")
+
+
+def _kind(field: BodyField) -> str:
+    return f"list of {field.type}" if field.name.endswith("[]") else field.type
+
+
 def body_names(body: Body) -> dict[str, Any]:
     """A body in a list of operations: its first fields by name (`title`, `draft?` for
-    one that may be left out, `labels[]` for a list, `author.name` for a field inside
-    another), and how many more there are."""
-    names = [field.name if field.required else f"{field.name}?" for field in body.fields]
+    one that may be left out, `author.name` for a field inside another), and how many
+    more there are."""
+    names = [_key(field) if field.required else f"{_key(field)}?" for field in body.fields]
     more = len(names) - BODY_NAMES + body.more
     return {"body": names[:BODY_NAMES], **({"body_more": more} if more > 0 else {})}
 
@@ -208,8 +220,8 @@ def described(
         told["body"] = {
             "fields": [
                 {
-                    "name": field.name,
-                    "type": field.type,
+                    "name": _key(field),
+                    "type": _kind(field),
                     "required": field.required,
                     **({"values": field.values} if field.values else {}),
                     **words(field.description),
@@ -217,8 +229,21 @@ def described(
                 for field in op.body.fields
             ],
             **({"more": op.body.more} if op.body.more else {}),
-            **({"sent_as": op.body.encoding} if op.body.encoding != "json" else {}),
+            **_how_sent(op.body),
         }
     if op.warning:
         told["warning"] = op.warning
     return told
+
+
+def _how_sent(body: Body) -> dict[str, str]:
+    """How the body goes to the API, where that is not as JSON. The agent gives an
+    object either way; this is so that it knows what the API will see."""
+    if body.encoding == "form":
+        return {"sent_as": "form"}
+    if body.encoding == "multipart":
+        return {
+            "note": "The API's description says it takes this body as multipart form data "
+            "(a file upload). librarian sends JSON, which the API may refuse."
+        }
+    return {}

@@ -304,11 +304,13 @@ The JSONL audit log is separate and always on.
   has to guess what goes in it: from what it knows of a public API, from nothing for an
   internal one. librarian reads it from the API's description and tells it. Asked about one
   API (`api`), each operation names the first fields of its body: `"body": ["head", "base",
-  "title?", "labels[]?", "author.name?"]` (`?`: may be left out; `[]`: a list; a dot: a field
-  inside another), with `body_more` when there are more than ten. Asked about one operation
+  "title?", "labels?", "author.name?"]` (`?`: may be left out; a dot: a field inside
+  another), with `body_more` when there are more than ten. Asked about one operation
   (`api` and `operation`), it gets all of it: every argument with its type and description,
-  and every field of the body with its type, the values it takes and what it is for (up to
-  40 fields, three levels deep). Nothing is checked against this: the API accepts or refuses
+  and every field of the body with its type (`list of string` for a list), the values it
+  takes and what it is for (up to 40 fields, three levels deep). A field is named by the
+  keys that lead to it, as an agent writes them: where `items` is a `list of object`,
+  `items.price` is the price of each item. Nothing is checked against this: the API accepts or refuses
   a body, and descriptions leave fields out. `body: true` means the operation takes a body
   and the description does not say what is in it. Three limits to know:
   - It is read from OpenAPI and Swagger descriptions, not from documentation pages or a
@@ -318,9 +320,13 @@ The JSONL audit log is separate and always on.
     person asks: *Re-check now* on the console's API page, or `librarian registry recheck
     <api>`. For an approved API that is an update an approver takes, like any other; it
     touches nothing else about the operations.
-  - librarian sends a body as JSON. Where the description says the API takes a form
-    (Stripe's does, for every operation), the fields are told with `"sent_as": "form"`: such
-    an API may refuse the JSON librarian sends.
+  - A body is sent the way the description says the API takes it: as JSON, or as a form
+    (`application/x-www-form-urlencoded`: Stripe's API, for every operation). The agent gives
+    an object either way. In a form, a field inside another goes in brackets
+    (`metadata[order]=6735`) and a list is written as that API's description writes lists
+    (`tag=a&tag=b`, `tag[0]=a&tag[1]=b` or `tag=a,b`). The answer says `"sent_as": "form"`, and
+    the approval page shows the fields as they go over the wire. A multipart body (a file
+    upload) is not something librarian sends: the answer says so.
 - **An answer that fits in an agent's context.** `capabilities` is the first thing an agent
   asks, and all of it goes into the agent's context. The answer stays under
   `capabilities_max_bytes` (16,000 bytes of JSON: over MCP up to about 28,000 characters of

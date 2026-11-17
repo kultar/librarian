@@ -122,12 +122,12 @@ def build_mcp(librarian: Librarian) -> MCPServer:
         query is given (e.g. "jira issue comments"). With `api` (an API's id), that API
         alone: add a query to get its operations that fit. With `api` and `operation`,
         that one operation in full: what each argument is, and every field of its body
-        with its type and the values it takes. Ask this before a `write` whose body you
-        would otherwise have to guess.
+        with its type (`list of string`: give a list) and the values it takes. Ask this
+        before a `write` whose body you would otherwise have to guess.
 
         In a list, each operation names its arguments (`args`; a trailing ? marks one
         that may be left out) and says when it takes a `body`: with `api`, by the names
-        of its first fields (`labels[]` is a list, `author.name` a field inside another).
+        of its first fields (`author.name` is a field inside another).
         Where you may ask for changes, the operations that write are listed too
         (`write_operations`): use them with `write` or `write_plan`. `enabled: false`
         means nobody has allowed writes through that operation yet; asking for one asks

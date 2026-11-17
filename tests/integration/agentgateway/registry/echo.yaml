@@ -29,3 +29,18 @@ operations:
         - {name: "labels[]", type: string}
     summary: Echo a write
     parameters: [{name: key, in: path}]
+  - id: postForm
+    method: POST
+    path: /anything/forms/{key}
+    access: write
+    writable: true
+    accepts_body: true
+    body:
+      encoding: form
+      lists: brackets
+      fields:
+        - {name: amount, type: integer, required: true}
+        - {name: metadata.order, type: string}
+        - {name: "expand[]", type: string}
+    summary: Echo a form
+    parameters: [{name: key, in: path}]

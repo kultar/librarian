@@ -58,8 +58,16 @@ know them. Either the API was learned before 0.23: have its description read aga
 *Re-check now* on the console's API page or `librarian registry recheck <api>` (for an
 approved API an approver then takes the update). Or it was learned from documentation pages,
 or its description does not say: write the fields into the entry by hand
-([format](registry.md)). Where the answer has `"sent_as": "form"`, the API's description
-says it takes its bodies as a form, and librarian sends JSON: the API may refuse the write.
+([format](registry.md)).
+
+**An API refuses a write with "invalid JSON", "unsupported content type" or a missing field
+that was in the body.**
+The API takes its bodies as a form, not as JSON, and its entry does not say so (it was learned
+before 0.23.1, or from documentation pages). Have the description read again (*Re-check now*),
+or set it by hand on the operation: `body: {encoding: form}`, with `lists: brackets` for an
+API that writes lists as `tag[0]=a` ([format](registry.md)). `capabilities` with `api` and
+`operation` then answers `"sent_as": "form"`, and the approval page shows the fields as they
+are sent.
 
 **An agent's MCP client warned about `capabilities`, or put its answer into a file (0.22.1 and earlier).**
 The same cause, before there was a limit: have the agent give a query, or upgrade.

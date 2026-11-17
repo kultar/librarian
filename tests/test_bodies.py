@@ -513,8 +513,8 @@ async def test_an_agent_is_told_what_a_body_holds_where_it_asks_about_the_api(
     one = librarian.capabilities(None, WRITER, api="forge")["apis"][0]
     writes = {op["operation"]: op for op in one["write_operations"]}
     assert writes["createPull"]["body"] == [
-        "head", "base", "title?", "draft?", "state?", "labels[]?", "due?", "milestone?",
-        "author?", "reviews[]?",
+        "head", "base", "title?", "draft?", "state?", "labels?", "due?", "milestone?",
+        "author?", "reviews?",
     ]  # fmt: skip
     assert (
         len(writes["createPull"]["body"]) == BODY_NAMES and writes["createPull"]["body_more"] == 7
@@ -554,6 +554,13 @@ async def test_an_agent_about_to_call_an_operation_is_told_all_of_it(librarian: 
     }
     assert fields["state"]["values"] == ["open", "closed"]
     assert fields["author.name"]["required"] is True
+    # A field is named by the keys that lead to it, as an agent writes them, and its type
+    # says where a list is wanted. The brackets an entry marks a list with are no part of
+    # a key: an agent that was shown `labels[]` sent just that as the key.
+    assert not [name for name in fields if "[" in name]
+    assert fields["labels"]["type"] == "list of string"
+    assert fields["reviews"]["type"] == "list of object"
+    assert fields["reviews.reviewer"]["type"] == "string"  # of each review
     # One that reads: no word about writing. One whose body is not described: it says so.
     read = librarian.capabilities(None, WRITER, api="forge", operation="listPulls")
     assert read["kind"] == "read" and "enabled" not in read and "body" not in read

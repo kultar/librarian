@@ -361,28 +361,33 @@ def _body(spec: Json, op: Json, parameters: list[Any]) -> Body | None:
     found = _body_schema(spec, op, parameters)
     if found is None:
         return None
-    encoding, schema = found
+    encoding, schema, lists = found
     fields, more = _fields(spec, schema)
     if not fields:  # nothing said of it, or not an object: a list, a file, plain text
         return None
     try:
-        return Body.model_validate({"fields": fields, "more": more, "encoding": encoding})
+        return Body.model_validate(
+            {"fields": fields, "more": more, "encoding": encoding, "lists": lists}
+        )
     except ValueError:
         return None  # nothing an agent could be told safely
 
 
-def _body_schema(spec: Json, op: Json, parameters: list[Any]) -> tuple[str, Json] | None:
-    """The schema of the request body and how the API takes it. JSON where the
-    description offers it, since that is what librarian sends."""
+def _body_schema(spec: Json, op: Json, parameters: list[Any]) -> tuple[str, Json, str] | None:
+    """The schema of the request body, how the API takes it, and for a form how it
+    writes a list. JSON where the description offers it: that needs no such choices."""
     if spec.get("swagger") == "2.0":
         resolved = [_resolve(spec, item) for item in parameters]
         in_body = next((p for p in resolved if p.get("in") == "body"), None)
         if in_body is not None:
-            return "json", _resolve(spec, in_body.get("schema"))
+            return "json", _resolve(spec, in_body.get("schema")), "repeated"
         form = [p for p in resolved if p.get("in") == "formData" and isinstance(p.get("name"), str)]
         if not form:
             return None
         files = any(p.get("type") == "file" for p in form)
+        # Swagger joins a list by commas unless it says `collectionFormat: multi`.
+        arrays = [p for p in form if p.get("type") == "array"]
+        joined = any(p.get("collectionFormat", "csv") != "multi" for p in arrays)
         return (
             "multipart" if files else "form",
             {
@@ -390,6 +395,7 @@ def _body_schema(spec: Json, op: Json, parameters: list[Any]) -> tuple[str, Json
                 "properties": {str(p["name"]): p for p in form if p.get("type") != "file"},
                 "required": [str(p["name"]) for p in form if p.get("required") is True],
             },
+            "commas" if joined else "repeated",
         )
     content = _dict(_resolve(spec, op.get("requestBody")).get("content"))
     offered = sorted(
@@ -401,7 +407,12 @@ def _body_schema(spec: Json, op: Json, parameters: list[Any]) -> tuple[str, Json
     if not offered:
         return None
     _, encoding, kind = offered[0]
-    return encoding, _resolve(spec, _dict(content[kind]).get("schema"))
+    media = _dict(content[kind])
+    # OpenAPI repeats a list's name (`tag=a&tag=b`) unless the description gives the
+    # property the style `deepObject`, as an API does that wants brackets (Stripe).
+    styles = {_dict(how).get("style") for how in _dict(media.get("encoding")).values()}
+    lists = "brackets" if encoding == "form" and "deepObject" in styles else "repeated"
+    return encoding, _resolve(spec, media.get("schema")), lists
 
 
 def _taken_as(media_type: str) -> tuple[int, str]:

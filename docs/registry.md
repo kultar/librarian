@@ -82,13 +82,23 @@ operations:
         - {name: assignee.login, type: string}        # a field inside another
         - {name: "tree[].path", type: string}         # a field of every item of a list
       more: 3                     # how many fields the description has beyond these
-      encoding: form              # how the API takes it: json (default) | form | multipart
+      encoding: form              # how the API takes it, and librarian sends it: json (the
+                                  # default) | form | multipart (not sent: files)
+      lists: brackets             # in a form, how a list of plain values is written:
+                                  # repeated (tag=a&tag=b, the default) | brackets
+                                  # (tag[0]=a&tag[1]=b) | commas (tag=a,b)
 ```
 
 `body` is what agents are told an operation's body holds
 ([README](../README.md#big-apis)); nothing is checked against it. It is read from an OpenAPI
 or Swagger description (not from documentation pages), and you can write it by hand. A field
 inside another is `required` whenever that other one is given.
+
+`encoding` is acted on: with `form`, the object an agent gives is sent as
+`application/x-www-form-urlencoded`. A field inside another goes in brackets
+(`metadata[order]=6735`), a list of objects is numbered (`items[0][price]=p1`), and a list of
+plain values is written as `lists` says. An API whose description gives its nested fields the
+style `deepObject` (Stripe) gets `brackets`.
 
 ## Acting as the person
 

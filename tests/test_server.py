@@ -355,7 +355,7 @@ async def test_write_end_to_end_over_a2a(
         asked = {"skill": "capabilities", "api": "tracker", "operation": "addComment"}
         full = (await send(librarian, http, [new_data_part(asked)])).data[-1]
         assert full["operation"] == "addComment" and full["kind"] == "write"
-        assert [f["name"] for f in full["body"]["fields"]] == ["body", "visibility", "mentions[]"]
+        assert [f["name"] for f in full["body"]["fields"]] == ["body", "visibility", "mentions"]
         outcome = await send(
             librarian,
             http,

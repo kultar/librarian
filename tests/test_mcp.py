@@ -240,7 +240,7 @@ async def test_an_agent_about_to_write_asks_what_the_body_holds(connect: Connect
 
         listed = data(await session.call_tool("capabilities", {"api": "tracker"}))
         writes = {op["operation"]: op for op in listed["apis"][0]["write_operations"]}
-        assert writes["addComment"]["body"] == ["body", "visibility?", "mentions[]?"]
+        assert writes["addComment"]["body"] == ["body", "visibility?", "mentions?"]
         assert "body" not in writes["deleteIssue"]
 
         asked = {"api": "tracker", "operation": "addComment"}
@@ -262,7 +262,7 @@ async def test_an_agent_about_to_write_asks_what_the_body_holds(connect: Connect
                     "required": False,
                     "values": ["public", "team"],
                 },
-                {"name": "mentions[]", "type": "string", "required": False},
+                {"name": "mentions", "type": "list of string", "required": False},
             ]
         }
         read = data(await session.call_tool("capabilities", {**asked, "operation": "getIssue"}))

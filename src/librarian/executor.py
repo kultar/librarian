@@ -36,7 +36,7 @@ from urllib.parse import quote, quote_plus, urlencode, urljoin, urlsplit
 
 import httpx
 
-from librarian import __version__, telemetry
+from librarian import __version__, forms, telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import ArgValue, Caller, CallRequest, CallResult, Provenance, WriteRequest
 from librarian.errors import ApiUnavailable, CredentialSetupError, why_no_answer
@@ -502,11 +502,7 @@ class Executor:
         ) as span:
             _assert_same_origin(entry, url)
             http_request = self.client.build_request(
-                op.method,
-                url,
-                params=params or None,
-                headers=headers,
-                json=request.body if request.body is not None else None,
+                op.method, url, params=params or None, **_with_body(op, request.body, headers)
             )
             if cred.signer is not None:
                 cred.signer.sign(http_request)
@@ -737,9 +733,8 @@ class Executor:
                     method,
                     target,
                     params=params or None,
-                    headers=send_headers,
-                    json=body if body is not None else None,
                     extensions=extensions,
+                    **_with_body(op, body, send_headers),
                 )
                 if signer is not None:
                     signer.sign(request)  # each request, also after a redirect, has its own
@@ -1155,6 +1150,20 @@ def _origin(url: str) -> tuple[str, str, int | None]:
 
 def _same_origin(entry: ApiEntry, url: str) -> bool:
     return _origin(url) == _origin(entry.base_url)
+
+
+def _with_body(op: Operation, body: Any, headers: dict[str, str]) -> dict[str, Any]:
+    """The headers and the body of a request as they are sent: JSON, or a form where
+    the API's description says that is how the operation takes its body."""
+    if body is None:
+        return {"headers": headers}
+    if op.body is not None and op.body.encoding == "form" and isinstance(body, dict):
+        fields = cast(dict[str, Any], body)
+        return {
+            "headers": {**headers, "Content-Type": forms.CONTENT_TYPE},
+            "content": forms.encoded(fields, op.body.lists),
+        }
+    return {"headers": headers, "json": body}
 
 
 def _assert_same_origin(entry: ApiEntry, url: str) -> None:

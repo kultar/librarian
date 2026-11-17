@@ -133,7 +133,22 @@ def _body_change(old: Body | None, new: Body | None) -> str | None:
         ("no longer takes", [n for n in before if n not in after]),
     ]
     said = [f"{what} {_some(names)}" for what, names in parts if names]
+    if (old.encoding, old.lists) != (new.encoding, new.lists):
+        # How it is sent follows from this, so an entry has to get it: an API learned
+        # before librarian read how a form writes its lists would send them wrongly.
+        said.insert(0, f"is now taken as {_taken(new)}")
     return f"its request body {'; '.join(said)}" if said else None
+
+
+def _taken(body: Body) -> str:
+    """How an API takes a body, in words."""
+    if body.encoding == "form":
+        return {
+            "repeated": "a form",
+            "brackets": "a form, its lists in brackets",
+            "commas": "a form, its lists joined by commas",
+        }[body.lists]
+    return "JSON" if body.encoding == "json" else "multipart form data"
 
 
 def _some(names: list[str], most: int = 5) -> str:
@@ -142,18 +157,24 @@ def _some(names: list[str], most: int = 5) -> str:
 
 
 def told(changes: list[Change]) -> list[str]:
-    """The changes as a reviewer reads them, the gravest first. The operations whose
-    bodies are described for the first time are one line, however many there are."""
-    described = [c for c in changes if c.body and c.detail.endswith(DESCRIBED)]
-    others = [c for c in changes if c not in described]
-    ranked = sorted(others, key=lambda c: -_RANK[c.severity])
-    lines = [f"[{c.severity}] {c.detail}" for c in ranked]
-    if len(described) > 3:
-        lines.append(
-            f"[additive] the request bodies of {len(described)} operations are now described"
-        )
-    else:
-        lines += [f"[{c.severity}] {c.detail}" for c in described]
+    """The changes as a reviewer reads them, the gravest first. What is said of the
+    bodies of many operations alike (described for the first time, taken another way)
+    is one line, however many operations there are."""
+    others = [c for c in changes if not c.body]
+    lines = [f"[{c.severity}] {c.detail}" for c in sorted(others, key=lambda c: -_RANK[c.severity])]
+    alike: dict[str, list[Change]] = {}
+    for change in changes:
+        if change.body:
+            alike.setdefault(change.detail.removeprefix(f"{change.operation}: "), []).append(change)
+    for said, group in alike.items():
+        if len(group) <= 3:
+            lines += [f"[{c.severity}] {c.detail}" for c in group]
+        elif said == DESCRIBED:
+            lines.append(
+                f"[additive] the request bodies of {len(group)} operations are now described"
+            )
+        else:
+            lines.append(f"[additive] {len(group)} operations, each: {said}")
     return lines
 
 

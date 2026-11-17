@@ -620,7 +620,7 @@ def create_pages_app(librarian: Librarian) -> Starlette:
     return Starlette(
         routes=[
             *credential_routes(librarian.broker, librarian.settings.approvers),
-            *approval_routes(librarian.approvals, librarian.settings.approvers),
+            *approval_routes(librarian.approvals, librarian.settings.approvers, librarian.as_form),
             *console_routes(librarian),
             *review_routes(librarian),
             *consent_routes(librarian),
@@ -700,7 +700,7 @@ def create_app(
             )
         routes += [
             *credential_routes(librarian.broker, librarian.settings.approvers),
-            *approval_routes(librarian.approvals, librarian.settings.approvers),
+            *approval_routes(librarian.approvals, librarian.settings.approvers, librarian.as_form),
             *console_routes(librarian),
             *review_routes(librarian),
             *consent_routes(librarian),

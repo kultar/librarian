@@ -14,6 +14,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from collections.abc import Callable
 from typing import Any, Literal
 
 from starlette.requests import Request
@@ -599,8 +600,17 @@ is sent.</p>
 <button class=deny>Deny</button></form></div>"""
 
 
+# What a write's body looks like as a form, where its operation takes one: the fields
+# in the order they are sent. None where the body goes as JSON.
+AsForm = Callable[[WriteApproval], list[tuple[str, str]] | None]
+
+
 def _approval_form(
-    approval: WriteApproval, token: str, error: str | None, max_days: int | None = None
+    approval: WriteApproval,
+    token: str,
+    error: str | None,
+    max_days: int | None = None,
+    as_form: AsForm | None = None,
 ) -> str:
     if approval.steps:
         return _plan_form(approval, token, error)
@@ -631,6 +641,11 @@ def _approval_form(
         if req.body is not None
         else ""
     )
+    fields = as_form(approval) if as_form is not None and req.body is not None else None
+    if fields is not None:
+        # The API takes a form, not JSON: what goes over the wire, field by field.
+        sent = "\n".join(f"{e(name)} = {e(value)}" for name, value in fields)
+        body_html += f"<p class=muted>This API takes it as a form. Sent as:</p><pre>{sent}</pre>"
     hidden = f'<input type=hidden name=t value="{e(token)}">'
     for_whom = f" for {e(approval.principal)}" if approval.principal else ""
     remember = ""
@@ -667,7 +682,9 @@ always differ. You can revoke this at any time.</p>
 <button class=deny>Deny</button></form></div>"""
 
 
-def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> list[Route]:
+def approval_routes(
+    approvals: ApprovalBroker, settings: ApproverSettings, as_form: AsForm | None = None
+) -> list[Route]:
     async def authorized(
         request: Request, token: str
     ) -> tuple[WriteApproval | None, str | None, Response | None]:
@@ -687,7 +704,7 @@ def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> li
             return denied or _notice("bad", "Error", "Something went wrong.", 400)
         return _page(
             f"Approve a {'plan' if approval.steps else 'write'}: {approval.api_name}",
-            _approval_form(approval, token, None, approvals.max_grant_days),
+            _approval_form(approval, token, None, approvals.max_grant_days, as_form),
         )
 
     async def submit(request: Request) -> Response:
@@ -719,7 +736,9 @@ def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> li
             else:
                 return _page(
                     "Error",
-                    _approval_form(approval, token, "Unknown action.", approvals.max_grant_days),
+                    _approval_form(
+                        approval, token, "Unknown action.", approvals.max_grant_days, as_form
+                    ),
                     400,
                 )
         except LookupError:
@@ -729,7 +748,7 @@ def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> li
         except (ApprovalError, ValueError) as exc:
             return _page(
                 "Error",
-                _approval_form(approval, token, str(exc), approvals.max_grant_days),
+                _approval_form(approval, token, str(exc), approvals.max_grant_days, as_form),
                 400,
             )
         extra = " Similar writes are now allowed by a grant." if action == "grant" else ""

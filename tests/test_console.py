@@ -83,7 +83,7 @@ async def test_api_page_lists_operations_and_escapes(librarian: Librarian) -> No
     assert "read (method)" in text or "read (reviewed)" in text
     assert "write" in text
     # What agents are told a body holds is there for the people who review the API.
-    assert "Body: body, visibility?, mentions[]?" in text
+    assert "Body: body, visibility?, mentions?" in text
     assert c.get("/apis/nope").status_code == 404
 
 

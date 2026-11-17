@@ -233,6 +233,44 @@ async def test_mcp_through_the_gateway_with_the_agents_own_key() -> None:
         assert second == {"body": "two", "after": "one"}
 
 
+async def test_a_body_is_sent_as_a_form_where_the_api_takes_one() -> None:
+    """The echo server answers with the request it got: its content type, and the fields
+    of the form as a real server reads them."""
+    async with mcp(GATEWAY, AGENT) as session:
+        full = await told(session, "capabilities", {"api": "echo", "operation": "postForm"})
+        assert full["body"]["sent_as"] == "form"
+        asked = await told(
+            session,
+            "write",
+            {
+                "api": "echo",
+                "operation": "postForm",
+                "args": {"key": "PAY-1"},
+                "body": {
+                    "amount": 1000,
+                    "metadata": {"order": "6735 & more"},
+                    "expand": ["charge", "customer"],
+                },
+                "reason": "integration",
+            },
+        )
+        assert asked["status"] == "pending_approval"
+        link = link_for(asked["approval"])
+        assert "metadata[order] = 6735 &amp; more" in page_at(link)  # what the approver reads
+        assert "Approved" in approve(link).text
+        written = await outcome(session, asked["approval"])
+        assert written["state"] == "executed"
+        echoed = written["result"]["data"]
+        assert echoed["headers"]["Content-Type"] == ["application/x-www-form-urlencoded"]
+        assert echoed["form"] == {
+            "amount": ["1000"],
+            "metadata[order]": ["6735 & more"],
+            "expand[0]": ["charge"],
+            "expand[1]": ["customer"],
+        }
+        assert echoed["json"] is None
+
+
 async def test_what_an_agent_may_use_is_asked_through_the_gateway() -> None:
     """`capabilities` behind the gateway: everything, one API by its id, and an API named
     another way, answered in words that reach the agent as they are."""
@@ -246,7 +284,7 @@ async def test_what_an_agent_may_use_is_asked_through_the_gateway() -> None:
         assert wrong.is_error
         assert "Did you mean 'echo'?" in " ".join(getattr(p, "text", "") for p in wrong.content)
         # What the body of a write holds: by name with the API, in full with the operation.
-        assert one["apis"][0]["write_operations"][0]["body"] == ["body", "labels[]?"]
+        assert one["apis"][0]["write_operations"][0]["body"] == ["body", "labels?"]
         full = await told(session, "capabilities", {"api": "echo", "operation": "postComment"})
         assert full["kind"] == "write" and full["args"][0]["name"] == "key"
         assert full["body"]["fields"][0] == {

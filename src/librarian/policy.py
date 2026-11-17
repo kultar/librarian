@@ -336,10 +336,19 @@ class PolicyEngine:
             )
         if request.body is not None and not op.accepts_body:
             return Decision.deny(f"operation {op.id!r} does not accept a request body")
+        if _not_a_form(op, request.body):
+            return Decision.deny(_not_a_form(op, request.body))
         problem = _check_args(op, request.args, unresolved)
         if problem:
             return Decision.deny(problem)
         return Decision(True, "write may be requested", entry, op)
+
+
+def _not_a_form(op: Operation, body: object) -> str:
+    """Why a body cannot be sent to an operation that takes a form; empty where it can."""
+    if body is None or op.body is None or op.body.encoding != "form" or isinstance(body, dict):
+        return ""
+    return f"operation {op.id!r} takes its body as a form: give an object of its fields, not a list"
 
 
 def arguments(op: Operation) -> list[str]:

@@ -169,9 +169,16 @@ class Body(StrictModel):
     fields: list[BodyField] = Field(default_factory=list[BodyField], max_length=MAX_BODY_FIELDS)
     # How many fields the description has beyond the ones kept here.
     more: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
-    # How the description says the API takes the body, where that is not as JSON.
+    # How the description says the API takes the body, where that is not as JSON. A
+    # form is sent as one; a multipart body (files) is not something librarian sends.
     encoding: Literal["json", "form", "multipart"] = Field(
         default="json", exclude_if=lambda value: value == "json"
+    )
+    # In a form, how a list of plain values is written: its values one after the other
+    # under the same name (`tag=a&tag=b`), numbered in brackets (`tag[0]=a&tag[1]=b`),
+    # or joined by commas (`tag=a,b`). A field inside another is always in brackets.
+    lists: Literal["repeated", "brackets", "commas"] = Field(
+        default="repeated", exclude_if=lambda value: value == "repeated"
     )
 
 

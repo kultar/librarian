@@ -30,7 +30,7 @@ from pydantic_ai.exceptions import (
 from pydantic_ai.models import Model
 from pydantic_ai.models.fallback import FallbackModel
 
-from librarian import telemetry
+from librarian import forms, telemetry
 from librarian.approvals import (
     INTERRUPTED_AFTER,
     ApprovalBroker,
@@ -1464,6 +1464,16 @@ class Librarian:
         return shortened(
             [listed(e) for e in entries], small_enough, searched=bool(query), one=bool(api)
         )
+
+    def as_form(self, approval: WriteApproval) -> list[tuple[str, str]] | None:
+        """The fields a write's body is sent as, where its operation takes a form (so
+        that the person approving it sees what goes over the wire); None for JSON."""
+        entry = self.registry.get(approval.api)
+        op = entry.operation(approval.operation) if entry is not None else None
+        body = approval.request.body
+        if op is None or op.body is None or op.body.encoding != "form":
+            return None
+        return forms.pairs(body, op.body.lists) if isinstance(body, dict) else None
 
     def _one_operation(
         self, entry: ApiEntry, caller: Caller, operation: str, small_enough: Fits
