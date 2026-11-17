@@ -21,7 +21,7 @@ credential out.
                                └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.21)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
+> Status: **alpha (v0.22)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
 <!-- mcp-name: io.github.kultar/librarian -->
 
@@ -84,7 +84,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
 uvx librarian-a2a serve                    # or run it without installing (same CLI)
-docker pull ghcr.io/kultar/librarian:0.21.0
+docker pull ghcr.io/kultar/librarian:0.22.0
 ```
 
 ### What happens on a request
@@ -1258,6 +1258,21 @@ uv run pytest
   returned; each step is checked again before it is sent; the first failure ends the plan
   and says what was made. The audit record of a write now names the approval it was made
   under
+- **v0.22**: at home behind gateways and on agent platforms. Tested behind **agentgateway**
+  as an MCP server and an A2A agent, with each agent's key passed through or with the
+  gateway signing people in, and the chart attaches librarian to a Gateway
+  (`agentgateway.enabled`). On **kagent**: plans, a subset of the tools per agent and kagent's
+  own approval are tested on two harnesses, and the name kagent gives for the signed-in user
+  can be shown to the approver as the claim it is (`substrate.claimed_user_header`).
+  `write_status` can wait for the outcome (`wait_seconds`), so an agent nobody can wake has
+  it in the same turn. An answer too large for one MCP tool result comes back as its
+  outline instead of an error with no reason. `capabilities` names the operations that
+  write, for agents that may ask for writes. An Agent Skill (`skills/librarian`) and an
+  entry in the MCP Registry (`io.github.kultar/librarian`). Nothing an agent or an API wrote
+  is read as markup by Slack any more. Stopping ends background work before the database is
+  closed (on SQLite the process could fail to exit). The README names every command,
+  setting, tool and kind of authentication, the chart's README every value, and tests keep
+  it so
 
 ### Next
 

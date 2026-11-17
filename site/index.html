@@ -40,7 +40,7 @@
     <h1>One librarian for every API your agents&nbsp;use.</h1>
     <p class="lede">Agents ask librarian for data instead of carrying their own API keys. It learns an API the first time one is needed, asks a person for the key once, serves reads within policy, and holds every write for a person's approval unless an approver decided in advance.</p>
     <div class="install"><pre><code>pip install librarian-a2a
-docker pull ghcr.io/kultar/librarian:0.21.0</code></pre></div>
+docker pull ghcr.io/kultar/librarian:0.22.0</code></pre></div>
     <div class="actions">
       <a class="btn" href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Try it in ten minutes</a>
       <a class="btn quiet" href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploy it for a team</a>
@@ -179,13 +179,13 @@ docker compose up -d
         <h3>For your team</h3>
         <p>A Helm chart with oauth2-proxy sign-in, Postgres for the registry and every decision, AWS Secrets Manager for keys, and a GitHub repository that receives a commit for each approved decision. Two or more replicas, no volumes, nothing exposed to the internet.</p>
 <pre><code>helm install librarian oci://ghcr.io/kultar/charts/librarian \
-  --version 0.21.0 -n librarian -f values.yaml
+  --version 0.22.0 -n librarian -f values.yaml
 helm test librarian -n librarian</code></pre>
         <a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a>
       </div>
       <div>
         <h3>Connect your agents</h3>
-        <p>Behind LiteLLM's agent gateway librarian is both an MCP server and an A2A agent. On kagent and Agent Substrate agents need no key at all: the platform's gateway signs each call and librarian knows which agent it is. Any A2A or MCP client can also talk to it directly.</p>
+        <p>Behind LiteLLM's agent gateway and behind agentgateway librarian is both an MCP server and an A2A agent. On kagent and Agent Substrate agents need no key at all: the platform's gateway signs each call and librarian knows which agent it is. Any A2A or MCP client can also talk to it directly, and it is listed in the MCP Registry.</p>
 <pre><code># LiteLLM config.yaml
 mcp_servers:
   librarian:
@@ -234,7 +234,7 @@ substrate:
     <ul class="docs">
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/getting-started.md">Getting started</a><span>The laptop walkthrough with Docker Compose.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/deploy.md">Deploying for a team</a><span>Kubernetes, step by step: the record repository, Slack, SSO, secrets, database, replicas.</span></li>
-      <li><a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md">Integrations</a><span>LiteLLM, kagent and Agent Substrate, any A2A or MCP client, verified principals.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md">Integrations</a><span>LiteLLM, agentgateway, kagent and Agent Substrate, any A2A or MCP client, verified principals.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/registry.md">Registry format</a><span>What an entry holds, how approval works, and the record kept on GitHub.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/threat-model.md">Threat model</a><span>Assets, actors, threats and mitigations.</span></li>
       <li><a href="https://github.com/kultar/librarian/blob/main/docs/troubleshooting.md">Troubleshooting</a><span>What to check when agents, learning, Slack, sign-in or Kubernetes misbehave.</span></li>
@@ -270,6 +270,9 @@ substrate:
         <li>Credentials made for each call instead of stored: OAuth client credentials, GitHub App tokens for one repository (read-only for a read), and AWS request signing</li>
         <li>Limits inside an API: an agent held to some operations and to some values of their arguments, such as one organisation's repositories</li>
         <li>Several writes approved as one plan: a commit and its pull request are one decision, shown to the approver whole</li>
+        <li>At home behind agentgateway and on kagent: tested as an MCP server and an A2A agent behind the gateway, a route on your Gateway from the chart, and an agent that can wait for a person's decision in the same turn</li>
+        <li>An answer too large to send comes back as its outline, agents are told which operations write, and nothing an agent wrote is read as markup in Slack</li>
+        <li>An Agent Skill that teaches agents librarian's tools, and an entry in the MCP Registry</li>
       </ul></div>
       <div><h3>Next</h3><ul>
         <li>Console actions that answer at once everywhere, with model guidance and Slack updates finishing in the background as the record already does</li>

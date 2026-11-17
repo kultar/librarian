@@ -1,0 +1,59 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.kultar/librarian",
+  "title": "librarian",
+  "description": "Any HTTP API for your agents, without its credentials: reads in policy, writes a person approves.",
+  "version": "0.22.0",
+  "websiteUrl": "https://librarian-agent.com",
+  "repository": {
+    "url": "https://github.com/kultar/librarian",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "librarian-a2a",
+      "version": "0.22.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://127.0.0.1:{--port}/mcp"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve"
+        },
+        {
+          "type": "named",
+          "name": "--port",
+          "description": "The port librarian listens on (on 127.0.0.1)",
+          "default": "8080"
+        }
+      ]
+    },
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/kultar/librarian:0.22.0",
+      "runtimeHint": "docker",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://127.0.0.1:8080/mcp"
+      },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "-p",
+          "value": "127.0.0.1:8080:8080",
+          "description": "Reach librarian from this machine only"
+        },
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "librarian-data:/data",
+          "description": "Keep what librarian learns, and the keys it is given"
+        }
+      ]
+    }
+  ]
+}

@@ -152,8 +152,9 @@ claude mcp add --transport http librarian http://localhost:8080/mcp \
 ```
 
 Then ask Claude Code something like *"use librarian to find how many APIs APIs.guru tracks"*.
-Over MCP nothing blocks on a person: a write (or a plan, `write_plan`) returns
-`pending_approval`, and librarian finishes it after approval (`write_status` reports the result).
+Over MCP nothing blocks on a person unless the agent asks: a write (or a plan,
+`write_plan`) returns `pending_approval`, and librarian finishes it after approval
+(`write_status` reports the result, and with `wait_seconds` waits for it).
 
 For agents behind the **LiteLLM** gateway, or running on **kagent / Agent Substrate** (where
 they need no key at all), see [docs/integrations.md](integrations.md).
