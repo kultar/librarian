@@ -59,4 +59,10 @@ services:
             rows = [{"id": n, "note": "x" * 80} for n in range(count)]
             json.dump({"rows": rows, "total": count}, open(f"{name}.json", "w"))
         http.server.test(HandlerClass=http.server.SimpleHTTPRequestHandler, port=8080, bind="0.0.0.0")
+    # The image's own health check asks librarian's /healthz, which this is not.
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     depends_on: [librarian]
