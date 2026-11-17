@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from typing import Any, Literal
 
 from starlette.requests import Request
@@ -22,6 +23,7 @@ from starlette.routing import Route
 from librarian.approvals import ApprovalBroker, ApprovalError, WriteApproval
 from librarian.config import ApproverSettings
 from librarian.credentials import CredentialBroker, CredentialRequest
+from librarian.plans import PlannedStep, Ref
 
 _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
@@ -105,6 +107,7 @@ button.deny{background:transparent;color:var(--danger);border-color:var(--danger
 button.deny:hover{background:var(--danger);color:#fff}
 .zone{margin-top:28px;padding-top:18px;border-top:1px solid var(--line)}
 .muted{color:var(--muted);font-size:.93em}
+.from{color:var(--brass-ink);font-weight:600}
 .err{color:var(--danger);background:var(--surface);border:1px solid var(--danger);
 border-radius:8px;padding:10px 14px;margin:0 0 16px}
 .ok{color:var(--ok)}.bad{color:var(--danger)}.note{color:var(--muted)}
@@ -480,9 +483,112 @@ def grant_length(form: Any, name: str = "days") -> int | None:
     return int(raw)
 
 
+def _plan_value(value: Any) -> str:
+    """An argument of a plan's step, for the approver: a value, or where it will come from."""
+    e = html.escape
+    if isinstance(value, Ref):
+        return (
+            f"<span class=muted>filled in when the plan runs:</span> <code>"
+            f"{e('.'.join(value.path))}</code> from step <code>{e(value.step)}</code>"
+        )
+    return e(json.dumps(value))
+
+
+def _plan_path(step: PlannedStep) -> tuple[str, list[tuple[str, Any]]]:
+    """Where a step's request goes: its path with the arguments the plan gives put in.
+    Also returned: the arguments that are not part of the path, or not known yet."""
+    path, rest = step.path, list[tuple[str, Any]]()
+    for name, value in step.args.items():
+        slot = "{" + name + "}"
+        if slot in path and isinstance(value, str | int) and not isinstance(value, bool):
+            path = path.replace(slot, str(value))
+        else:
+            rest.append((name, value))
+    return path, rest
+
+
+_BODY_REF = re.compile(r"\{\s*&quot;\$from&quot;: &quot;([^&]*)&quot;\s*\}")
+
+
+def _plan_body(body: Any) -> str:
+    """A step's request body as it will be sent, with each reference on one line and
+    marked: the one part of it that is not known yet."""
+    text = html.escape(json.dumps(body, indent=2, default=str))
+    return _BODY_REF.sub(
+        lambda found: (
+            f"<span class=from>{{&quot;$from&quot;: &quot;{found.group(1)}&quot;}}</span>"
+        ),
+        text,
+    )
+
+
+def _plan_form(approval: WriteApproval, token: str, error: str | None) -> str:
+    """The approval page of a plan: every write, exactly as it will be sent, in order."""
+    e = html.escape
+    count = len(approval.steps)
+    rows = [
+        ("API", f"{e(approval.api_name)} <span class=muted>({e(approval.host)})</span>"),
+        ("Agent", e(approval.agent)),
+        ("On behalf of", e(approval.principal or "nobody (autonomous agent)")),
+        ("Requester", e(", ".join(approval.requesters) or "none (approver group decides)")),
+    ]
+    if approval.request.reason:
+        rows.append(("Agent's reason", e(approval.request.reason)))
+    details = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows)
+    cards: list[str] = []
+    refs: list[Ref] = []
+    for number, step in enumerate(approval.steps, start=1):
+        method = step.method.upper()
+        badge = f"<span class='method {e(method.lower())}'>{e(method)}</span>"
+        path, rest = _plan_path(step)
+        args = "".join(
+            f"<tr><td><code>{e(name)}</code></td><td>{_plan_value(value)}</td></tr>"
+            for name, value in rest
+        )
+        refs += step.references()
+        what = f" {e(step.summary)}" if step.summary else ""
+        cards.append(
+            f"<div class=card><h2>{number}. {badge}<code>{e(path)}</code></h2>"
+            f"<p class=muted><code>{e(step.operation)}</code>{what} "
+            f"(step <code>{e(step.id)}</code>)</p>"
+            + (f"<table>{args}</table>" if args else "")
+            + (f"<pre>{_plan_body(step.shown()['body'])}</pre>" if step.body is not None else "")
+            + "</div>"
+        )
+    legend = ""
+    if refs:
+        first = refs[0]
+        legend = (
+            f"<p class=muted>A value written <code class=from>{{&quot;$from&quot;: &quot;"
+            f"{e(first.source)}&quot;}}</code> is not known yet: when the plan runs, librarian "
+            f"puts in what that earlier step answered (there, <code>{e('.'.join(first.path))}"
+            f"</code> from step <code>{e(first.step)}</code>) and checks the step again with "
+            "the real value before sending it.</p>"
+        )
+    hidden = f'<input type=hidden name=t value="{e(token)}">'
+    for_whom = f" for {e(approval.principal)}" if approval.principal else ""
+    err = f"<p class=err>{e(error)}</p>" if error else ""
+    return f"""<h1>Approve a plan for {e(approval.api_name)}</h1>
+<p class=lede><b>{e(approval.agent)}</b> wants to make {count} writes{for_whom}, in this order.
+Nothing is sent until you decide.</p>{err}
+<div class=card><dl>{details}</dl></div>
+{legend}{"".join(cards)}
+<div class=card><h2>Approve the plan</h2><p class=muted>Makes exactly these {count} writes,
+once, one after the other. The first that fails ends the plan; what was made before it is not
+undone. A plan is approved as it stands and never remembered as a grant.</p>
+<form method=post>{hidden}<input type=hidden name=action value=once>
+<button>Approve this plan</button></form></div>
+<div class=zone><h2>Deny</h2><p class=muted>The agent is told the plan was refused. Nothing
+is sent.</p>
+<form method=post>{hidden}<input type=hidden name=action value=deny>
+<button class=deny>Deny</button></form></div>"""
+
+
 def _approval_form(
     approval: WriteApproval, token: str, error: str | None, max_days: int | None = None
 ) -> str:
+    if approval.steps:
+        return _plan_form(approval, token, error)
     e = html.escape
     req = approval.request
     method = approval.method.upper()
@@ -565,7 +671,7 @@ def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> li
         if denied is not None or approval is None:
             return denied or _notice("bad", "Error", "Something went wrong.", 400)
         return _page(
-            f"Approve a write: {approval.api_name}",
+            f"Approve a {'plan' if approval.steps else 'write'}: {approval.api_name}",
             _approval_form(approval, token, None, approvals.max_grant_days),
         )
 
@@ -579,9 +685,12 @@ def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> li
         try:
             if action == "deny":
                 await approvals.deny(approval.id, approver)
-                return _notice("bad", "Write denied", "The agent was told.")
+                what = "Plan" if approval.steps else "Write"
+                return _notice("bad", f"{what} denied", "The agent was told.")
             if action == "once":
                 await approvals.approve(approval.id, approver)
+            elif action == "grant" and approval.steps:
+                raise ApprovalError("a plan is approved as it stands, never as a grant")
             elif action == "grant":
                 max_uses = str(form.get("max_uses", "")).strip()
                 await approvals.approve(
@@ -609,11 +718,13 @@ def approval_routes(approvals: ApprovalBroker, settings: ApproverSettings) -> li
                 400,
             )
         extra = " Similar writes are now allowed by a grant." if action == "grant" else ""
+        made = (
+            f"The {len(approval.steps)} writes are being made now, in order."
+            if approval.steps
+            else "The write is being made now."
+        )
         return _notice(
-            "ok",
-            "Approved",
-            f"The write is being made now.{extra} "
-            "The outcome is posted to the notification thread.",
+            "ok", "Approved", f"{made}{extra} The outcome is posted to the notification thread."
         )
 
     return [

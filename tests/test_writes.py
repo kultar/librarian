@@ -14,6 +14,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from librarian.approvals import ApprovalState, Grant, WriteApproval
+from librarian.audit import MemoryAuditSink
 from librarian.calls import Caller, WriteRequest
 from librarian.config import ApproverSettings
 from librarian.executor import PolicyDenied
@@ -110,7 +111,7 @@ async def test_writes_need_verified_entry_and_write_credential(librarian: Librar
 
 
 async def test_approved_write_runs_exactly_once_with_write_key(
-    librarian: Librarian, router: Router, notifier: RecordingNotifier
+    librarian: Librarian, router: Router, notifier: RecordingNotifier, audit: MemoryAuditSink
 ) -> None:
     hooked: list[str] = []
 
@@ -129,6 +130,9 @@ async def test_approved_write_runs_exactly_once_with_write_key(
     approval = librarian.approvals._approvals[approval_id]  # pyright: ignore[reportPrivateUsage]
     assert approval.state is ApprovalState.EXECUTED
     assert [e for e, _ in notifier.write_events] == ["opened", "closed"]
+    # The record of the write names the approval it was made under.
+    [made] = [event for event in audit.events if event.event == "write"]
+    assert made.extra["approval"] == approval_id and made.status_code == 201
 
 
 async def test_denied_write_is_refused(librarian: Librarian, router: Router) -> None:

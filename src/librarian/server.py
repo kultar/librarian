@@ -60,7 +60,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from librarian import __version__, telemetry
+from librarian import __version__, plans, telemetry
 from librarian.actors import ActorAuthenticator, ActorError
 from librarian.approvals import WriteApproval
 from librarian.calls import Caller, CallRequest, WriteRequest
@@ -137,6 +137,22 @@ def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) 
                 "AUTH_REQUIRED until an approver decides; poll or subscribe for the result. "
                 "If nobody has enabled that operation for writes yet, the task is rejected "
                 "with a message saying the approvers were asked to enable it; retry later."
+            ),
+            tags=["api", "write", "approval"],
+        )
+    )
+    skills.append(
+        AgentSkill(
+            id="plan",
+            name="Request several writes as one plan",
+            description=(
+                "Several writes on one API, shown to the approver together and approved "
+                'once, then made in order: {"skill":"plan","api":"github","reason":"why",'
+                '"steps":[{"id":"blob","operation":"git_create-blob","args":{...},"body":{...}},'
+                '{"id":"tree","operation":"git_create-tree","args":{...},"body":{"tree":[{"sha":'
+                '{"$from":"blob.sha"}}]}}]}. {"$from":"<step>.<field>"} stands for a value an '
+                "earlier step returned. The first step that fails ends the plan; what was "
+                "made before it is not undone. The result lists every step."
             ),
             tags=["api", "write", "approval"],
         )
@@ -256,11 +272,16 @@ class LibrarianExecutor(AgentExecutor):
             )
 
         async def on_approval_required(approval: WriteApproval) -> None:
+            what = (
+                f"A plan of {len(approval.steps)} writes to {approval.api_name}"
+                if approval.steps
+                else f"Write to {approval.api_name} ({approval.operation})"
+            )
             await updater.requires_auth(
                 updater.new_agent_message(
                     [
                         new_text_part(
-                            f"Write to {approval.api_name} ({approval.operation}) is waiting for "
+                            f"{what} is waiting for "
                             f"human approval (approval {approval.id}). This task continues "
                             "automatically once someone approves or denies it."
                         ),
@@ -355,6 +376,22 @@ class LibrarianExecutor(AgentExecutor):
                 "message": outcome.message,
                 "approval": outcome.approval_id,
                 "grant": outcome.grant_id,
+                "result": outcome.result.model_dump(mode="json"),
+            }
+        if skill == "plan":
+            plan = plans.parse(
+                {
+                    k: command[k]
+                    for k in ("api", "steps", "reason", "idempotency_key")
+                    if k in command
+                }
+            )
+            outcome = await librarian.plan(plan, caller, on_approval_required)
+            return {
+                "how": outcome.how,
+                "message": outcome.message,
+                "approval": outcome.approval_id,
+                "steps": outcome.steps,
                 "result": outcome.result.model_dump(mode="json"),
             }
         if skill == "capabilities":

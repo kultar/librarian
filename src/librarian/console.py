@@ -214,9 +214,14 @@ def _waiting_rows(
             f"<td><a href='{e(librarian.broker.link(c))}'>Add a key</a></td></tr>"
         )
     for a in approvals:
+        what = (
+            f"Plan for <b>{e(a.api_name)}</b>: {_n(len(a.steps), 'write')} in order "
+            f"<span class=muted>({e(', '.join(step.operation for step in a.steps)[:120])})</span>"
+            if a.steps
+            else f"Write to <b>{e(a.api_name)}</b>: {_method_text(a)}<code>{e(a.operation)}</code>"
+        )
         rows.append(
-            f"<tr><td>Write to <b>{e(a.api_name)}</b>: {_method_text(a)}"
-            f"<code>{e(a.operation)}</code></td>"
+            f"<tr><td>{what}</td>"
             f"<td>{e(a.agent)}{' for ' + e(a.principal) if a.principal else ''}</td>"
             f"<td>{_when(a.created_at)}</td>"
             f"<td><a href='{e(librarian.approvals.link(a))}'>Decide</a></td></tr>"

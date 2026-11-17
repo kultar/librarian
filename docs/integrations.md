@@ -66,6 +66,10 @@ Things that matter behind LiteLLM:
   by librarian after approval (`write_status` reports the state and, once run, the result with
   `result_as_of`); missing credentials return `credential_pending`. An executed write carries
   `how` (approved, grant, auto or idempotent) and a plain `message` saying so.
+- **A change that takes several writes goes in one `write_plan`** (a blob, a tree, a commit, a
+  branch, a pull request): the approver sees all of it and approves once, and `write_status`
+  lists every step with its state and answer. See
+  [Several writes as one plan](../README.md#several-writes-as-one-plan).
 - **Host header:** librarian accepts any `Host` on `/mcp` by default (the MCP SDK's default
   allows only localhost and answers 421 through a gateway). Pin hosts with `mcp_allowed_hosts`.
 
@@ -177,7 +181,8 @@ approve".
 
 **Waiting on a person.** A write that needs approval answers `pending` at once; the agent can
 end its turn (the actor is suspended, at no cost) and ask `write_status` later. The approval
-does not need the agent to be running.
+does not need the agent to be running. The same holds for a plan (`write_plan`): librarian
+makes its writes once it is approved, whether or not the agent is there.
 
 ### Plain Agent Substrate
 

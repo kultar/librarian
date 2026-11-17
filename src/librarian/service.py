@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import secrets as pysecrets
@@ -30,7 +31,13 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.fallback import FallbackModel
 
 from librarian import telemetry
-from librarian.approvals import ApprovalBroker, ApprovalState, Grant, WriteApproval
+from librarian.approvals import (
+    INTERRUPTED_AFTER,
+    ApprovalBroker,
+    ApprovalState,
+    Grant,
+    WriteApproval,
+)
 from librarian.audit import (
     AuditEvent,
     AuditSink,
@@ -79,6 +86,7 @@ from librarian.openapi import (
 )
 from librarian.opsearch import rank
 from librarian.planner import FetchAnswer, FetchOutcome, Planner
+from librarian.plans import PlanError, PlannedStep, PlanRequest, resolve, step_key
 from librarian.policy import PolicyEngine
 from librarian.publish import GitHubPublisher, Publisher, PublishError
 from librarian.recipes import Recipe, recipe_summary
@@ -162,6 +170,19 @@ class WriteRefused(LibrarianError):
     """The write was denied, expired, or could not be approved."""
 
 
+class _StepNotMade(Exception):
+    """A step of a plan that has no answer. `why` completes "step 2 of 5 (tree) ...";
+    `unknown`: it may have reached the API all the same."""
+
+    def __init__(
+        self, why: str, *, gone: ApiUnavailable | None = None, unknown: bool = False
+    ) -> None:
+        super().__init__(why)
+        self.why = why
+        self.gone = gone
+        self.unknown = unknown
+
+
 class WriteNotEnabled(WriteRefused):
     """The operation is not enabled for writes (or the API has no write credential);
     the approvers have been asked to enable it. Retry once they have."""
@@ -193,11 +214,13 @@ class Applied:
 
 @dataclass
 class WriteOutcome:
-    result: CallResult
+    result: CallResult  # of the write; for a plan, of the last step that was sent
     how: str  # "approved" | "grant" | "auto" | "idempotent"
     approval_id: str | None = None
     grant_id: str | None = None
     message: str = ""  # how it came to run, for the agent
+    # A plan: each step, what became of it and what it answered. None for a single write.
+    steps: list[dict[str, Any]] | None = None
 
 
 ApprovalHook = Callable[[WriteApproval], Awaitable[None]]
@@ -366,6 +389,11 @@ class Librarian:
                 )
                 for i, g in enumerate(settings.writes.grants)
             ],
+        )
+        # A write left "executing" is taken for interrupted only after far longer than
+        # one request (and making its credential) may take here.
+        self.approvals.interrupted_after = max(
+            INTERRUPTED_AFTER, timedelta(seconds=5 * self.executor.deadline_seconds)
         )
         self.recorder = Recorder(
             self.registry,
@@ -728,6 +756,269 @@ class Librarian:
         self._finish_in_background(started, caller)
         return started
 
+    async def plan(
+        self,
+        plan: PlanRequest,
+        caller: Caller,
+        on_approval_required: ApprovalHook | None = None,
+    ) -> WriteOutcome:
+        """Several writes on one API as one request: ask a person once, then make them
+        in order, stopping at the first that fails. Waits for the decision."""
+        started = await self._start_plan(plan, caller)
+        if isinstance(started, WriteOutcome):
+            return started
+        approval = started
+        if on_approval_required is not None:
+            await on_approval_required(approval)
+        approval = await self.approvals.wait(approval.id, max_wait=caller.approval_wait_seconds)
+        if approval.state is ApprovalState.PENDING:
+            await self.approvals.expire(approval.id, f"{caller.agent} stopped waiting")
+        return await self._run_approved(approval, caller)
+
+    async def request_plan(self, plan: PlanRequest, caller: Caller) -> WriteOutcome | WriteApproval:
+        """Like `plan`, but never waits for a human: returns the pending approval, and
+        librarian runs the plan itself once it is approved (callers poll)."""
+        started = await self._start_plan(plan, caller)
+        if isinstance(started, WriteOutcome):
+            return started
+        await self.approvals.mark_detached(started)
+        self._finish_in_background(started, caller)
+        return started
+
+    async def _start_plan(self, plan: PlanRequest, caller: Caller) -> WriteOutcome | WriteApproval:
+        """Check every step as far as it can be checked before the plan runs, then open
+        one approval for all of them. Nothing is sent here."""
+        if plan.idempotency_key:
+            prior = await self._prior_write(plan.idempotency_key, caller)
+            if prior is not None:
+                return prior
+        if self.registry.get(plan.api) is None:
+            await self.registry.refresh_stored()  # learned on another replica?
+        steps: list[PlannedStep] = []
+        to_enable: list[tuple[ApiEntry, Operation, str]] = []
+        entry: ApiEntry | None = None
+        for number, step in enumerate(plan.steps, start=1):
+            request = WriteRequest(
+                api=plan.api, operation=step.operation, args=step.given, body=step.body
+            )
+            decision = self.policy.check_write(
+                request, caller, unresolved=step.unresolved, refers=bool(step.references())
+            )
+            if not decision.allowed or decision.entry is None or decision.operation is None:
+                if decision.askable and decision.entry is not None and decision.operation:
+                    to_enable.append((decision.entry, decision.operation, decision.reason))
+                    continue
+                reason = f"step {number} ({step.id}): {decision.reason}"
+                await self.audit.record(
+                    AuditEvent(
+                        event="write_denied",
+                        caller=caller.agent,
+                        principal=caller.principal,
+                        api=plan.api,
+                        operation=step.operation,
+                        detail=reason,
+                    )
+                )
+                telemetry.write_requests.add(1, {"librarian.api": plan.api, "outcome": "denied"})
+                raise PolicyDenied(reason)
+            entry, op = decision.entry, decision.operation
+            steps.append(
+                PlannedStep(**step.model_dump(), method=op.method, path=op.path, summary=op.summary)
+            )
+        if to_enable:
+            # Operations nobody has enabled yet: ask for all of them at once.
+            first_entry, first_op, reason = to_enable[0]
+            asked = WriteRequest(
+                api=plan.api,
+                operation=first_op.id,
+                reason=plan.reason,
+                also_needs=[op.id for _, op, _ in to_enable[1:]][:20],
+            )
+            raise await self._ask_to_enable(first_entry, first_op, asked, caller, reason)
+        if entry is None:  # cannot be: a plan has at least one step, and all were allowed
+            raise LibrarianError("a plan needs at least one step")
+        allowed = self.policy.write_rate_limiter.per_minute
+        if 0 < allowed < len(steps):
+            # Waiting would not help: say what would, before using up the minute.
+            raise PolicyDenied(
+                f"a plan of {len(steps)} writes is more than {caller.agent!r} may make here "
+                f"in a minute ({allowed}, `writes.rate_limit_per_minute`): split it into "
+                "smaller plans, or have the limit raised"
+            )
+        for _ in steps:  # every step is a write: the plan needs room for all of them
+            limited = await self.policy.rate_limited(caller, entry, write=True)
+            if limited:
+                await self.audit.record(
+                    AuditEvent(
+                        event="write_denied",
+                        caller=caller.agent,
+                        principal=caller.principal,
+                        api=plan.api,
+                        operation="plan",
+                        detail=limited,
+                    )
+                )
+                telemetry.write_requests.add(1, {"librarian.api": plan.api, "outcome": "denied"})
+                raise PolicyDenied(
+                    f"{limited} (a plan of {len(steps)} writes counts as {len(steps)})"
+                )
+        problem = self.approvals.approval_route(
+            caller.requesters(), link_holders=self.settings.approvers.mode == "token"
+        )
+        if problem is not None:
+            raise PolicyDenied(problem)
+        return await self.approvals.open_plan(entry, steps, plan, caller)
+
+    async def _run_plan(self, approval: WriteApproval, caller: Caller) -> WriteOutcome:
+        """Make an approved plan's writes in order. Each step is prepared from what the
+        steps before it answered, checked again as a write (now with every value), sent
+        once, and recorded before the next one starts. The first step that cannot be
+        made or does not succeed ends the plan; what was made before it stays made.
+
+        Like a single write, from the claim on it must reach an end whatever happens."""
+        steps = approval.steps
+        count = len(steps)
+        answers: dict[str, Any] = {}  # by step id: what it answered, in full
+
+        def before(index: int) -> str:
+            if index == 0:
+                return "No step was made before it."
+            made = ", ".join(step.id for step in steps[:index])
+            return f"The steps before it were made and are not undone: {made}."
+
+        async def stopped(index: int, why: str) -> str:
+            """End the plan at this step. Returns the note that says where and why."""
+            note = f"step {index + 1} of {count} ({steps[index].id}) {why} {before(index)}"
+            await self.approvals.finish(approval, False, approval.result, note)
+            telemetry.write_requests.add(1, {"librarian.api": approval.api, "outcome": "failed"})
+            return note
+
+        result: CallResult | None = None
+        for index, step in enumerate(steps):
+            try:
+                result = await self._send_step(approval, step, answers, caller)
+            except _StepNotMade as not_made:
+                if not_made.unknown:
+                    approval.step_unknown = step.id
+                note = f"plan stopped: {await stopped(index, not_made.why)}"
+                gone = not_made.gone
+                if gone is not None:
+                    raise ApiUnavailable(note, sent=gone.sent, reason=gone.reason) from None
+                raise WriteRefused(note) from None
+            stored = result.model_dump(mode="json")
+            if len(json.dumps(stored, default=str)) > 65_536:
+                stored = {**stored, "data": None, "truncated": True}
+            approval.step_results.append(stored)
+            approval.result = stored
+            answers[step.id] = result.data
+            try:
+                ours = await self.approvals.progress(approval)  # on record before the next step
+            except Exception as exc:
+                # The step was made and answered, but that could not be put on record.
+                # Nothing more is sent without a record; the agent is told what is known.
+                log.error(
+                    "plan %s: step %s was made, but could not be recorded (%s)",
+                    approval.id,
+                    step.id,
+                    _where(exc),
+                )
+                approval.step_results[-1] = approval.result = {
+                    **stored,
+                    "data": None,  # in case the answer itself is what could not be kept
+                    "truncated": True,
+                }
+                note = (
+                    f"step {index + 1} of {count} ({step.id}) was made, and nothing after it "
+                    f"was sent: librarian could not record it ({_where(exc)}). {before(index)}"
+                )
+                # If this cannot be recorded either, the plan stays "executing" and is
+                # closed as interrupted later, with the steps recorded so far.
+                with contextlib.suppress(Exception):
+                    await self.approvals.finish(approval, False, approval.result, note)
+                raise WriteRefused(f"plan stopped: {note}") from None
+            if not result.ok:
+                why = (result.error or f"HTTP {result.status_code}").rstrip(".")
+                note = await stopped(index, f"did not succeed: {why}.")
+                return WriteOutcome(
+                    result,
+                    "approved",
+                    approval.id,
+                    None,
+                    f"Plan stopped: {note}",
+                    plan_steps(approval),
+                )
+            if not ours:
+                # Closed as interrupted while this step was on its way (this replica was
+                # not answering for that long). Someone may have acted on that already.
+                note = await stopped(
+                    index,
+                    "was made, and nothing after it was sent: meanwhile the plan had been "
+                    "closed as interrupted, because librarian did not answer for too long.",
+                )
+                raise WriteRefused(f"plan stopped: {note}")
+        if result is None:  # cannot be: an approval is only a plan when it has steps
+            raise WriteRefused("the plan has no steps")
+        await self.approvals.finish(
+            approval, True, approval.result, f"done: {count} writes in order"
+        )
+        telemetry.write_requests.add(1, {"librarian.api": approval.api, "outcome": "executed"})
+        who = f" by {approval.decided_by}" if approval.decided_by else ""
+        return WriteOutcome(
+            result,
+            "approved",
+            approval.id,
+            None,
+            f"Approved{who} as one plan; all {count} writes were made, in order.",
+            plan_steps(approval),
+        )
+
+    async def _send_step(
+        self, approval: WriteApproval, step: PlannedStep, answers: dict[str, Any], caller: Caller
+    ) -> CallResult:
+        """One step of a plan: prepared from what the steps before it answered, checked
+        again as a write, sent once. `_StepNotMade` says why it has no answer."""
+        api = approval.api_name
+        try:
+            request = resolve(
+                step, approval.api, answers, step_key(approval.request.idempotency_key, step.id)
+            )
+            decision = self.policy.recheck_write(request)
+        except PlanError as exc:
+            raise _StepNotMade(f"could not be prepared: {exc}.") from None
+        except Exception as exc:  # ours to have foreseen; the step has not been sent
+            log.error("plan %s, step %s: %s", approval.id, step.id, _where(exc))
+            raise _StepNotMade(
+                f"could not be prepared: librarian failed ({_where(exc)})."
+            ) from None
+        if not decision.allowed or decision.entry is None or decision.operation is None:
+            raise _StepNotMade(f"is no longer allowed: {decision.reason}.")
+        try:
+            return await self.executor.execute_write(
+                decision.entry,
+                decision.operation,
+                request,
+                caller,
+                noted={"approval": approval.id, "step": step.id},
+            )
+        except ApiUnavailable as gone:
+            reached = (
+                f"It may have reached {api}: check before sending it again."
+                if gone.sent
+                else "It was not sent."
+            )
+            raise _StepNotMade(
+                f"got no answer from {api}: {gone.reason}. {reached}", gone=gone, unknown=gone.sent
+            ) from None
+        except (CredentialMissing, PolicyDenied, LibrarianError) as exc:
+            raise _StepNotMade(f"could not be sent: {str(exc).rstrip('.')}.") from None
+        except Exception as exc:
+            log.error("plan %s, step %s: %s", approval.id, step.id, _where(exc))
+            raise _StepNotMade(
+                f"failed inside librarian ({_where(exc)}). It may have reached {api}: check "
+                "before sending it again.",
+                unknown=True,
+            ) from None
+
     def write_status(self, approval: WriteApproval) -> dict[str, Any]:
         status: dict[str, Any] = {
             "approval": approval.id,
@@ -740,6 +1031,8 @@ class Librarian:
         }
         if approval.result is not None:
             status["result"] = approval.result
+        if approval.steps:
+            status["steps"] = plan_steps(approval)
         if approval.state is ApprovalState.EXECUTED:
             when = f" at {approval.executed_at:%Y-%m-%d %H:%M} UTC" if approval.executed_at else ""
             status["result_as_of"] = (
@@ -775,6 +1068,7 @@ class Librarian:
                 prior.grant_id,
                 f"Not sent again: this agent already ran this write with idempotency key "
                 f"{idempotency_key!r}{when}; this is that result.",
+                steps=plan_steps(prior) if prior.steps else None,
             )
         if prior.state is ApprovalState.PENDING:
             return prior
@@ -967,15 +1261,18 @@ class Librarian:
 
     async def _run_approved(self, approval: WriteApproval, caller: Caller) -> WriteOutcome:
         """Run exactly what was approved, once, against the entry as it is now."""
+        what = "plan" if approval.steps else "write"
         if approval.state is not ApprovalState.APPROVED:
             telemetry.write_requests.add(
                 1, {"librarian.api": approval.api, "outcome": approval.state}
             )
             raise WriteRefused(
-                f"write {approval.state}" + (f" ({approval.note})" if approval.note else "")
+                f"{what} {approval.state}" + (f" ({approval.note})" if approval.note else "")
             )
         if not await self.approvals.claim(approval):
-            raise WriteRefused("this approved write is already being run")
+            raise WriteRefused(f"this approved {what} is already being run")
+        if approval.steps:
+            return await self._run_plan(approval, caller)
         current = self.registry.get(approval.api)
         current_op = current.operation(approval.operation) if current is not None else None
         if current is None or current_op is None or not current_op.writable:
@@ -989,7 +1286,7 @@ class Librarian:
         # "executing", nobody could tell whether the write was made or may be retried.
         try:
             result = await self.executor.execute_write(
-                current, current_op, approval.request, caller
+                current, current_op, approval.request, caller, noted={"approval": approval.id}
             )
         except ApiUnavailable as gone:
             await self.approvals.finish(approval, False, None, str(gone))
@@ -2696,6 +2993,33 @@ class Librarian:
         if not result.ok:
             return f"validation call returned HTTP {result.status_code}"
         return None
+
+
+def plan_steps(approval: WriteApproval) -> list[dict[str, Any]]:
+    """Each step of a plan with what became of it, for the agent and for the record."""
+    answered = len(approval.step_results)
+    out: list[dict[str, Any]] = []
+    for index, step in enumerate(approval.steps):
+        result = approval.step_results[index] if index < answered else None
+        if result is not None:
+            state = "made" if result.get("ok") else "failed"
+        elif approval.state in (ApprovalState.PENDING, ApprovalState.APPROVED):
+            state = "waiting"
+        elif approval.state is ApprovalState.EXECUTING:
+            state = "being sent" if index == answered else "waiting"
+        elif step.id == approval.step_unknown:
+            state = "unknown"  # it may or may not have reached the API
+        else:
+            state = "not sent"
+        out.append(
+            {
+                "id": step.id,
+                "operation": step.operation,
+                "state": state,
+                **({"result": result} if result is not None else {}),
+            }
+        )
+    return out
 
 
 def _where(exc: BaseException) -> str:

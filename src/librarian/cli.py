@@ -699,8 +699,12 @@ def approvals_list(config: ConfigOption = None) -> None:
         await librarian.start()
         try:
             for a in librarian.approvals.pending():
+                what = f"{a.api}.{a.operation} args={a.request.args}"
+                if a.steps:
+                    names = ", ".join(step.operation for step in a.steps)
+                    what = f"{a.api}: plan of {len(a.steps)} writes ({names})"
                 typer.echo(
-                    f"{a.id}  {a.agent} → {a.api}.{a.operation} args={a.request.args} "
+                    f"{a.id}  {a.agent} → {what} "
                     f"for={a.principal or '-'} expires {a.expires_at:%Y-%m-%d %H:%M}"
                 )
                 typer.echo(f"    {librarian.approvals.link(a)}")

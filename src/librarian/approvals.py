@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from librarian import telemetry
 from librarian.audit import AuditEvent, AuditSink
 from librarian.calls import ArgValue, Caller, WriteRequest
+from librarian.plans import PlannedStep, PlanRequest
 from librarian.registry.models import ApiEntry, Operation
 
 log = logging.getLogger(__name__)
@@ -71,6 +72,15 @@ class WriteApproval(BaseModel):
     result: dict[str, Any] | None = None  # CallResult as JSON once executed
     executed_at: datetime | None = None  # when the write ran (the result is as of then)
     claimed_at: datetime | None = None  # when a replica took it to run it
+    # A plan: several writes on this API, approved as one and run in order (then
+    # `operation` is "plan" and `request` only carries the reason and idempotency key).
+    steps: list[PlannedStep] = Field(default_factory=list[PlannedStep])
+    # What each step answered, in order, as far as the plan has got (CallResult as JSON).
+    step_results: list[dict[str, Any]] = Field(default_factory=list[dict[str, Any]])
+    progressed_at: datetime | None = None  # when the replica running a plan last recorded a step
+    # The step of a plan that may or may not have reached the API: it got no answer, or
+    # librarian stopped while sending it.
+    step_unknown: str | None = None
     # Requested by a caller that does not wait (e.g. MCP): librarian runs the write
     # itself once approved, and the caller polls for the outcome.
     detached: bool = False
@@ -135,6 +145,35 @@ def _arg_text(value: ArgValue | None) -> str | None:
     return str(value)
 
 
+def _interrupted_plan(approval: WriteApproval) -> tuple[ApprovalState, str]:
+    """How a plan ends that a replica took and never finished: by what it recorded step
+    by step. Sets which step, if any, nobody can tell about."""
+    steps, done = approval.steps, len(approval.step_results)
+    made = ", ".join(step.id for step in steps[:done])
+    if done and not approval.step_results[-1].get("ok"):
+        before = ", ".join(step.id for step in steps[: done - 1])
+        return ApprovalState.FAILED, (
+            f"step {done} of {len(steps)} ({steps[done - 1].id}) did not succeed, and "
+            "librarian stopped before it could record the end. "
+            + (
+                f"The steps before it were made and are not undone: {before}."
+                if before
+                else "No step was made before it."
+            )
+        )
+    if done == len(steps):
+        return ApprovalState.EXECUTED, (
+            f"done: {done} writes in order (librarian stopped before it could record the end)"
+        )
+    approval.step_unknown = steps[done].id
+    return ApprovalState.FAILED, (
+        f"interrupted: librarian stopped during this plan. Of its {len(steps)} steps, "
+        f"{done} had answered ({made or 'none'}); step {done + 1} ({steps[done].id}) may or "
+        f"may not have reached {approval.api_name}, and nothing is undone. Check before "
+        "sending anything again."
+    )
+
+
 class ApprovalStore(Protocol):
     async def save_doc(self, kind: str, doc_id: str, state: str, data: str) -> None: ...
     async def transition_doc(
@@ -185,8 +224,15 @@ class ApprovalBroker:
         self.deciding_group = deciding_group
         # Ceiling on grant length (`writes.max_grant_days`); None: until revoked is allowed.
         self.max_grant_days = max_grant_days
+        # How long a write may be "executing" before it is taken for interrupted. Far
+        # longer than one request can take; the service raises it when requests are
+        # allowed to take longer than usual.
+        self.interrupted_after = INTERRUPTED_AFTER
         self.store = store
         self._approvals: dict[str, WriteApproval] = {}
+        # The approvals this replica is sending right now. Its own copy of one is ahead
+        # of the database until it is finished, and is not replaced by what is read back.
+        self._running: set[str] = set()
         self._events: dict[str, asyncio.Event] = {}
         self._grants: dict[str, Grant] = {g.id: g for g in (config_grants or [])}
         self._lock = asyncio.Lock()
@@ -220,6 +266,16 @@ class ApprovalBroker:
             await self.store.save_doc("grant", grant.id, state, grant.model_dump_json())
 
     async def load(self, approval_id: str) -> WriteApproval | None:
+        """The approval as the database has it now (another replica may have decided or
+        run it), merged into this replica's copy.
+
+        Not while this replica is sending it: then its own copy is the newest there is,
+        and what the database has is behind. Replacing the copy with that (someone asks
+        how the write stands, and the answer arrives a moment late) would take back what
+        the replica has recorded since, such as a step of a plan that has just answered.
+        """
+        if approval_id in self._running:
+            return self._approvals.get(approval_id)
         if self.store is not None:
             data = await self.store.get_doc("approval", approval_id)
             if data is not None:
@@ -229,6 +285,8 @@ class ApprovalBroker:
                     self._approvals[approval_id] = stored
                     self._events.setdefault(approval_id, asyncio.Event())
                     return stored
+                if approval_id in self._running:
+                    return current  # taken to be sent here while the read was on its way
                 for name in WriteApproval.model_fields:
                     setattr(current, name, getattr(stored, name))
                 return current
@@ -443,23 +501,97 @@ class ApprovalBroker:
             self._events[approval.id] = asyncio.Event()
             await self._save(approval)
             await self._remember_key(approval)
+        await self._announce(approval, caller, {"args": request.args})
+        return approval
+
+    async def open_plan(
+        self, entry: ApiEntry, steps: list[PlannedStep], plan: PlanRequest, caller: Caller
+    ) -> WriteApproval:
+        """One approval for several writes, to be run in order once someone approves
+        exactly these. It can only be approved as it is: never remembered as a grant."""
+        fingerprint = plan.fingerprint(caller)
+        async with self._lock:
+            existing = next(
+                (
+                    a
+                    for a in self._approvals.values()
+                    if a.fingerprint == fingerprint and a.state is ApprovalState.PENDING
+                ),
+                None,
+            )
+            if existing is not None:
+                return existing
+            names = ", ".join(step.operation for step in steps)
+            approval = WriteApproval(
+                fingerprint=fingerprint,
+                api=entry.id,
+                api_name=entry.name,
+                host=entry.host,
+                operation="plan",
+                method="PLAN",
+                path=f"{len(steps)} writes in order",
+                summary=f"{len(steps)} writes in order: {names}"[:500],
+                request=WriteRequest(
+                    api=entry.id,
+                    operation="plan",
+                    reason=plan.reason,
+                    idempotency_key=plan.idempotency_key,
+                ),
+                agent=caller.agent,
+                principal=caller.principal,
+                requesters=sorted(caller.requesters()),
+                rememberable=False,
+                expires_at=datetime.now(UTC) + self.expire_after,
+                channel=entry.owners.channel or self.default_channel,
+                approver_group=entry.owners.approver_group or self.default_approver_group,
+                steps=steps,
+            )
+            self._approvals[approval.id] = approval
+            self._events[approval.id] = asyncio.Event()
+            await self._save(approval)
+            await self._remember_key(approval)
+        await self._announce(approval, caller, {"steps": [step.operation for step in steps]})
+        return approval
+
+    async def _announce(
+        self, approval: WriteApproval, caller: Caller, extra: dict[str, Any]
+    ) -> None:
         telemetry.write_requests.add(
-            1, {"librarian.api": entry.id, "outcome": "approval_requested"}
+            1, {"librarian.api": approval.api, "outcome": "approval_requested"}
         )
         await self.audit.record(
             AuditEvent(
                 event="write_requested",
                 caller=caller.agent,
                 principal=caller.principal,
-                api=entry.id,
-                operation=op.id,
-                detail=request.reason or None,
-                extra={"approval": approval.id, "args": request.args},
+                api=approval.api,
+                operation=approval.operation,
+                detail=approval.request.reason or None,
+                extra={"approval": approval.id, **extra},
             )
         )
         await self.notifier.write_opened(approval, self.link(approval))
         await self._save_notifier_ref(approval)
-        return approval
+
+    async def progress(self, approval: WriteApproval) -> bool:
+        """Keep how far a plan has got, and that this replica is still at work on it.
+
+        If the replica stops in the middle, the record then says which steps were made.
+        And a plan takes as long as all its steps together, so each recorded step
+        restarts the clock by which `close_interrupted` tells a stopped replica from a
+        slow API.
+
+        False: by the record the plan is no longer being run (this replica was not
+        answering for so long that the plan was closed as interrupted, and someone may
+        have acted on that). Nothing more of it may be sent.
+        """
+        approval.progressed_at = datetime.now(UTC)
+        if self.store is None:
+            return True
+        executing = ApprovalState.EXECUTING.value
+        return await self.store.transition_doc(
+            "approval", approval.id, executing, executing, approval.model_dump_json()
+        )
 
     async def _save_notifier_ref(self, approval: WriteApproval) -> None:
         """Store where the notifier posted, so the replica that closes the approval can
@@ -620,36 +752,46 @@ class ApprovalBroker:
             return False
         approval.state = ApprovalState.EXECUTING
         approval.claimed_at = datetime.now(UTC)
+        self._running.add(approval.id)  # from here on this replica's copy is the newest
         if self.store is None:
             return True
-        claimed = await self.store.transition_doc(
-            "approval",
-            approval.id,
-            ApprovalState.APPROVED.value,
-            ApprovalState.EXECUTING.value,
-            approval.model_dump_json(),
-        )
+        try:
+            claimed = await self.store.transition_doc(
+                "approval",
+                approval.id,
+                ApprovalState.APPROVED.value,
+                ApprovalState.EXECUTING.value,
+                approval.model_dump_json(),
+            )
+        except BaseException:
+            self._running.discard(approval.id)
+            raise
         if not claimed:
+            self._running.discard(approval.id)
             await self.load(approval.id)  # someone else claimed it; refresh our copy
         return claimed
 
-    async def close_interrupted(self, older_than: timedelta = INTERRUPTED_AFTER) -> int:
+    async def close_interrupted(self, older_than: timedelta | None = None) -> int:
         """End the writes a replica took and never finished (it was stopped, or lost the
         database, in the middle).
 
         Such a write stays "executing" for ever otherwise, and nobody can tell whether it
         was made. It may have been: so it is closed as failed with exactly that said,
-        never run again here. `older_than` is far longer than a write can take, so a
-        write another replica is making right now is left alone.
+        never run again here. `older_than` (by default `interrupted_after`) is far longer
+        than a write can take, so a write another replica is making right now is left
+        alone; a plan is measured from the last step it recorded.
         """
         if self.store is None:
             return 0
+        if older_than is None:
+            older_than = self.interrupted_after
         closed = 0
         now = datetime.now(UTC)
         executing = ApprovalState.EXECUTING.value
         for data in await self.store.list_docs("approval", executing):
             approval = WriteApproval.model_validate_json(data)
-            if now - (approval.claimed_at or approval.created_at) < older_than:
+            last_seen = approval.progressed_at or approval.claimed_at or approval.created_at
+            if now - last_seen < older_than:
                 continue
             approval.state = ApprovalState.FAILED
             approval.note = (
@@ -657,12 +799,15 @@ class ApprovalBroker:
                 f"may or may not have reached {approval.api_name}. Check before sending "
                 "it again."
             )
+            if approval.steps:
+                approval.state, approval.note = _interrupted_plan(approval)
             approval.executed_at = now
             if not await self.store.transition_doc(
                 "approval", approval.id, executing, approval.state.value, approval.model_dump_json()
             ):
                 continue  # it finished, or another replica closed it, in the meantime
             closed += 1
+            self._running.discard(approval.id)
             self._approvals[approval.id] = approval
             self._events.setdefault(approval.id, asyncio.Event()).set()
             log.warning("write %s was interrupted and is closed as failed", approval.id)
@@ -687,7 +832,10 @@ class ApprovalBroker:
         approval.result = result
         approval.note = note
         approval.executed_at = datetime.now(UTC)
-        await self._save(approval)
+        try:
+            await self._save(approval)
+        finally:
+            self._running.discard(approval.id)  # the database has the newest copy again
         await self.notifier.write_closed(approval)
 
     async def _require_pending(self, approval_id: str) -> WriteApproval:

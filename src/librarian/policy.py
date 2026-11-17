@@ -184,10 +184,43 @@ class PolicyEngine:
         what = "write rate limit" if write else "rate limit"
         return f"{what} exceeded for {caller.agent!r} on {entry.id!r}"
 
-    def check_write(self, request: WriteRequest, caller: Caller) -> Decision:
-        """Whether a write may be *requested*. Approval is still required to run it."""
+    def check_write(
+        self,
+        request: WriteRequest,
+        caller: Caller,
+        *,
+        unresolved: frozenset[str] = frozenset(),
+        refers: bool = False,
+    ) -> Decision:
+        """Whether a write may be *requested*. Approval is still required to run it.
+
+        `unresolved`: arguments whose value is not known yet (a step of a plan that takes
+        it from an earlier step's answer). The step is checked again, with every value,
+        before it is sent. `refers`: the step takes something from an earlier step, in an
+        argument or in its body.
+        """
         if not caller.may_write(request.api):
             return Decision.deny(f"caller {caller.agent!r} may not write to API {request.api!r}")
+        return self._write(request, caller, unresolved, refers or bool(unresolved))
+
+    def recheck_write(self, request: WriteRequest) -> Decision:
+        """Whether an approved write may still be sent: the API and the operation as the
+        registry has them now, and the arguments as they are now (a plan's step has just
+        been given what an earlier step answered, which nobody has checked yet).
+
+        Who may ask for it was settled when it was requested, and a person approved it;
+        that is not asked again here. Librarian may be finishing this without the agent,
+        after a restart, and has to come to the same answer then.
+        """
+        return self._write(request, None, frozenset(), False)
+
+    def _write(
+        self,
+        request: WriteRequest,
+        caller: Caller | None,
+        unresolved: frozenset[str],
+        refers: bool,
+    ) -> Decision:
         entry = self.registry.get(request.api)
         if entry is None:
             return Decision.deny(f"unknown API {request.api!r}")
@@ -198,11 +231,30 @@ class PolicyEngine:
         op = entry.operation(request.operation)
         if op is None:
             return Decision.deny(f"unknown operation {request.operation!r} on {entry.id!r}")
-        # Before anything an approver could be asked about: a call outside the agent's
-        # limits is refused, not turned into a request to enable it.
-        outside = caller.outside_limits(entry.id, op, request.args)
-        if outside:
-            return Decision.deny(outside)
+        if caller is not None:
+            # Before anything an approver could be asked about: a call outside the agent's
+            # limits is refused, not turned into a request to enable it.
+            limits = caller.limits_for(entry.id)
+            later = sorted(unresolved & set(limits.arguments)) if limits is not None else []
+            if later:
+                # A limited argument has to be in the plan, for this check and for the
+                # approver to see: the agent's limits are not looked at again when the
+                # step is sent.
+                return Decision.deny(
+                    f"caller {caller.agent!r} is limited on API {entry.id!r}: the argument "
+                    f"{later[0]!r} must be given in the plan itself, not taken from an "
+                    "earlier step"
+                )
+            outside = caller.outside_limits(entry.id, op, request.args)
+            if outside:
+                return Decision.deny(outside)
+        if refers and op.method.upper() == "DELETE":
+            # The approver has to see what is removed. A DELETE is never approved for
+            # more than the one request shown; here part of the request would not be.
+            return Decision.deny(
+                f"operation {op.id!r} is a DELETE: what it deletes has to be written in the "
+                "plan itself, not taken from an earlier step"
+            )
         if not op.writable:
             return Decision.deny(
                 f"operation {op.id!r} is not enabled for writes",
@@ -222,19 +274,21 @@ class PolicyEngine:
             )
         if request.body is not None and not op.accepts_body:
             return Decision.deny(f"operation {op.id!r} does not accept a request body")
-        problem = _check_args(op, request.args)
+        problem = _check_args(op, request.args, unresolved)
         if problem:
             return Decision.deny(problem)
         return Decision(True, "write may be requested", entry, op)
 
 
-def _check_args(op: Operation, args: dict[str, ArgValue]) -> str | None:
+def _check_args(
+    op: Operation, args: dict[str, ArgValue], unresolved: frozenset[str] = frozenset()
+) -> str | None:
     declared = {p.name: p for p in op.parameters}
-    unknown = sorted(set(args) - set(declared))
+    unknown = sorted((set(args) | unresolved) - set(declared))
     if unknown:
         return f"unknown arguments for {op.id!r}: {', '.join(unknown)}"
     for param in op.parameters:
-        if param.required and param.name not in args:
+        if param.required and param.name not in args and param.name not in unresolved:
             return f"missing required argument {param.name!r} for {op.id!r}"
     for name, value in args.items():
         param = declared[name]

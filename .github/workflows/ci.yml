@@ -12,9 +12,13 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # The suite takes a few minutes. A test that waits for ever on something that never
+    # comes should fail the run, not hold a runner for hours.
+    timeout-minutes: 20
     services:
-      # For the tests that store what a misbehaving API answers: Postgres is stricter than
-      # SQLite about what text and JSON may hold (tests/test_hostile_api.py).
+      # For the tests about what is kept: Postgres is stricter than SQLite about what text
+      # and JSON may hold, and really runs two replicas' queries at once
+      # (tests/test_hostile_api.py, tests/test_plans.py).
       postgres:
         image: postgres:16-alpine
         env:

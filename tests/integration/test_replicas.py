@@ -6,6 +6,7 @@ Run:  docker compose -p libint -f tests/integration/replicas/docker-compose.yaml
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -16,7 +17,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import httpx2
 import pytest
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
 from tests.integration.conftest import wait_until_up
 
@@ -174,6 +178,117 @@ def test_write_requested_on_a_is_approved_on_b_with_json_key_secret() -> None:
     # five characters long, too short for librarian to remove from an answer (it would
     # mangle ordinary data), which is what lets this test see which value was sent.
     assert echoed["headers"]["Authorization"] == ["Bearer w-123"]
+
+
+def plan_steps() -> list[dict[str, Any]]:
+    """Three writes. The second sends what the first answered; the third goes where the
+    second's answer says (the test API answers with the request it received)."""
+    return [
+        {
+            "id": "first",
+            "operation": "postComment",
+            "args": {"key": "PAY-1"},
+            "body": {"body": "one"},
+        },
+        {
+            "id": "second",
+            "operation": "postComment",
+            "args": {"key": "PAY-2"},
+            "body": {"body": "two", "after": {"$from": "first.json.body"}},
+        },
+        {
+            "id": "third",
+            "operation": "postComment",
+            "args": {"key": {"$from": "second.json.after"}},
+            "body": {"body": "three"},
+        },
+    ]
+
+
+def decide(base: str, link: str, action: str = "once") -> httpx.Response:
+    """What an approver does with a link: press a button on the page it opens."""
+    approval_id, token = re.search(r"/approvals/([0-9a-f]+)\?t=(\w+)", link).groups()  # type: ignore[union-attr]
+    return httpx.post(f"{base}/approvals/{approval_id}", data={"t": token, "action": action})
+
+
+def check_plan_made(steps: list[dict[str, Any]]) -> None:
+    assert [(step["id"], step["state"]) for step in steps] == [
+        ("first", "made"),
+        ("second", "made"),
+        ("third", "made"),
+    ]
+    sent = [step["result"]["data"] for step in steps]
+    assert [answer["url"].rsplit("/", 1)[-1] for answer in sent] == ["PAY-1", "PAY-2", "one"]
+    assert [json.loads(answer["data"]) for answer in sent] == [
+        {"body": "one"},
+        {"body": "two", "after": "one"},
+        {"body": "three"},
+    ]
+
+
+def test_a_plan_asked_for_on_a_is_approved_on_b_and_made_in_order() -> None:
+    task = send(
+        A,
+        {"skill": "plan", "api": "echo", "reason": "integration test", "steps": plan_steps()},
+    )
+    assert task["status"]["state"] == "TASK_STATE_AUTH_REQUIRED"
+    link = logged_link("librarian-a", "approvals")
+    page = httpx.get(on(B, link))  # the other replica shows the plan, every request of it
+    assert page.status_code == 200 and "Approve a plan for Echo" in page.text
+    assert "<code>/anything/comments/PAY-1</code>" in page.text
+    assert "<code>/anything/comments/{key}</code>" in page.text  # where it goes is not known yet
+    assert "from step <code>second</code>" in page.text
+    refused = decide(B, link, "grant")
+    assert refused.status_code == 400 and "never as a grant" in refused.text
+    approved = decide(B, link)
+    assert "The 3 writes are being made now, in order." in approved.text, approved.text
+
+    made = artifact(wait_task(A, task["id"]))
+    assert (
+        made["message"] == "Approved by link holder as one plan; all 3 writes were made, in order."
+    )
+    check_plan_made(made["steps"])
+
+
+async def test_a_plan_over_mcp_reads_the_same_on_both_replicas() -> None:
+    """Nothing waits on a person over MCP: librarian makes the plan itself once approved.
+    Asked how it stands, the replica that makes it and the one that only reads the record
+    say the same."""
+
+    async def tool(base: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        http = httpx2.AsyncClient(headers={"Authorization": "Bearer key-a"}, timeout=60)
+        async with (
+            http,
+            streamable_http_client(f"{base}/mcp", http_client=http) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool(name, arguments)
+            assert not result.is_error, result.content
+            return result.structured_content or {}
+
+    asked = await tool(
+        A, "write_plan", {"api": "echo", "reason": "integration test", "steps": plan_steps()}
+    )
+    assert asked["status"] == "pending_approval", asked
+    assert [step["state"] for step in asked["steps"]] == ["waiting"] * 3
+    link = logged_link("librarian-a", "approvals")
+    approval_id: str = asked["approval"]
+    assert f"/approvals/{approval_id}?" in link
+    approved = decide(B, link)
+    assert "The 3 writes are being made now, in order." in approved.text, approved.text
+
+    seen: dict[str, dict[str, Any]] = {}
+    for _ in range(120):
+        for base in (A, B):
+            seen[base] = await tool(base, "write_status", {"approval": approval_id})
+            assert len(seen[base]["steps"]) == 3
+        if all(status["state"] == "executed" for status in seen.values()):
+            break
+        await asyncio.sleep(0.25)
+    assert seen[A]["state"] == seen[B]["state"] == "executed", seen
+    check_plan_made(seen[A]["steps"])
+    assert seen[A]["steps"] == seen[B]["steps"]
 
 
 def test_pending_request_and_its_link_survive_a_restart() -> None:

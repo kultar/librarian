@@ -26,6 +26,7 @@ import httpx
 import pytest
 from sqlalchemy import text as sql
 
+from librarian import plans
 from librarian.approvals import ApprovalState
 from librarian.audit import MemoryAuditSink
 from librarian.calls import Caller, CallRequest, WriteRequest
@@ -40,15 +41,18 @@ from tests.hostile import BEHAVIOURS, KEYS, READ_KEY, WRITE_KEY, Behaviour
 from tests.surfaces import (
     APPROVER,
     ENDED,
+    PLAN,
     READ,
     WRITE,
     Reply,
+    a2a_plan,
     a2a_read,
     a2a_served,
     a2a_task,
     a2a_write,
     approve_the_write,
     mcp_at,
+    mcp_plan,
     mcp_read,
     mcp_write,
     mcp_write_in,
@@ -93,6 +97,17 @@ async def service_write(librarian: Librarian) -> Reply:
     return Reply("completed", result.error or "", result.model_dump(mode="json"), _json(result))
 
 
+async def service_plan(librarian: Librarian) -> Reply:
+    task = asyncio.create_task(librarian.plan(plans.parse(PLAN), AGENT))
+    await approve_the_write(librarian)
+    try:
+        outcome = await asyncio.wait_for(task, 10)
+    except (PolicyDenied, LibrarianError) as exc:
+        return Reply("failed", str(exc), None, str(exc))
+    given = {"steps": outcome.steps, "result": outcome.result.model_dump(mode="json")}
+    return Reply("completed", outcome.message, given, json.dumps(given))
+
+
 def _json(result: Any) -> str:
     return str(result.model_dump_json())
 
@@ -100,6 +115,7 @@ def _json(result: Any) -> str:
 Surface = Callable[..., Awaitable[Reply]]
 READS: dict[str, Surface] = {"service": service_read, "a2a": a2a_read, "mcp": mcp_read}
 WRITES: dict[str, Surface] = {"service": service_write, "a2a": a2a_write, "mcp": mcp_write}
+PLANS: dict[str, Surface] = {"service": service_plan, "a2a": a2a_plan, "mcp": mcp_plan}
 
 
 @pytest.fixture
@@ -211,6 +227,53 @@ async def test_a_write_survives(
     hostile(behaviour)
     reply = await WRITES[surface](librarian)
     check(reply, behaviour, librarian, audit, notifier, caplog, write=True)
+
+
+@pytest.mark.parametrize("surface", PLANS)
+@pytest.mark.parametrize("name", BEHAVIOURS)
+async def test_a_plan_survives(
+    name: str,
+    surface: str,
+    hostile: Callable[[Behaviour], None],
+    librarian: Librarian,
+    router: Router,
+    audit: MemoryAuditSink,
+    notifier: RecordingNotifier,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same in the middle of a plan of three writes. Beyond what holds for one write:
+    the write after it is only sent when it succeeded and answered what that write needs,
+    and the plan ends saying how far it got."""
+    behaviour = BEHAVIOURS[name]
+    hostile(behaviour)  # what the middle step meets
+    received: dict[str, Any] = {}
+
+    def as_usual(request: httpx.Request) -> httpx.Response:
+        received[request.url.path.split("/")[-2]] = json.loads(request.content)
+        return httpx.Response(201, json={"id": 9})
+
+    router.add("POST", f"{BASE}/v1/issues/PAY-0/comments", as_usual)
+    router.add("POST", f"{BASE}/v1/issues/PAY-2/comments", as_usual)
+    reply = await PLANS[surface](librarian)
+    check(reply, behaviour, librarian, audit, notifier, caplog, write=True)
+    [approval] = librarian.approvals._approvals.values()  # pyright: ignore[reportPrivateUsage]
+    assert "PAY-0" in received and len(approval.steps) == 3
+    answers = approval.step_results
+    middle = answers[1] if len(answers) > 1 else None
+    if "PAY-2" in received:
+        # It went on: so the middle step succeeded, and what the last one was given from
+        # its answer is what the agent was shown of it (never a key).
+        assert middle is not None and middle["ok"], middle
+        assert received["PAY-2"]["after"] == middle["data"]["id"]
+        assert approval.state is ApprovalState.EXECUTED and len(answers) == 3
+    else:
+        assert approval.state is ApprovalState.FAILED and len(answers) <= 2
+        where = "step 2 of 3 (middle)" if middle is None or not middle["ok"] else "step 3 of 3"
+        assert where in (approval.note or ""), approval.note
+        if behaviour.silent:
+            assert middle is None  # no answer: none is on record
+    for key in KEYS:
+        assert key not in json.dumps(received), "a later step was sent a key"
 
 
 # -- what is kept -----------------------------------------------------------------------

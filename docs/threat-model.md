@@ -43,6 +43,22 @@ high-value target. This document lists what we defend against, how, and what is 
 - Writes are sent exactly once and never follow redirects (a 307/308 would replay the write).
   `Idempotency-Key` is forwarded and idempotent retries return the first result, on any replica
   and after a restart (the key is indexed with the write in the database).
+- **Plans** (several writes approved as one): a plan is on one API, so what a step answers
+  only ever goes back to the API that said it. Every step passes the same policy check as a
+  write before anyone is asked, and the approval is bound to exactly these steps (a
+  fingerprint of agent, principal and every step); a plan never runs under a grant or
+  automatic approval and cannot become a grant. A value taken from an earlier step
+  (`{"$from": ...}`) is shown to the approver as a reference, filled in when the plan runs,
+  and the step is then checked again as a write with the real value, against the registry
+  as it is at that moment. An argument an agent's limits restrict cannot be a reference, and
+  a DELETE cannot take anything from an earlier step: what it removes is in the plan. A
+  credential an API echoes is removed from a step's answer before the next step can take
+  anything from it. The first step that fails or cannot be checked ends the plan; each step
+  is recorded before the next is sent, so a stopped replica leaves a record of how far it
+  got, and a plan closed as interrupted is never carried on. **Residual risk:** nothing is
+  undone, so a plan that stops part of the way leaves what it had made; and the approver
+  decides on a reference without seeing the value the API will put there (it comes from the
+  same API the write goes to, and only into the place shown).
 - The planner can only *propose* writes; proposals go back to the calling agent.
 - Per-agent `write_apis` allowlists and a separate, lower write rate limit.
 - **Limits inside an API** (`limits` on a caller or a Substrate rule): the operations an agent
@@ -237,8 +253,11 @@ audited; and the operator, through the database, the config and the registry dir
 - **A write always ends.** Once a replica has taken an approved write to send it, its approval
   reaches a final state whatever happens: the API's answer, "not sent", "may have reached the
   API", or, if the replica stopped in the middle, "interrupted" (closed after fifteen minutes,
-  never sent again by librarian). A repeat with the same idempotency key is refused while the
-  first is still open. An agent is told which of these it was, never "internal error".
+  or longer where requests are allowed to take long; never sent again by librarian). A plan
+  is measured from the last step it recorded, and a replica that comes back after its plan
+  was closed sends nothing more of it. A repeat with the same idempotency key is refused
+  while the first is still open. An agent is told which of these it was, never "internal
+  error".
 - These are tested as a whole: `tests/hostile.py` is a fake API with every misbehaviour we
   know of, and each one runs through every way an agent reaches librarian (the service, A2A,
   MCP), for a read and for an approved write, with the same three claims checked each time:

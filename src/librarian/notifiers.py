@@ -251,7 +251,7 @@ class SlackNotifier(Notifier):
             "chat.postMessage",
             {
                 "channel": approval.channel or self.default_channel,
-                "text": f"Write approval needed: {approval.api_name} {approval.operation}",
+                "text": f"{_needed(approval)}: {approval.api_name} {_what(approval)}",
                 "blocks": write_blocks(approval, link, people),
             },
         )
@@ -268,7 +268,7 @@ class SlackNotifier(Notifier):
             {
                 "channel": ref["channel"],
                 "ts": ref["ts"],
-                "text": f"{approval.api_name} {approval.operation}: {approval.state}",
+                "text": f"{approval.api_name} {_what(approval)}: {approval.state}",
                 "blocks": write_blocks(approval, None, []),
             },
         )
@@ -605,14 +605,27 @@ def write_outcome_text(approval: WriteApproval) -> str:
     who = f" by {approval.decided_by}" if approval.decided_by else ""
     remembered = " (similar writes allowed by a new grant)" if approval.decision == "grant" else ""
     note = f" · {approval.note}" if approval.note else ""
-    return (
-        f"{icon} {approval.api_name} `{approval.operation}` {approval.state}{who}{remembered}{note}"
-    )
+    what = _what(approval) if approval.steps else f"`{approval.operation}`"
+    return f"{icon} {approval.api_name} {what} {approval.state}{who}{remembered}{note}"
+
+
+def _what(approval: WriteApproval) -> str:
+    """What an approval is for, in a few words: the operation, or how big a plan."""
+    return f"plan of {len(approval.steps)} writes" if approval.steps else approval.operation
+
+
+def _needed(approval: WriteApproval) -> str:
+    return "Plan approval needed" if approval.steps else "Write approval needed"
 
 
 def write_reply(approval: WriteApproval) -> str:
     """The thread reply under a write card: what actually happened, in a few words."""
     who = f" by {approval.decided_by}" if approval.decided_by else ""
+    if approval.state is ApprovalState.EXECUTED and approval.steps:
+        return (
+            f":white_check_mark: Done: all {len(approval.steps)} writes of the plan were "
+            f"made on {approval.api_name}, in order."
+        )
     if approval.state is ApprovalState.EXECUTED:
         status = (approval.result or {}).get("status_code")
         code = f"HTTP {int(status)}" if isinstance(status, int | float) else "a response"
@@ -621,7 +634,8 @@ def write_reply(approval: WriteApproval) -> str:
         )
         return f":white_check_mark: Done: {approval.api_name} answered {code}.{grant}"
     if approval.state is ApprovalState.FAILED:
-        return f":x: Approved{who}, but the write failed: {approval.note or 'unknown error'}"
+        what = "the plan stopped" if approval.steps else "the write failed"
+        return f":x: Approved{who}, but {what}: {approval.note or 'unknown error'}"
     if approval.state is ApprovalState.DENIED:
         return f":no_entry: Denied{who}. Nothing was sent."
     if approval.state is ApprovalState.EXPIRED:
@@ -634,17 +648,30 @@ def write_blocks(
 ) -> list[dict[str, Any]]:
     pending = approval.state is ApprovalState.PENDING
     title = (
-        f":pencil2: Write approval needed: {approval.api_name}"
+        f":pencil2: {_needed(approval)}: {approval.api_name}"
         if pending
         else write_outcome_text(approval)
     )
     request = approval.request
-    fields = [
-        f"*Operation:*\n`{approval.operation}`\n{approval.method} {approval.path}",
-        f"*Agent:*\n{approval.agent}",
-        f"*For:*\n{approval.principal or '(no person; autonomous)'}",
-        f"*Arguments:*\n`{json.dumps(request.args)[:500]}`",
-    ]
+    if approval.steps:
+        listed = "\n".join(
+            f"{number}. `{step.operation}` {step.method} {step.path}"[:150]
+            for number, step in enumerate(approval.steps[:10], start=1)
+        )
+        more = len(approval.steps) - 10
+        fields = [
+            f"*Plan:* {len(approval.steps)} writes, in order\n{listed}"
+            + (f"\n…and {more} more" if more > 0 else ""),
+            f"*Agent:*\n{approval.agent}",
+            f"*For:*\n{approval.principal or '(no person; autonomous)'}",
+        ]
+    else:
+        fields = [
+            f"*Operation:*\n`{approval.operation}`\n{approval.method} {approval.path}",
+            f"*Agent:*\n{approval.agent}",
+            f"*For:*\n{approval.principal or '(no person; autonomous)'}",
+            f"*Arguments:*\n`{json.dumps(request.args)[:500]}`",
+        ]
     if request.reason:
         fields.append(f"*Why:*\n{request.reason[:500]}")
     blocks: list[dict[str, Any]] = [
@@ -666,11 +693,19 @@ def write_blocks(
                 "text": {
                     "type": "mrkdwn",
                     "text": (f"{who} " if who else "")
-                    + "Approve once, approve and allow similar writes, or deny.",
+                    + (
+                        "Every write is on the review page. Approve the plan as it stands, "
+                        "or deny it."
+                        if approval.steps
+                        else "Approve once, approve and allow similar writes, or deny."
+                    ),
                 },
                 "accessory": {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "Review write"},
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Review plan" if approval.steps else "Review write",
+                    },
                     "url": link,
                     "style": "danger",
                     "action_id": "librarian_review_write",

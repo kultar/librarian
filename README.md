@@ -117,14 +117,16 @@ GitHub is written to, never asked: nothing merged or edited there changes what a
 | `capabilities` | List APIs and read operations: `{"skill":"capabilities","query":"issues"}` | No |
 | `onboard` | Learn an API: `{"skill":"onboard","api":"jira","spec_url":"https://..."}`, `"base_url"` to auto-discover, or `"docs_url"` + `"base_url"` when there is no spec | No |
 | `write` | Change data, with human approval or a grant: `{"skill":"write","api":"jira","operation":"addComment","args":{...},"body":{...},"reason":"why"}`. Optional `idempotency_key`: a repeat returns the first result instead of running again. The answer says how it ran (approved by whom, under which grant, or automatically) | No |
+| `plan` | Several writes on one API, approved as one and made in order: `{"skill":"plan","api":"github","reason":"why","steps":[{"id":"blob","operation":"...","args":{...},"body":{...}}, ...]}`. A later step takes a value an earlier one returned with `{"$from":"blob.sha"}` ([more](#several-writes-as-one-plan)) | No |
 | `fetch` | Plain language: *"open bugs assigned to the payments team"* (only when a model is configured) | Yes |
 
 The same skills are available as **MCP tools** at `/mcp` (Streamable HTTP, same caller keys):
-`capabilities`, `execute`, `fetch`, `write`, `write_status`, `enable_status`, `onboard`. MCP calls
-never wait on a human: writes return `pending_approval` and librarian finishes them once
-approved (`write_status` reports where a write stands and, once run, its result dated as of
-execution), or `write_not_enabled` when nobody has enabled that operation yet (approvers are
-asked; `enable_status` says where the request stands). librarian
+`capabilities`, `execute`, `fetch`, `write`, `write_plan`, `write_status`, `enable_status`,
+`onboard`. MCP calls never wait on a human: writes and plans return `pending_approval` and
+librarian finishes them once approved (`write_status` reports where a write stands and, once
+run, its result dated as of execution; for a plan, every step), or `write_not_enabled` when
+nobody has enabled that operation yet (approvers are asked; `enable_status` says where the
+request stands). librarian
 works behind the **LiteLLM** gateway as both an MCP server and an A2A agent
 ([docs/integrations.md](docs/integrations.md#litellm-agent-gateway)).
 
@@ -243,8 +245,8 @@ The JSONL audit log is separate and always on.
   is approved (or `librarian discover <api>`), and the planner sees the relevant entries.
 - **Recipes.** A successful plain-language request is saved as a template: "Is PAY-1 open?"
   becomes `Is {p0} open`, and "Is PAY-7 open?" later replays the same calls **without the LLM**
-  (still policy-checked, with the caller's permissions). Plans whose later calls use values from
-  earlier results are never saved. `librarian recipes list|delete`; `recipes_enabled: false`
+  (still policy-checked, with the caller's permissions). Requests whose later calls use values
+  from earlier results are never saved. `librarian recipes list|delete`; `recipes_enabled: false`
   turns it off.
 
 ## APIs without a spec, and APIs that change
@@ -518,6 +520,11 @@ No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 <td align="center"><em>Approving one write: exactly what will be sent.</em></td>
 </tr></table>
 
+<p align="center">
+<img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/approve-plan.png" alt="The approval page of a plan: six requests in order, each with its path and body, and the values that will come from an earlier step marked" width="380"><br>
+<em>Approving a plan: a commit and its pull request are six requests and one decision.</em>
+</p>
+
 ## The console
 
 The pages listener's root (`/`) is a console for the people who run librarian, with pages for
@@ -630,6 +637,76 @@ audit log and on the Activity page.
 An agent with no owner and no person can only be approved by the approver group; if no one could
 approve, the write is refused immediately. `librarian grants list|revoke` and `librarian approvals
 list` manage it all; revoking is the kill switch.
+
+## Several writes as one plan
+
+Some changes are one decision made of several requests. A commit through GitHub's API is a
+blob, a tree, a commit and a branch, and then a pull request. Asked for one at a time, each
+needs its own approval, and the approver sees each without the others. A **plan** puts them
+in front of the approver together: every request as it will be sent, in the order it will be
+sent, approved once.
+
+```json
+{"skill": "plan", "api": "github", "reason": "Release notes for 2.4",
+ "steps": [
+  {"id": "blob", "operation": "git_create-blob",
+   "args": {"owner": "acme", "repo": "payments"},
+   "body": {"content": "## 2.4\n...", "encoding": "utf-8"}},
+  {"id": "tree", "operation": "git_create-tree",
+   "args": {"owner": "acme", "repo": "payments"},
+   "body": {"base_tree": "4f2a91...", "tree": [
+     {"path": "NOTES.md", "mode": "100644", "type": "blob", "sha": {"$from": "blob.sha"}}]}},
+  {"id": "commit", "operation": "git_create-commit",
+   "args": {"owner": "acme", "repo": "payments"},
+   "body": {"message": "Release notes for 2.4", "tree": {"$from": "tree.sha"},
+            "parents": ["9fb037..."]}},
+  {"id": "branch", "operation": "git_create-ref",
+   "args": {"owner": "acme", "repo": "payments"},
+   "body": {"ref": "refs/heads/notes-2.4", "sha": {"$from": "commit.sha"}}},
+  {"id": "pull", "operation": "pulls_create",
+   "args": {"owner": "acme", "repo": "payments"},
+   "body": {"title": "Release notes for 2.4", "head": "notes-2.4", "base": "main"}}
+ ]}
+```
+
+`{"$from": "blob.sha"}` stands for the value at `sha` in what the step called `blob` answered
+(`commit.tree.sha` goes deeper; a number picks from a list). It can be an argument or sit
+anywhere in a body, and it can only point at a step before it. Over MCP the tool is
+`write_plan`, with the same `api`, `steps` and `reason`; it answers `pending_approval`, and
+`write_status` then shows every step.
+
+What holds for a plan:
+
+- **One API, writes only, at most 20 steps.** What a step answers only ever goes back to the
+  API that said it. Read what the plan needs first (a read needs no approval) and write the
+  values into it, where the approver sees them.
+- **Every step is checked before anyone is asked**, as the write it is: the agent may write
+  there, the operation is enabled, the arguments are valid, the agent's
+  [limits](#limits-inside-an-api) hold. An argument that those limits restrict has to be
+  written in the plan, not taken from an earlier step; and so has everything a DELETE is
+  sent, so that the approver sees what is removed. Operations nobody has enabled yet are
+  asked for together, in one enable request.
+- **A person approves exactly this plan, once.** The approval page shows each request where
+  it will go, with its body, and marks what an earlier step will supply. A plan never runs
+  under a grant or automatic approval, even when each of its writes
+  would, and cannot be approved "and allow similar". A plan changed anywhere is another
+  plan. Against the write rate limit it counts as as many writes as it has steps, so
+  `writes.rate_limit_per_minute` (10 by default) is also the longest plan an agent can ask
+  for.
+- **Each step is checked again when its turn comes**, with the values now filled in (what an
+  API answers is not trusted to be a safe argument) and against the registry as it is then
+  (an operation disabled or suspended in the meantime is not sent).
+- **The first step that fails ends the plan, and nothing is undone.** librarian cannot take
+  back what an API has done, so order the steps so that a plan that stops part of the way
+  leaves nothing harmful (above: objects nothing refers to until the branch exists). The
+  outcome names the step and what was made before it, and gives every step its answer and a
+  state: `made`, `failed`, `not sent`, or `unknown` when the request went out and no answer
+  came back.
+- **It ends, like any write.** Each step is recorded before the next is sent. If librarian
+  stops in the middle, the plan is closed with how far it got and is never carried on by
+  itself.
+- With an `idempotency_key`, asking again returns the first outcome instead of running the
+  plan again, and each step is sent with a key of its own made from it.
 
 ## The registry
 
@@ -838,7 +915,12 @@ uv run pytest
   full in the console.
   Limits inside an API: an agent's rule can name the operations it may use and the values its
   arguments may take (`limits`), enforced by the policy engine for reads, writes and planned
-  calls
+  calls.
+  Several writes as one plan (`plan` over A2A, `write_plan` over MCP): the approver sees every
+  request of a change together and approves once; later steps take what earlier ones
+  returned; each step is checked again before it is sent; the first failure ends the plan
+  and says what was made. The audit record of a write now names the approval it was made
+  under
 
 ### Next
 

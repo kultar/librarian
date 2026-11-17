@@ -447,12 +447,19 @@ class Executor:
         )
 
     async def execute_write(
-        self, entry: ApiEntry, op: Operation, request: WriteRequest, caller: Caller
+        self,
+        entry: ApiEntry,
+        op: Operation,
+        request: WriteRequest,
+        caller: Caller,
+        *,
+        noted: Mapping[str, Any] | None = None,
     ) -> CallResult:
         """Send one approved write. Callers must have checked policy and approval first.
 
         The request is sent exactly once and redirects are never followed: a 307/308
-        would replay the write against another URL.
+        would replay the write against another URL. `noted` goes into the audit record
+        of this write as it is: the approval it was made under and, for a plan, the step.
         """
         auth = entry.write_auth
         stored: str | None = None
@@ -480,7 +487,7 @@ class Executor:
         if request.idempotency_key:
             headers.setdefault("Idempotency-Key", request.idempotency_key)
         excerpt = json.dumps(request.body, default=str)[:2000] if request.body is not None else None
-        sent: dict[str, Any] = {"args": request.args, "body_excerpt": excerpt}
+        sent: dict[str, Any] = {**(noted or {}), "args": request.args, "body_excerpt": excerpt}
         if cred.note:
             sent["credential"] = cred.note
         attributes = {

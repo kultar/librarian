@@ -35,6 +35,47 @@ gets `write_not_enabled` instead and the approvers are asked: the card (Slack) a
 waiting list lead to a page with Enable or Decline. "approvers declined to enable it" means
 someone declined within the last week; the console's API page can still enable it.
 
+**"invalid plan: ..."**
+The plan itself is not well formed; the words after it say where (`steps.1.args.repo`) and
+what. A step needs an `id` (lower case letters, digits, `-` and `_`, starting with a letter)
+and an `operation`. A reference is written `{"$from": "<step id>.<field>"}`, as the whole
+value, and can only name a step that comes before it. After the step id come field names
+(letters, digits, `-` and `_`) and positions in a list, separated by dots: `pull.head.sha`,
+`files.0.sha`.
+
+**"step 3 (commit): ..."** (when asking for a plan)
+That step would be refused as a write on its own, for the reason given: fix it and ask
+again. Nobody was asked to approve anything. "the argument ... must be given in the plan
+itself" means the agent's limits restrict that argument, so its value has to be written in
+the plan instead of being taken from an earlier step. "is a DELETE: what it deletes has to
+be written in the plan itself" means a DELETE step used `$from`: an approver has to see what
+is removed, so write the value in, or ask for the delete on its own once the id is known.
+
+**"plan stopped: step 3 of 5 (commit) ..."**
+The plan was approved and ended at that step. What follows says why, and which steps were
+made before it; nothing is undone, and the steps after it were not sent. `write_status`
+gives each step's state and answer.
+- *did not succeed: HTTP 422*: the API refused that step. Its answer is in the step's result.
+- *could not be prepared: what step 'blob' answered has no 'sha'*: an earlier step did not
+  answer what a reference expected. Look at that step's answer and correct the reference.
+- *is no longer allowed: ...*: checked again just before it was sent, the step would be
+  refused: a value filled in from an earlier answer is not a valid argument, or the
+  operation was disabled or suspended after the plan was approved.
+- *got no answer from ...: ... It was not sent*: nothing left librarian for that step.
+- *... It may have reached ...*: the request went out and no answer came back; the step's
+  state is `unknown`. Read the resource before asking for anything again.
+- *interrupted: librarian stopped during this plan*: the replica running it was stopped. The
+  note says how many steps had answered and which one may or may not have arrived.
+
+To finish a stopped plan, ask for a new one with the steps that are left, writing in the
+values the steps already made returned (they are in `write_status`).
+
+**"a plan of 12 writes is more than ... may make here in a minute"**
+A plan counts against the write rate limit as as many writes as it has steps, so one with
+more steps than `writes.rate_limit_per_minute` (10 by default) can never be accepted. Split
+it, or raise the limit. "write rate limit exceeded ... (a plan of 5 writes counts as 5)" is
+the ordinary case: the agent has made other writes in the last minute; ask again shortly.
+
 **"path argument ... is not a valid path segment"**
 Path arguments are single segments: no `/`, `.` or `..`. A parameter that is a file path or a git
 ref can carry `allow_slash: true` (inferred when the API is learned, or *Allow slashes* on the
@@ -67,8 +108,9 @@ librarian's log has the HTTP client's own words for the failure, under `got no a
 
 **A write is `failed` with "interrupted".**
 The replica that was sending it stopped before it had an answer (a rollout, a crash), so nobody
-knows whether the write was made. librarian closes such a write after fifteen minutes, says so,
-and never sends it again by itself. Check the resource, then ask again if it is needed.
+knows whether the write was made. librarian closes such a write after fifteen minutes (ten
+times `request_timeout_seconds` when that is longer), says so, and never sends it again by
+itself. Check the resource, then ask again if it is needed.
 
 **JSON from an API arrives as text, or a number arrives as `null`.**
 An answer is passed on as data only when everything after librarian can handle it. JSON nested

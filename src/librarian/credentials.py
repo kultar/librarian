@@ -101,6 +101,15 @@ class Notifier:
 
     # Write approvals (see librarian.approvals). Typed loosely to avoid an import cycle.
     async def write_opened(self, approval: Any, link: str) -> None:
+        if approval.steps:
+            log.warning(
+                "plan approval needed: %d writes on %s by %s; approve at %s",
+                len(approval.steps),
+                approval.api,
+                approval.agent,
+                link,
+            )
+            return
         log.warning(
             "write approval needed: %s.%s by %s; approve at %s",
             approval.api,

@@ -41,6 +41,32 @@ WRITE = {
     "body": {"body": "hello"},
     "reason": "a test",
 }
+# Three writes as one plan. The one in the middle is the one a test makes misbehave: the
+# first answers as usual, and the last needs what the middle one answered.
+PLAN: dict[str, Any] = {
+    "api": "tracker",
+    "reason": "a test",
+    "steps": [
+        {
+            "id": "first",
+            "operation": "addComment",
+            "args": {"key": "PAY-0"},
+            "body": {"body": "one"},
+        },
+        {
+            "id": "middle",
+            "operation": "addComment",
+            "args": {"key": "PAY-1"},
+            "body": {"body": "two", "after": {"$from": "first.id"}},
+        },
+        {
+            "id": "last",
+            "operation": "addComment",
+            "args": {"key": "PAY-2"},
+            "body": {"body": "three", "after": {"$from": "middle.id"}},
+        },
+    ],
+}
 A2A_STATES = {
     TaskState.TASK_STATE_COMPLETED: "completed",
     TaskState.TASK_STATE_FAILED: "failed",
@@ -62,13 +88,13 @@ class Reply:
     ref: str = ""  # the task (A2A) or approval (MCP) to ask about again
 
 
-def allow_writes(librarian: Librarian) -> None:
+def allow_writes(librarian: Librarian, apis: tuple[str, ...] = ("tracker",)) -> None:
     """The one calling agent of these tests: may read everything and write to tracker."""
     librarian.settings.callers = [
         CallerKey(
             agent="agent-a",
             key_ref="librarian/callers/agent-a",
-            write_apis=["tracker"],
+            write_apis=list(apis),
             owner=APPROVER,
         )
     ]
@@ -148,6 +174,10 @@ async def a2a_write(librarian: Librarian) -> Reply:
     return await _a2a(librarian, {"skill": "write", **WRITE}, approve=True)
 
 
+async def a2a_plan(librarian: Librarian) -> Reply:
+    return await _a2a(librarian, {"skill": "plan", **PLAN}, approve=True)
+
+
 def _over_http(base: str) -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=base, headers={"Authorization": "Bearer key-a"}, timeout=20)
 
@@ -179,10 +209,12 @@ def _free_port() -> int:
 
 
 @asynccontextmanager
-async def served(librarian: Librarian) -> AsyncGenerator[str]:
+async def served(
+    librarian: Librarian, write_apis: tuple[str, ...] = ("tracker",)
+) -> AsyncGenerator[str]:
     """The whole app on a real port, started and stopped as in production (so with its
     database and its task store set up, and closed afterwards). Yields its address."""
-    allow_writes(librarian)
+    allow_writes(librarian, write_apis)
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
     librarian.settings.a2a_url = base  # where the agent card sends A2A clients
@@ -232,8 +264,15 @@ async def mcp_read(librarian: Librarian, **more: Any) -> Reply:
         return _mcp_reply(await session.call_tool("execute", {**READ, **more}))
 
 
-async def mcp_write_in(librarian: Librarian, session: ClientSession) -> Reply:
-    asked = await session.call_tool("write", dict(WRITE))
+async def mcp_write_in(
+    librarian: Librarian,
+    session: ClientSession,
+    tool: str = "write",
+    asking: dict[str, Any] | None = None,
+) -> Reply:
+    """Ask for a write (or, with `tool` and `asking`, a plan), approve it and wait for
+    what became of it."""
+    asked = await session.call_tool(tool, dict(WRITE if asking is None else asking))
     if asked.is_error or (asked.structured_content or {}).get("status") != "pending_approval":
         return _mcp_reply(asked)
     approval_id = await approve_the_write(librarian)
@@ -252,3 +291,8 @@ async def mcp_write_in(librarian: Librarian, session: ClientSession) -> Reply:
 async def mcp_write(librarian: Librarian) -> Reply:
     async with mcp_session(librarian) as session:
         return await mcp_write_in(librarian, session)
+
+
+async def mcp_plan(librarian: Librarian) -> Reply:
+    async with mcp_session(librarian) as session:
+        return await mcp_write_in(librarian, session, "write_plan", PLAN)

@@ -123,6 +123,7 @@ docker pull ghcr.io/kultar/librarian:0.20.0</code></pre></div>
       <figure><img src="assets/screens/enable-flow.png" alt="The enable page for a write flow: operations with ticks, the approval choice, the write credential choice" loading="lazy"><figcaption>An agent wanted a write nobody had enabled: enable the whole flow, choose how writes are approved and where the write credential comes from.</figcaption></figure>
       <figure><img src="assets/screens/review.png" alt="The review page for a learned API" loading="lazy"><figcaption>Approving a learned API from the Slack card: decide the open operations, then approve. It is verified at once.</figcaption></figure>
       <figure><img src="assets/screens/approve-write.png" alt="A write approval page" loading="lazy"><figcaption>Approving one write: method, path, arguments and body, nothing hidden. This agent runs on kagent with no person behind it, so its owner decides.</figcaption></figure>
+      <figure><img src="assets/screens/approve-plan.png" alt="The approval page of a plan: six requests in order, each with its path and body, and the values that will come from an earlier step marked" loading="lazy"><figcaption>Approving a plan: a commit and its pull request are six requests and one decision. Each is shown as it will be sent; what an earlier step will supply is marked.</figcaption></figure>
     </div>
   </div>
 </section>
@@ -211,7 +212,7 @@ substrate:
 <section id="skills">
   <div class="wrap">
     <h2>What agents can ask for</h2>
-    <p>The same five skills over A2A and as MCP tools (plus <code>write_status</code> and <code>enable_status</code> over MCP, where nothing waits on a person). Only <code>fetch</code> uses a model; everything else is plain code.</p>
+    <p>The same six skills over A2A and as MCP tools (plus <code>write_status</code> and <code>enable_status</code> over MCP, where nothing waits on a person). Only <code>fetch</code> uses a model; everything else is plain code.</p>
     <table>
       <thead><tr><th>Skill</th><th>What it does</th></tr></thead>
       <tbody>
@@ -219,6 +220,7 @@ substrate:
         <tr><td><code>execute</code></td><td>Run one read operation, with optional field selection and pagination.</td></tr>
         <tr><td><code>onboard</code></td><td>Teach librarian an API: a spec URL, a docs URL, or just a base URL.</td></tr>
         <tr><td><code>write</code></td><td>Change data, after a person approves it, a grant covers it, or an approver chose automatic approval for that operation. If nobody has enabled the operation yet, approvers are asked. The answer says how it ran: who approved, which grant, or automatic.</td></tr>
+        <tr><td><code>plan</code></td><td>Several writes on one API as one request: the approver sees all of them together and approves once, and they are made in order. A later step can use what an earlier one returned. The first that fails ends the plan and says what was made.</td></tr>
         <tr><td><code>fetch</code></td><td>Plain language ("open bugs assigned to the payments team"), planned by a model and executed by the policy engine.</td></tr>
       </tbody>
     </table>
@@ -264,8 +266,10 @@ substrate:
         <li>The database decides: approvals and every later decision take effect at once on every replica, and GitHub becomes the record, written after each decision and never read back</li>
         <li>Agents on Agent Substrate and kagent with no key of their own: the platform's gateway signs each call, librarian verifies it and applies the rule for that agent</li>
         <li>A key an API sends back in its answer is removed before any agent sees it, and a stored key that cannot be sent is refused without being named</li>
+        <li>Whatever an API does, the agent is told in words it can act on, no key leaves, and a write always ends; <code>librarian doctor</code> finds keys that earlier versions could have stored</li>
         <li>Credentials made for each call instead of stored: OAuth client credentials, GitHub App tokens for one repository (read-only for a read), and AWS request signing</li>
         <li>Limits inside an API: an agent held to some operations and to some values of their arguments, such as one organisation's repositories</li>
+        <li>Several writes approved as one plan: a commit and its pull request are one decision, shown to the approver whole</li>
       </ul></div>
       <div><h3>Next</h3><ul>
         <li>Console actions that answer at once everywhere, with model guidance and Slack updates finishing in the background as the record already does</li>

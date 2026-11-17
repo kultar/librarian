@@ -24,7 +24,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
-from librarian import __version__
+from librarian import __version__, plans
 from librarian.approvals import WriteApproval
 from librarian.calls import ArgValue, Caller, CallRequest, WriteRequest
 from librarian.executor import PolicyDenied
@@ -45,6 +45,8 @@ and, where allowed, writes that a human approves.
 Typical flow: `capabilities` (optionally with a query) to see which APIs and operations
 exist -> `execute` to run a read operation (use `select` to keep only the fields you
 need) -> `write` to request a change, then `write_status` until it is executed.
+A change that takes several writes (create a blob, a tree, a commit, a branch, a pull
+request) goes in one `write_plan`: a human approves all of it once.
 `fetch` answers a plain-language request when a planner model is configured.
 """
 
@@ -57,11 +59,16 @@ def _caller(ctx: Context) -> Caller:
 
 def _write_outcome(outcome: WriteOutcome | WriteApproval, librarian: Librarian) -> dict[str, Any]:
     if isinstance(outcome, WriteApproval):
+        what = (
+            f"this plan of {len(outcome.steps)} writes on {outcome.api_name}"
+            if outcome.steps
+            else f"this {outcome.operation} on {outcome.api_name}"
+        )
         return {
             "status": "pending_approval",
             "approval": outcome.id,
             "message": (
-                f"A human must approve this {outcome.operation} on {outcome.api_name}. "
+                f"A human must approve {what}. "
                 "Call write_status with this approval id to get the result."
             ),
             **{k: v for k, v in librarian.write_status(outcome).items() if k != "approval"},
@@ -73,6 +80,7 @@ def _write_outcome(outcome: WriteOutcome | WriteApproval, librarian: Librarian) 
         "approval": outcome.approval_id,
         "grant": outcome.grant_id,
         "result": outcome.result.model_dump(mode="json"),
+        **({"steps": outcome.steps} if outcome.steps is not None else {}),
     }
 
 
@@ -194,11 +202,54 @@ def build_mcp(librarian: Librarian) -> MCPServer:
             raise ToolError(str(exc)) from exc
         return _write_outcome(outcome, librarian)
 
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, open_world_hint=True
+        )
+    )
+    async def write_plan(
+        ctx: Context,
+        api: str,
+        steps: list[dict[str, Any]],
+        reason: str = "",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Request several writes on one API as one plan: a human sees all of them
+        together and approves once, then librarian makes them in order. Each step is
+        {"id": "blob", "operation": "...", "args": {...}, "body": {...}}; `id` is a short
+        name of your choosing. Where a later step needs what an earlier one returned,
+        write {"$from": "<step id>.<field>"} as the value, in `args` or anywhere in
+        `body` (e.g. {"sha": {"$from": "blob.sha"}}). Only writes go in a plan: read what
+        you need first with `execute` and write the values in. A DELETE step must have
+        all its values written out. The first step that fails ends the plan and what was
+        made before it is not undone, so order the steps so that a partial result is
+        harmless. Returns `pending_approval`; `write_status` with the approval id then
+        shows every step and its result. Give a clear `reason`."""
+        try:
+            plan = plans.parse(
+                {"api": api, "steps": steps, "reason": reason, "idempotency_key": idempotency_key}
+            )
+            outcome = await librarian.request_plan(plan, _caller(ctx))
+        except WriteNotEnabled as asked:
+            return {
+                "status": "write_not_enabled",
+                "enable_request": asked.request.id,
+                "operations": asked.request.operations,
+                "message": str(asked),
+            }
+        except PolicyDenied as exc:
+            raise ToolError(f"refused: {exc.reason}") from exc
+        except LibrarianError as exc:
+            raise ToolError(str(exc)) from exc
+        return _write_outcome(outcome, librarian)
+
     @server.tool(annotations=read_only)
     async def write_status(ctx: Context, approval: str) -> dict[str, Any]:
-        """State of a write you requested: pending, approved, executing, executed (with the
-        result), failed, denied or expired. Given an `enable_request` id instead, answers
-        like `enable_status`."""
+        """State of a write or a plan you requested: pending, approved, executing, executed
+        (with the result), failed, denied or expired. For a plan, `steps` lists each step
+        with what it answered and its state: waiting, being sent, made, failed, not sent,
+        or unknown (it may or may not have reached the API: check before sending it
+        again). Given an `enable_request` id instead, answers like `enable_status`."""
         found = await librarian.approvals.load(approval)
         if found is None or found.agent != _caller(ctx).agent:
             try:
