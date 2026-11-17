@@ -31,6 +31,12 @@ image `ghcr.io/kultar/librarian`. Started like that, with no configuration, libr
 callers and accepts everyone who can reach it, which on your own machine is you: for anything
 shared, configure `callers`.
 
+What an agent's client does with a large tool result differs (Claude Code warns above 10,000
+tokens and puts text above 50,000 characters into a file), so librarian keeps its own answers
+in bounds: `capabilities` stays under `capabilities_max_bytes` and says how to see what it
+left out, and `execute` answers `too_large` with an outline past `mcp_max_result_bytes`
+([README](../README.md#big-apis)).
+
 ### The skill
 
 [`skills/librarian`](../skills/librarian/SKILL.md) is an
@@ -255,7 +261,8 @@ project has tested those policies in the standalone configuration above, not on 
   never sends a tool result of more than `mcp_max_result_bytes` (1 MB): the agent gets the
   answer's outline and asks for less with `select`. To allow more, raise that setting and the
   gateway's `frontendPolicies.http.maxBufferSize` together. A2A answers are not held this way
-  (3 MB passed).
+  (3 MB passed). `capabilities` never comes near these limits: its answer stays under
+  `capabilities_max_bytes` (16,000 bytes of JSON).
 - **Timeouts.** agentgateway sets no request timeout unless you do. If you set one
   (`policies.timeout`), keep it above `fetch_timeout_seconds` (100) for plain-language
   requests and above `mcp_max_wait_seconds` (50) for agents that wait for a decision.
@@ -352,6 +359,14 @@ each release's notes name it. kagent mounts the folder into the agent's sandbox,
 reads it when a task needs an API. (Taking the same folder from git, by commit, did not work
 with kagent 1.0.1 when we tried: the sandbox in which an Agent is prepared could not resolve
 the git host, with or without an `EgressPolicy` for it.)
+
+The Agent reads the skill as it is in the image it names, and keeps reading that one:
+upgrading librarian does not change it. kagent accepts only a reference that cannot move (an
+image by digest, not by tag), so nothing can follow librarian's releases for you. Change the
+digest when you want the newer text; you do not have to. An older skill goes on working with
+a newer librarian, because the tools say themselves what an agent has to do next: a refusal
+names the operation or argument that was meant, and a shortened answer says how to see the
+rest.
 
 **Some of the tools, and kagent's own approval.** A binding can name the tools an agent gets,
 and kagent can hold a tool call for the person in the conversation before it is made:
@@ -478,6 +493,7 @@ Agents with their own key (`callers`) keep working beside this.
   `mcp_max_wait_seconds` (50) for a decision.
 - **Large answers.** A tool result is at most `mcp_max_result_bytes` (1 MB as sent): past
   that the agent gets the answer's outline and asks for the fields it needs with `select`.
+  `capabilities` stays under `capabilities_max_bytes` and says how to see what it left out.
 - **Why an agent was refused** is in librarian's log (`refused a Substrate caller (HTTP 403):
   ...`, each reason at most once a minute). kagent itself only reports that discovering the
   tools failed with "Forbidden" or "Unauthorized", and leaves the toolset out of that run.

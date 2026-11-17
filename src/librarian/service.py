@@ -46,6 +46,7 @@ from librarian.audit import (
     JsonlAuditSink,
 )
 from librarian.calls import Caller, CallRequest, CallResult, WriteRequest
+from librarian.capabilities import FIRST, MATCHES, Fits, Listed, shortened, size
 from librarian.config import Settings
 from librarian.credentials import CredentialBroker, CredentialRequest, Notifier, RequestState
 from librarian.docs import (
@@ -1354,30 +1355,40 @@ class Librarian:
         )
 
     def capabilities(
-        self, query: str | None = None, caller: Caller = SYSTEM_CALLER
-    ) -> list[dict[str, Any]]:
-        entries = (
-            [h.entry for h in self.registry.search(query, limit=10)]
-            if query
-            else [e for e in self.registry.all() if e.status is not EntryStatus.BLOCKED]
-        )
+        self,
+        query: str | None = None,
+        caller: Caller = SYSTEM_CALLER,
+        *,
+        api: str | None = None,
+        fits: Fits | None = None,
+    ) -> dict[str, Any]:
+        """What a caller may use, as the `capabilities` skill answers it: `apis`, and a
+        `note` where the answer had to be shortened.
+
+        With `api`, that API alone. With a `query`, the ten APIs that fit it best and of
+        each the operations that fit; without one, every API and the first operations of
+        each. The answer stays under `capabilities_max_bytes` and under what `fits` allows
+        (the MCP endpoint passes what a tool result may hold): its lists of operations
+        are cut until it does, and the note says how to see what was left out.
+        """
+        if api:
+            known = self.policy.api(api, caller)
+            if not known.allowed or known.entry is None:
+                raise PolicyDenied(known.reason)
+            entries = [known.entry]
+        elif query:
+            entries = [h.entry for h in self.registry.search(query, limit=10)]
+        else:
+            entries = [e for e in self.registry.all() if e.status is not EntryStatus.BLOCKED]
         entries = [e for e in entries if caller.may_use(e.id)]
 
-        def reads(entry: ApiEntry) -> list[Operation]:
-            """The reads this caller can make there: its limits may leave some out."""
-            return self.policy.listed(entry, caller, Access.READ)
-
-        def writes(entry: ApiEntry) -> list[Operation]:
-            """The changes this caller may ask for there. Asking is all it may do: each
-            one still needs a person's approval or a grant."""
-            return self.policy.listed(entry, caller, Access.WRITE)
-
-        def shown(entry: ApiEntry, ops: list[Operation]) -> list[Operation]:
-            """The best matches for what was asked. Where the words fit none of an API's
-            operations, the first of them: an agent that is shown nothing starts guessing."""
+        def in_order(entry: ApiEntry, ops: list[Operation]) -> list[Operation]:
+            """The ones that are listed, best first: the best matches for what was asked,
+            or the first of them. Where the words fit none of an API's operations, the
+            first as well: an agent that is shown nothing starts guessing."""
             if not query:
-                return ops[:50]
-            return rank(entry, query, ops, limit=20) or ops[:20]
+                return ops[:FIRST]
+            return rank(entry, query, ops, limit=MATCHES) or ops[:MATCHES]
 
         def told(op: Operation) -> dict[str, Any]:
             """One operation as an agent needs it to call it: its name, what it does, and
@@ -1391,40 +1402,48 @@ class Librarian:
                 said["body"] = True
             return said
 
-        def changes(entry: ApiEntry) -> dict[str, Any]:
-            """Named so that an agent does not have to guess an operation to find out
-            that it writes. `enabled`: somebody has allowed writes through it."""
-            ops = writes(entry)
-            if not ops:
-                return {}
-            return {
-                "write_operations": [
-                    {**told(op), "enabled": op.writable and entry.write_auth is not None}
-                    for op in shown(entry, ops)
-                ],
-                "total_write_operations": len(ops),
-            }
-
-        def limited(entry: ApiEntry) -> dict[str, Any]:
+        def listed(entry: ApiEntry) -> Listed:
+            # Its limits may leave some out. The writes are the changes this caller may
+            # ask for: asking is all it may do, each one still needs a person's approval
+            # or a grant. They are named so that an agent does not have to guess an
+            # operation to find out that it writes; `enabled`: somebody has allowed
+            # writes through it.
+            reads = self.policy.listed(entry, caller, Access.READ)
+            writes = self.policy.listed(entry, caller, Access.WRITE)
             limits = caller.limits_for(entry.id)
-            return {"limits": limits.told()} if limits is not None else {}
+            return Listed(
+                id=entry.id,
+                head={
+                    "api": entry.id,
+                    "name": entry.name,
+                    "description": entry.description[:300],
+                    "status": entry.status.value,
+                    "base_url": entry.base_url,
+                },
+                reads=[told(op) for op in in_order(entry, reads)],
+                total_reads=len(reads),
+                writes=[
+                    {**told(op), "enabled": op.writable and entry.write_auth is not None}
+                    for op in in_order(entry, writes)
+                ]
+                if writes
+                else None,
+                total_writes=len(writes),
+                tail={
+                    "credential_ready": None if entry.secret_ref is None else "unknown",
+                    "learned_from": entry.source.kind,
+                    **({"limits": limits.told()} if limits is not None else {}),
+                },
+            )
 
-        return [
-            {
-                "api": e.id,
-                "name": e.name,
-                "description": e.description[:300],
-                "status": e.status.value,
-                "base_url": e.base_url,
-                "read_operations": [told(op) for op in shown(e, reads(e))],
-                "total_read_operations": len(reads(e)),
-                **changes(e),
-                "credential_ready": None if e.secret_ref is None else "unknown",
-                "learned_from": e.source.kind,
-                **limited(e),
-            }
-            for e in entries
-        ]
+        budget = self.settings.capabilities_max_bytes
+
+        def small_enough(answer: dict[str, Any]) -> bool:
+            return (not budget or size(answer) <= budget) and (fits is None or fits(answer))
+
+        return shortened(
+            [listed(e) for e in entries], small_enough, searched=bool(query), one=bool(api)
+        )
 
     async def onboard(
         self,

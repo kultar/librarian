@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from librarian.audit import MemoryAuditSink
-from librarian.calls import ArgValue, Caller, CallRequest
+from librarian.calls import ArgValue, Caller, CallRequest, WriteRequest
 from librarian.executor import PolicyDenied
 from librarian.policy import PolicyEngine, RateLimiter, takes
 from librarian.registry import ApiEntry, Operation, Parameter, ParamLocation, Registry
@@ -99,6 +99,41 @@ def test_what_an_operation_takes_is_said_as_it_is(
         accepts_body=body,
     )
     assert takes(op) == said
+
+
+def test_an_api_named_another_way_is_answered_with_the_one_that_exists(
+    engine: PolicyEngine,
+) -> None:
+    """...among the APIs that caller may use anyway: one it may not use, or that is
+    blocked, is never the answer."""
+
+    def refused(api: str, caller: Caller = CALLER) -> str:
+        decision = engine.check(req(api=api), caller)
+        assert not decision.allowed
+        return decision.reason
+
+    assert refused("Tracker") == "unknown API 'Tracker'. Did you mean 'tracker'?"
+    assert refused("TRACKER") == "unknown API 'TRACKER'. Did you mean 'tracker'?"
+    assert refused("track") == "unknown API 'track'"  # another name, not another spelling
+    assert refused("Blocked") == "unknown API 'Blocked'"
+    elsewhere = Caller(agent="agent-b", apis=("status",))
+    assert refused("Tracker", elsewhere) == ("caller 'agent-b' is not allowed to use API 'Tracker'")
+    assert refused("STATUS", elsewhere) == (
+        "caller 'agent-b' is not allowed to use API 'STATUS'. Did you mean 'status'?"
+    )
+    # The same where a write names the API: among the ones that caller may write to.
+    write = WriteRequest(api="Tracker", operation="addComment", args={"key": "A-1"}, reason="x")
+    writer = Caller(agent="agent-w", write_apis=("tracker",))
+    assert engine.check_write(write, writer).reason == (
+        "caller 'agent-w' may not write to API 'Tracker'. Did you mean 'tracker'?"
+    )
+    anywhere = Caller(agent="agent-x", write_apis=("*",))
+    assert engine.check_write(write, anywhere).reason == (
+        "unknown API 'Tracker'. Did you mean 'tracker'?"
+    )
+    assert engine.check_write(write, CALLER).reason == (
+        "caller 'agent-a' may not write to API 'Tracker'"  # it may write nowhere
+    )
 
 
 def test_reviewed_read_requires_verified_entry(tmp_path: Path) -> None:

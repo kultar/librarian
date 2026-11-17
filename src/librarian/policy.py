@@ -145,16 +145,35 @@ class PolicyEngine:
             and (limits is None or limits.reaches(op))
         ]
 
-    def check(self, request: CallRequest, caller: Caller) -> Decision:
-        if not caller.may_use(request.api):
+    def api(self, api_id: str, caller: Caller) -> Decision:
+        """The API a caller names, where it may use it: for a read, and for `capabilities`
+        asked about one API. One named another way (`GitHub` for `github`) is answered
+        with the one that exists, among the APIs that caller may use anyway."""
+        if not caller.may_use(api_id):
             return Decision.deny(
-                f"caller {caller.agent!r} is not allowed to use API {request.api!r}"
+                f"caller {caller.agent!r} is not allowed to use API {api_id!r}"
+                + _meant(api_id, self._usable(caller))
             )
-        entry = self.registry.get(request.api)
+        entry = self.registry.get(api_id)
         if entry is None:
-            return Decision.deny(f"unknown API {request.api!r}")
+            return Decision.deny(f"unknown API {api_id!r}" + _meant(api_id, self._usable(caller)))
         if entry.status is EntryStatus.BLOCKED:
             return Decision.deny(f"API {entry.id!r} is blocked")
+        return Decision(True, "known", entry)
+
+    def _usable(self, caller: Caller) -> list[str]:
+        """The APIs a caller is told about: the ones it may use that are not blocked."""
+        return [
+            entry.id
+            for entry in self.registry.all()
+            if entry.status is not EntryStatus.BLOCKED and caller.may_use(entry.id)
+        ]
+
+    def check(self, request: CallRequest, caller: Caller) -> Decision:
+        known = self.api(request.api, caller)
+        entry = known.entry
+        if not known.allowed or entry is None:
+            return known
         if entry.status is EntryStatus.PROVISIONAL and not self.allow_provisional:
             return Decision.deny(f"API {entry.id!r} is provisional and provisional use is off")
         if self.allowed_hosts is not None and entry.host.lower() not in self.allowed_hosts:
@@ -164,7 +183,10 @@ class PolicyEngine:
         if op is None:
             return Decision.deny(
                 f"unknown operation {request.operation!r} on {entry.id!r}"
-                + _meant(request.operation, self.listed(entry, caller, Access.READ))
+                + _meant(
+                    request.operation,
+                    [shown.id for shown in self.listed(entry, caller, Access.READ)],
+                )
             )
         outside = caller.outside_limits(entry.id, op, request.args)
         if outside:
@@ -218,7 +240,11 @@ class PolicyEngine:
         argument or in its body.
         """
         if not caller.may_write(request.api):
-            return Decision.deny(f"caller {caller.agent!r} may not write to API {request.api!r}")
+            writable = [name for name in self._usable(caller) if caller.may_write(name)]
+            return Decision.deny(
+                f"caller {caller.agent!r} may not write to API {request.api!r}"
+                + _meant(request.api, writable)
+            )
         return self._write(request, caller, unresolved, refers or bool(unresolved))
 
     def recheck_write(self, request: WriteRequest) -> Decision:
@@ -241,7 +267,8 @@ class PolicyEngine:
     ) -> Decision:
         entry = self.registry.get(request.api)
         if entry is None:
-            return Decision.deny(f"unknown API {request.api!r}")
+            usable = self._usable(caller) if caller is not None else []
+            return Decision.deny(f"unknown API {request.api!r}" + _meant(request.api, usable))
         if entry.status is not EntryStatus.VERIFIED:
             return Decision.deny(f"API {entry.id!r} is not verified; writes need a reviewed entry")
         if self.allowed_hosts is not None and entry.host.lower() not in self.allowed_hosts:
@@ -251,7 +278,7 @@ class PolicyEngine:
             known = self.listed(entry, caller, Access.WRITE) if caller is not None else []
             return Decision.deny(
                 f"unknown operation {request.operation!r} on {entry.id!r}"
-                + _meant(request.operation, known)
+                + _meant(request.operation, [op.id for op in known])
             )
         if caller is not None:
             # Before anything an approver could be asked about: a call outside the agent's
@@ -323,10 +350,11 @@ def _plain(name: str) -> str:
     return "".join(ch for ch in name.lower() if ch.isalnum())
 
 
-def _meant(asked: str, known: list[Operation]) -> str:
-    """The operation an agent probably meant: the same name written another way
-    (`add_comment` for `addComment`), among the ones it is shown anyway."""
-    same = [op.id for op in known if _plain(op.id) == _plain(asked)]
+def _meant(asked: str, known: list[str]) -> str:
+    """The operation or API an agent probably meant: the same name written another way
+    (`add_comment` for `addComment`, `GitHub` for `github`), among the ones it is shown
+    anyway."""
+    same = [name for name in known if _plain(name) == _plain(asked)]
     return f". Did you mean {same[0]!r}?" if same else ""
 
 

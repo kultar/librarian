@@ -233,6 +233,20 @@ async def test_mcp_through_the_gateway_with_the_agents_own_key() -> None:
         assert second == {"body": "two", "after": "one"}
 
 
+async def test_what_an_agent_may_use_is_asked_through_the_gateway() -> None:
+    """`capabilities` behind the gateway: everything, one API by its id, and an API named
+    another way, answered in words that reach the agent as they are."""
+    async with mcp(GATEWAY, AGENT) as session:
+        everything = await told(session, "capabilities", {})
+        assert "echo" in {api["api"] for api in everything["apis"]} and "note" not in everything
+        one = await told(session, "capabilities", {"api": "echo", "query": "comment"})
+        assert [api["api"] for api in one["apis"]] == ["echo"]
+        assert one["apis"][0]["write_operations"][0]["operation"] == "postComment"
+        wrong = await session.call_tool("capabilities", {"api": "Echo"})
+        assert wrong.is_error
+        assert "Did you mean 'echo'?" in " ".join(getattr(p, "text", "") for p in wrong.content)
+
+
 async def test_an_answer_too_large_for_the_gateway_is_answered_with_its_outline() -> None:
     """The gateway holds at most 2 MiB of an MCP server's answer, and over MCP an answer
     is twice the size of its data: handed over whole, 1.2 MB of rows end as "failed to

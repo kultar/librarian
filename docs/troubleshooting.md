@@ -38,6 +38,22 @@ exceeded the 1048576 byte limit"), and agentgateway holds at most 2 MiB of an MC
 ("failed to send message"). To allow more, raise the setting together with those limits
 (agentgateway: `frontendPolicies.http.maxBufferSize`). A2A answers are not affected.
 
+**`capabilities` lists fewer operations than an API has, and the answer has a `note`.**
+The answer would have been larger than `capabilities_max_bytes` (16,000 bytes of JSON), so
+its lists of operations were cut: `capabilities` is the first thing an agent asks, all of it
+goes into the agent's context, and with a few large APIs it was tens of thousands of tokens.
+Nothing is lost: every API is still there with `total_read_operations` and
+`total_write_operations`, and the note says how to see the rest. `capabilities` with `api`
+(an id from the answer) gives that API alone, and with a query its operations that fit. With
+a query and no `api`, the API that fits the words best keeps its matches. Past a few dozen
+APIs the later ones are named only by id, in `more_apis`. To get more in one answer, raise
+the setting (`0`: no limit), keeping in mind what the agents' clients do with a large tool
+result: Claude Code warns above 10,000 tokens and puts text above 50,000 characters into a
+file, and over MCP the answer arrives as text of about 1.7 times its JSON size.
+
+**An agent's MCP client warned about `capabilities`, or put its answer into a file (0.22.1 and earlier).**
+The same cause, before there was a limit: have the agent give a query, or upgrade.
+
 **"cannot save API ...: librarian has no database and cannot write to its registry folder".**
 Onboarding, an approval or any other change has to be kept somewhere. Without `database_url`
 that is the registry folder, and it is mounted read-only here (a ConfigMap, a checkout). Set

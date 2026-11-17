@@ -55,11 +55,12 @@ INSTRUCTIONS = """\
 librarian gives you read access to registered APIs (Jira, GitHub, internal services, ...)
 and, where allowed, writes that a human approves.
 
-Typical flow: `capabilities` (optionally with a query) to see which APIs and operations
-exist -> `execute` to run a read operation (use `select` to keep only the fields you
-need; an answer too large to hand over comes back as `too_large` with an outline of its
-fields) -> `write` to request a change, then `write_status` until it is executed (with
-`wait_seconds` it waits for the decision, so you need not ask again and again).
+Typical flow: `capabilities` (optionally with a query, or with `api` for one API's
+operations) to see which APIs and operations exist -> `execute` to run a read operation
+(use `select` to keep only the fields you need; an answer too large to hand over comes
+back as `too_large` with an outline of its fields) -> `write` to request a change, then
+`write_status` until it is executed (with `wait_seconds` it waits for the decision, so
+you need not ask again and again).
 A change that takes several writes (create a blob, a tree, a commit, a branch, a pull
 request) goes in one `write_plan`: a human approves all of it once.
 `fetch` answers a plain-language request when a planner model is configured.
@@ -110,15 +111,30 @@ def build_mcp(librarian: Librarian) -> MCPServer:
     read_only = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 
     @server.tool(annotations=read_only)
-    async def capabilities(ctx: Context, query: str | None = None) -> dict[str, Any]:
+    async def capabilities(
+        ctx: Context, query: str | None = None, api: str | None = None
+    ) -> dict[str, Any]:
         """List the APIs you may use and their read operations, best matches first when a
-        query is given (e.g. "jira issue comments"). Each operation names its arguments
-        (`args`; a trailing ? marks one that may be left out) and says when it takes a
-        `body`. Where you may ask for changes, the
-        operations that write are listed too (`write_operations`): use them with `write`
-        or `write_plan`. `enabled: false` means nobody has allowed writes through that
-        operation yet; asking for one asks the approvers to."""
-        return {"apis": librarian.capabilities(query, _caller(ctx))}
+        query is given (e.g. "jira issue comments"). With `api` (an API's id), that API
+        alone: add a query to get its operations that fit. Each operation names its
+        arguments (`args`; a trailing ? marks one that may be left out) and says when it
+        takes a `body`. Where you may ask for changes, the operations that write are
+        listed too (`write_operations`): use them with `write` or `write_plan`.
+        `enabled: false` means nobody has allowed writes through that operation yet;
+        asking for one asks the approvers to. An answer that would be too large is
+        shortened and says so in `note`, with how to see what it left out."""
+        limit = librarian.settings.mcp_max_result_bytes
+        try:
+            return librarian.capabilities(
+                query,
+                _caller(ctx),
+                api=api,
+                # What `capabilities_max_bytes` allows may still be more than a tool result
+                # can hold (it is sent twice): the lists are cut to that as well.
+                fits=(lambda answer: sent_bytes(answer) <= limit) if limit else None,
+            )
+        except PolicyDenied as exc:
+            raise ToolError(f"refused: {exc.reason}") from exc
 
     @server.tool(annotations=read_only)
     async def execute(

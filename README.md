@@ -117,7 +117,7 @@ GitHub is written to, never asked: nothing merged or edited there changes what a
 | Skill | What it does | LLM? |
 |---|---|---|
 | `execute` | Run one read operation: `{"skill":"execute","api":"jira","operation":"getIssue","args":{"issueIdOrKey":"ABC-1"}}`. Optional `select` (dotted paths, e.g. `["fields.summary"]`) and `max_pages` | No |
-| `capabilities` | List APIs and read operations, each with the arguments it takes (`args`; `team?` may be left out): `{"skill":"capabilities","query":"issues"}`. An agent that may ask for writes on an API also gets its `write_operations`, each with whether writes through it are `enabled` | No |
+| `capabilities` | List APIs and read operations, each with the arguments it takes (`args`; `team?` may be left out): `{"skill":"capabilities","query":"issues"}`, and with `"api":"jira"` that API alone. An agent that may ask for writes on an API also gets its `write_operations`, each with whether writes through it are `enabled`. An answer too large for an agent's context is shortened and says how to see the rest ([more](#big-apis)) | No |
 | `onboard` | Learn an API: `{"skill":"onboard","api":"jira","spec_url":"https://..."}`, `"base_url"` to auto-discover, or `"docs_url"` + `"base_url"` when there is no spec | No |
 | `write` | Change data, with human approval or a grant: `{"skill":"write","api":"jira","operation":"addComment","args":{...},"body":{...},"reason":"why"}`. Optional `idempotency_key`: a repeat returns the first result instead of running again. The answer says how it ran (approved by whom, under which grant, or automatically) | No |
 | `plan` | Several writes on one API, approved as one and made in order: `{"skill":"plan","api":"github","reason":"why","steps":[{"id":"blob","operation":"...","args":{...},"body":{...}}, ...]}`. A later step takes a value an earlier one returned with `{"$from":"blob.sha"}` ([more](#several-writes-as-one-plan)) | No |
@@ -240,12 +240,16 @@ these is tested, and [docs/integrations.md](docs/integrations.md) has the config
 | **[agentgateway](docs/integrations.md#agentgateway)** | librarian as an MCP server and an A2A agent behind it, two ways: each agent's own key passes through, or the gateway signs people in and librarian checks the same token itself. On Kubernetes the Helm chart attaches librarian to your Gateway (`agentgateway.enabled`) | Every week against agentgateway v1.7.0 (`tests/integration/agentgateway`); the chart option by hand on kind |
 | **[kagent and Agent Substrate](docs/integrations.md#agent-substrate-and-kagent)** | Agents call librarian's tools with no key of their own (above); the chart registers librarian as a `RemoteMCPServer`. Rules per Agent, plans, a subset of the tools per agent, kagent's own approval in front of librarian's | By hand on kind with kagent 1.0.1 and Agent Substrate 1.0.0 ([the recipe](tests/integration/substrate)) |
 
-Two things keep it well-behaved behind any of them:
+Three things keep it well-behaved behind any of them:
 
 - **An answer never breaks on the way.** Gateways and MCP clients stop at a megabyte or two
   and say only that a message could not be sent. A tool result that large is never sent: the
   agent gets the answer's outline and asks for less (`mcp_max_result_bytes`, under
   [Big APIs](#big-apis)).
+- **The first answer fits in an agent's context.** `capabilities` is what an agent asks
+  first, and agent clients warn about a tool result of tens of thousands of tokens, put it
+  aside in a file, or refuse it. Its answer stays under `capabilities_max_bytes` however many
+  APIs there are, and says how to see what it left out ([Big APIs](#big-apis)).
 - **An agent can wait for a person.** Where nothing can wake an agent when an approval
   arrives (a kagent session, a chat turn), it asks `write_status` with `wait_seconds` and has
   the outcome in the same turn (`mcp_max_wait_seconds`).
@@ -291,11 +295,29 @@ The JSONL audit log is separate and always on.
   620-operation API, "who is watching an issue" finds `getIssueWatchers` first.
 - **What `capabilities` lists.** With a `query`: the ten APIs that fit it best, and of each
   the 20 best-matching reads (and the 20 best-matching writes, where the agent may ask for
-  writes). Without one: every API the agent may use, with the first 50 of each. Each
-  operation comes with the arguments it takes, and `total_read_operations` and
-  `total_write_operations` say how many there are, so an agent that does not see what it
-  needs asks again in other words. On GitHub's API, an answer to a query is about 3 KB for
-  an agent that only reads and 7 KB for one that may also ask for writes.
+  writes). Without one: every API the agent may use, with the first 50 of each. With `api`:
+  that API alone. Each operation comes with the arguments it takes, and
+  `total_read_operations` and `total_write_operations` say how many there are. On GitHub's
+  API, an answer to a query is about 3 KB for an agent that only reads and 7 KB for one that
+  may also ask for writes.
+- **An answer that fits in an agent's context.** `capabilities` is the first thing an agent
+  asks, and all of it goes into the agent's context. The answer stays under
+  `capabilities_max_bytes` (16,000 bytes of JSON: over MCP up to about 28,000 characters of
+  text, some 9,000 tokens for a Claude model). When it would be larger, the lists of
+  operations are cut, to the same length for every API, and a `note` in the answer says what
+  was left out and how to see it: `capabilities` with `api` for one API, and with a query
+  for the operations that fit. Every API is still there with how many operations it has.
+  With a query, the API that fits it best keeps its matches and the others are cut. Past a
+  few dozen APIs not all of them fit even without operations: the first ones are listed and
+  `more_apis` has the ids of the others. `capabilities_max_bytes: 0` lifts the limit (over
+  MCP, `mcp_max_result_bytes` still holds: the lists are cut to that).
+
+  Measured on five large APIs (GitHub, Stripe, Jira, PagerDuty and DigitalOcean: 3,911
+  operations) for an agent that may ask for writes and gives no query: the answer was
+  120,000 characters of text over MCP (39,000 tokens) and is 26,000 (8,500), with ten reads
+  and ten writes for each API. Claude Code, for one, warns about a tool result of more than
+  10,000 tokens and puts text of more than 50,000 characters into a file instead of the
+  context.
 - **Answers an agent can take.** `select` keeps only the fields an agent names
   (`["issues.key", "issues.fields.summary"]`). Over MCP, an answer that would make a tool
   result of more than `mcp_max_result_bytes` (1 MB as sent, about 480 KB of data) is not
@@ -957,6 +979,7 @@ name in capitals, with `__` between the levels (`writes.max_grant_days` is
 | `max_response_bytes` | `2000000` | An answer longer than this is cut off and marked `truncated` |
 | `mcp_max_result_bytes` | `1000000` | The largest MCP tool result `execute` sends, in bytes as sent (an answer travels twice in one, as structured content and as text). A larger one comes back as its outline and how to ask for less; `0`: no limit |
 | `mcp_max_wait_seconds` | `50` | The longest `write_status` waits for a write to end when an agent asks it to (`wait_seconds`). Keep it under the request timeout of your MCP clients and gateways; `0`: never wait |
+| `capabilities_max_bytes` | `16000` | The largest answer `capabilities` gives, in bytes of JSON (over MCP it is sent twice, the second time as indented text of about 1.7 times that size). A larger one has its lists of operations cut and says how to see the rest ([Big APIs](#big-apis)); at least 2,000, or `0`: no limit of its own |
 | `allow_provisional` | `true` | Whether a learned API can be read from before a person has approved it |
 | `onboarding_enabled` | `true` | Whether agents may teach librarian new APIs at all |
 | `allow_private_networks` | `false` | Let learned APIs reach private addresses. For a laptop; otherwise use `internal_hosts` |

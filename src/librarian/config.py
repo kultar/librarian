@@ -15,6 +15,10 @@ from librarian.calls import Limits
 from librarian.net import NetworkPolicy, host_pattern_ok
 from librarian.registry.models import RESERVED_SECRET_PREFIX
 
+# The least `capabilities_max_bytes` may be, where it is set at all: room for the note and
+# a handful of APIs by name. Under that an agent would be told about none.
+MIN_CAPABILITIES_BYTES = 2_000
+
 
 class SlackSettings(BaseModel):
     bot_token: SecretStr | None = None
@@ -440,6 +444,15 @@ class Settings(BaseSettings):
     # can then wait for a decision inside its turn instead of asking again and again. Keep
     # it under the request timeout of your MCP clients and gateways. 0: never wait.
     mcp_max_wait_seconds: int = Field(default=50, ge=0)
+    # The largest answer `capabilities` gives, in bytes of JSON. It is the first thing an
+    # agent asks and it goes into the agent's context whole, so a few large APIs made it
+    # tens of thousands of tokens: agent clients warn about a tool result of that size,
+    # put it aside in a file, or refuse it. Past this size the lists of operations are
+    # cut (every API is still named, with how many operations it has) and the answer says
+    # how to see the rest: `capabilities` with `api`, and with a query. Over MCP the
+    # answer travels twice, the second time as indented text of about 1.7 times this
+    # size. 0: no limit of its own (over MCP, `mcp_max_result_bytes` still holds).
+    capabilities_max_bytes: int = Field(default=16_000, ge=0)
     allow_provisional: bool = True
     # Let onboarding and provisional entries reach private/internal addresses.
     # Keep off unless every caller is trusted (SSRF protection).
@@ -461,6 +474,16 @@ class Settings(BaseSettings):
     mcp_allowed_hosts: list[str] = Field(default_factory=list[str])
     # How long an A2A task waits for a human to provide a missing credential.
     credential_wait_seconds: float = 900
+
+    @field_validator("capabilities_max_bytes")
+    @classmethod
+    def _room_to_name_an_api(cls, size: int) -> int:
+        if 0 < size < MIN_CAPABILITIES_BYTES:
+            raise ValueError(
+                f"capabilities_max_bytes: {size} leaves no room to name even a few APIs; "
+                f"give it at least {MIN_CAPABILITIES_BYTES}, or 0 for no limit"
+            )
+        return size
 
     @field_validator("internal_hosts")
     @classmethod

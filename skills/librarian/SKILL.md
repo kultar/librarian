@@ -16,6 +16,12 @@ with where it came from. What it refuses, you cannot get another way, and should
    a few words ("jira issue comments") to get the best matches first. Each operation names
    the arguments it takes in `args` (`team?` is one you may leave out) and says when it takes
    a `body`: use those names exactly, do not guess them.
+   - With `api` (an API's id) it shows that API alone; add a `query` to get its operations
+     that fit what you need. Use this once you know which API you want.
+   - `total_read_operations` and `total_write_operations` say how many operations an API
+     has. When its lists hold fewer, the answer was shortened to stay small and says so in
+     `note`: do what the note says (`api`, and a `query`) instead of guessing an operation
+     that is not listed. APIs named only in `more_apis` can be asked about the same way.
 2. `execute` runs one read: `api`, `operation`, `args`.
    - Ask only for what you need: `select` takes dotted paths, and lists are followed, so
      `["issues.key", "issues.fields.summary"]` returns those two fields of every issue.

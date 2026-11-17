@@ -172,8 +172,8 @@ async def test_docs_operations_confirm_on_success_and_suspend_when_missing(
         await librarian.execute(
             CallRequest(api="widgets", operation="listParts", args={"id": "w1"}), AGENT
         )
-    assert librarian.capabilities(caller=AGENT)  # still listed, minus the suspended one
-    widgets = next(a for a in librarian.capabilities(caller=AGENT) if a["api"] == "widgets")
+    assert librarian.capabilities(caller=AGENT)["apis"]  # still listed, minus the suspended one
+    widgets = next(a for a in librarian.capabilities(caller=AGENT)["apis"] if a["api"] == "widgets")
     assert "listParts" not in {o["operation"] for o in widgets["read_operations"]}
 
 

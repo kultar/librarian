@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import time
 from collections.abc import AsyncGenerator, Callable
@@ -20,6 +21,7 @@ from mcp.client.streamable_http import streamable_http_client
 from librarian.approvals import ApprovalState
 from librarian.calls import Caller
 from librarian.config import CallerKey
+from librarian.mcp_server import sent_bytes
 from librarian.secrets import FileSecretStore
 from librarian.server import create_app
 from librarian.service import Librarian
@@ -129,7 +131,7 @@ async def test_capabilities_names_the_changes_an_agent_may_ask_for(
     # Not enabled by anybody: named all the same, and said to be so.
     assert by_name["renameProject"]["enabled"] is False
     # An agent that may not write there is told nothing about writes.
-    reader = librarian.capabilities(caller=Caller(agent="b"))
+    reader = librarian.capabilities(caller=Caller(agent="b"))["apis"]
     assert all("write_operations" not in a for a in reader)
 
 
@@ -191,6 +193,40 @@ async def test_an_agent_is_told_what_an_operation_takes_and_does_not_have_to_gue
         # ...and nothing for a name that is simply not there.
         answer = said(await session.call_tool("execute", {"api": "tracker", "operation": "nope"}))
         assert answer.endswith("unknown operation 'nope' on 'tracker'")
+
+
+async def test_capabilities_for_one_api_and_never_more_than_a_tool_result_holds(
+    connect: Connect, librarian: Librarian
+) -> None:
+    """`api` gives one API, and one that is not there is refused in words. An answer
+    travels twice in a tool result, so even with no limit of its own it is cut to what
+    one may hold, and says so."""
+    async with connect() as session:
+        one = data(await session.call_tool("capabilities", {"api": "tracker"}))
+        assert [a["api"] for a in one["apis"]] == ["tracker"] and "note" not in one
+        fitting = await session.call_tool("capabilities", {"api": "tracker", "query": "comment"})
+        assert data(fitting)["apis"][0]["write_operations"][0]["operation"] == "addComment"
+        assert said(await session.call_tool("capabilities", {"api": "Tracker"})) == (
+            "Error executing tool capabilities: refused: caller 'agent-a' is not allowed to "
+            "use API 'Tracker'. Did you mean 'tracker'?"
+        )
+        # The same hint where an agent names the API to read from or to change.
+        for tool in ("execute", "write"):
+            call = {"api": "Tracker", "operation": "whoami"}
+            assert "Did you mean 'tracker'?" in said(await session.call_tool(tool, call))
+
+        whole = await session.call_tool("capabilities", {})
+        assert sent_bytes(data(whole)) > 3_000 and "note" not in data(whole)
+        librarian.settings.capabilities_max_bytes = 0
+        librarian.settings.mcp_max_result_bytes = 3_000
+        result = await session.call_tool("capabilities", {})
+        answer = data(result)
+        assert sent_bytes(answer) <= 3_000
+        text = getattr(result.content[0], "text", "")  # the same answer again, indented
+        assert json.loads(text) == answer
+        assert len(text) + len(json.dumps(answer, separators=(",", ":"))) < 3_000
+        assert {a["api"] for a in answer["apis"]} == {"tracker", "weather", "status"}
+        assert answer["note"].startswith("Shortened to keep this answer small: ")
 
 
 async def test_execute_with_select(

@@ -27,7 +27,8 @@ from google.protobuf.struct_pb2 import Struct
 from librarian.secrets import FileSecretStore
 from librarian.server import build_agent_card, create_app
 from librarian.service import Librarian
-from tests.conftest import BASE, Router
+from tests.conftest import BASE, Router, write_entries
+from tests.test_capabilities import api as large_api
 
 KEYS = {"agent-a": "key-a"}
 
@@ -152,6 +153,32 @@ async def test_capabilities(librarian: Librarian, http: httpx.AsyncClient) -> No
     outcome = await send(librarian, http, [new_data_part({"skill": "capabilities"})])
     apis = {a["api"] for a in outcome.data[-1]["apis"]}
     assert apis == {"tracker", "weather", "status"}
+    assert "note" not in outcome.data[-1]
+
+
+async def test_capabilities_for_one_api_and_shortened(
+    librarian: Librarian, http: httpx.AsyncClient
+) -> None:
+    """Over A2A as over MCP: `api` gives one API, one that is not there is refused in
+    words, and an answer cut to fit says so."""
+    one = await send(librarian, http, [new_data_part({"skill": "capabilities", "api": "tracker"})])
+    assert [a["api"] for a in one.data[-1]["apis"]] == ["tracker"]
+    wrong = await send(
+        librarian, http, [new_data_part({"skill": "capabilities", "api": "Tracker"})]
+    )
+    assert wrong.final == TaskState.TASK_STATE_REJECTED
+    assert wrong.texts[-1] == "Refused: unknown API 'Tracker'. Did you mean 'tracker'?"
+
+    # A large API beside the others, and room for less than all of it.
+    write_entries(librarian.settings.registry_dir, large_api("alpha", 60))
+    librarian.load()
+    librarian.settings.capabilities_max_bytes = 3_000
+    cut = await send(librarian, http, [new_data_part({"skill": "capabilities"})])
+    answer = cut.data[-1]
+    assert {a["api"] for a in answer["apis"]} == {"alpha", "tracker", "weather", "status"}
+    assert answer["note"].startswith("Shortened to keep this answer small: ")
+    alpha = next(a for a in answer["apis"] if a["api"] == "alpha")
+    assert 0 < len(alpha["read_operations"]) < 50 and alpha["total_read_operations"] == 60
 
 
 async def test_write_is_rejected(librarian: Librarian, http: httpx.AsyncClient) -> None:

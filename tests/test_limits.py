@@ -159,18 +159,22 @@ async def test_a_standing_grant_does_not_reach_past_the_limits(librarian: Librar
 
 
 def test_an_agent_is_shown_what_it_can_reach_and_told_its_limits(librarian: Librarian) -> None:
-    [seen] = [api for api in librarian.capabilities(None, agent()) if api["api"] == "tracker"]
+    [seen] = [
+        api for api in librarian.capabilities(None, agent())["apis"] if api["api"] == "tracker"
+    ]
     assert [op["operation"] for op in seen["read_operations"]] == ["getIssue", "listIssues"]
     assert seen["total_read_operations"] == 2  # not whoami, not the search
     assert seen["limits"]["arguments"] == {"key": ["PAY-*"], "team": ["payments", "billing"]}
     # The same for what it may ask to change: not the operation its limits cannot hold.
     assert [op["operation"] for op in seen["write_operations"]] == ["deleteIssue", "addComment"]
     assert seen["total_write_operations"] == 2
-    [free] = [a for a in librarian.capabilities(None, Caller(agent="x")) if a["api"] == "tracker"]
+    [free] = [
+        a for a in librarian.capabilities(None, Caller(agent="x"))["apis"] if a["api"] == "tracker"
+    ]
     assert "limits" not in free and free["total_read_operations"] == 4
     assert "write_operations" not in free  # it may not ask for writes there at all
     writer = Caller(agent="y", write_apis=("tracker",))
-    [all_of_it] = [a for a in librarian.capabilities(None, writer) if a["api"] == "tracker"]
+    [all_of_it] = [a for a in librarian.capabilities(None, writer)["apis"] if a["api"] == "tracker"]
     assert {op["operation"]: op["enabled"] for op in all_of_it["write_operations"]} == {
         "deleteIssue": True,
         "addComment": True,

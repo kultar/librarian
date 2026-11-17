@@ -101,7 +101,7 @@ async def test_describe_api_ranks_and_reports_totals(librarian: Librarian) -> No
 
 async def test_capabilities_query_ranks_operations(librarian: Librarian) -> None:
     await librarian.registry.save(big_entry())
-    caps = librarian.capabilities("issue comments")
+    caps = librarian.capabilities("issue comments")["apis"]
     big = next(c for c in caps if c["api"] == "big")
     assert big["read_operations"][0]["operation"] == "getComments"
     assert big["total_read_operations"] == 302

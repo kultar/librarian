@@ -259,6 +259,11 @@ audited; and the operator, through the database, the config and the registry dir
   replacement character, and nothing a terminal would act on reaches the log.
 - **What goes back to an agent is bounded too.** Over MCP a tool result of more than
   `mcp_max_result_bytes` is not sent: the agent gets the answer's outline and asks for less.
+  What `capabilities` answers stays under `capabilities_max_bytes` however many APIs and
+  operations the registry holds, so learning one more large API cannot push every agent's
+  first answer out of its context. What it leaves out it says, and it names only what that
+  caller may use: the hint for an API or operation written another way is taken from the
+  same list.
   An agent that waits for a decision (`write_status` with `wait_seconds`) waits at most
   `mcp_max_wait_seconds`, and while it does librarian looks at the database every two seconds,
   which is less than the agent asking again and again would cost.
