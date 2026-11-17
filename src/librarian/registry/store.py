@@ -22,6 +22,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import IntegrityError
 
+from librarian.errors import LibrarianError
 from librarian.registry.models import Access, ApiEntry, EntryStatus
 
 log = logging.getLogger(__name__)
@@ -29,8 +30,8 @@ log = logging.getLogger(__name__)
 _WORD = re.compile(r"[a-z0-9]+")
 
 
-class RegistryError(Exception):
-    pass
+class RegistryError(LibrarianError):
+    """The registry cannot do what was asked: said in words, to agents and to people."""
 
 
 @dataclass(frozen=True)
@@ -354,11 +355,20 @@ class Registry:
             return Path(f"db:{STORED_KIND}/{entry.id}")
         async with self._lock:
             target = self.overlay or self.directory
-            target.mkdir(parents=True, exist_ok=True)
             entry = entry.model_copy(update={"updated_at": datetime.now(UTC)})
             path = target / f"{entry.id}.yaml"
             text = dump_entry(entry)
-            await asyncio.to_thread(path.write_text, text, "utf-8")
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(path.write_text, text, "utf-8")
+            except OSError as exc:
+                # A registry folder mounted read-only (a ConfigMap, a checkout) and no
+                # database: there is nowhere to keep what was learned or decided.
+                raise RegistryError(
+                    f"cannot save API {entry.id!r}: librarian has no database and cannot write "
+                    f"to its registry folder {target} ({exc.strerror or type(exc).__name__}). "
+                    "Set database_url, or registry_overlay_dir to a folder it can write to"
+                ) from None
             self._entries[entry.id] = entry
             self._errors.pop(path.name, None)
             self._fingerprint = self._current_fingerprint()  # our own write is not a change

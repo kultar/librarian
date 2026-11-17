@@ -74,3 +74,38 @@ def select(data: Any, paths: list[str]) -> Any:
     if not paths:
         return data
     return _apply(data, _tree(paths))
+
+
+OUTLINE_FIELDS = 40  # of one object: an outline has to stay small itself
+
+
+def _fields(count: int) -> str:
+    return f"{count} field" if count == 1 else f"{count} fields"
+
+
+def outline(data: Any, depth: int = 4) -> Any:
+    """The shape of an answer without its content: the fields of an object, and of a
+    list how many items it has and the shape of the first. It is what an agent needs to
+    ask for less with `select`, when the answer itself is too large to hand over."""
+    if isinstance(data, dict):
+        fields = cast(dict[str, Any], data)
+        if depth <= 0:
+            return f"object with {_fields(len(fields))}"
+        shown = {
+            key: outline(value, depth - 1) for key, value in list(fields.items())[:OUTLINE_FIELDS]
+        }
+        if len(fields) > OUTLINE_FIELDS:
+            shown["..."] = f"{_fields(len(fields) - OUTLINE_FIELDS)} more"
+        return shown
+    if isinstance(data, list):
+        items = cast(list[Any], data)
+        if not items:
+            return "empty list"
+        return {"list of": len(items), "each": outline(items[0], depth - 1)}
+    if isinstance(data, str):
+        return f"text of {len(data):,} characters" if len(data) > 200 else "text"
+    if isinstance(data, bool):
+        return "true or false"
+    if isinstance(data, int | float):
+        return "number"
+    return "nothing" if data is None else type(data).__name__

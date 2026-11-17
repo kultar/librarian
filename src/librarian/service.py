@@ -552,6 +552,15 @@ class Librarian:
         return key.encode()
 
     async def aclose(self) -> None:
+        # What still waits in the background (a write for its approval) ends here, and is
+        # picked up again at the next start. It ends before the database is closed: a
+        # task cancelled only when the event loop itself closes can be left waiting on a
+        # connection that is already gone, and the process then never exits.
+        waiting = list(self._background)
+        for task in waiting:
+            task.cancel()
+        if waiting:
+            await asyncio.wait(waiting, timeout=10)
         await self.recorder.drain()  # decisions still on their way to the record
         await self.http.aclose()
         if self.engine is not None:

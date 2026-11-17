@@ -6,6 +6,7 @@ import asyncio
 import socket
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -126,6 +127,49 @@ async def test_execute_with_select(
     assert result["status"] == "ok"
     assert result["data"] == {"key": "ABC-1", "fields": {"summary": "s"}}
     assert result["provenance"]["caller"] == "agent-a"
+
+
+async def test_an_answer_too_large_for_one_tool_result_comes_back_as_its_outline(
+    connect: Connect, librarian: Librarian, router: Router, secrets_store: FileSecretStore
+) -> None:
+    """Megabytes are no use to a model, and a gateway or an MCP client on the way refuses
+    them with an error that says nothing. The agent is told what is there instead, and how
+    to ask for less."""
+    await secrets_store.put("tracker/readonly", "read-key")
+    issues = [
+        {"key": f"PAY-{n}", "fields": {"summary": "s" * 300, "status": "open"}} for n in range(400)
+    ]
+    router.add(
+        "GET",
+        f"{BASE}/v1/issues",
+        lambda r: httpx.Response(200, json={"issues": issues, "total": 400}),
+    )
+    librarian.settings.mcp_max_result_bytes = 50_000
+    call = {"api": "tracker", "operation": "listIssues", "args": {"team": "payments"}}
+    async with connect() as session:
+        large = data(await session.call_tool("execute", call))
+        assert (large["status"], large["data"], large["status_code"]) == ("too_large", None, 200)
+        assert large["outline"] == {
+            "issues": {
+                "list of": 400,
+                "each": {
+                    "key": "text",
+                    "fields": {"summary": "text of 300 characters", "status": "text"},
+                },
+            },
+            "total": "number",
+        }
+        assert "too large for one tool result" in large["message"]
+        assert "the limit is 50,000" in large["message"]
+        assert "`select`" in large["message"] and large["provenance"]["operation"] == "listIssues"
+        # Asked for what it needs, it gets it.
+        keys = data(await session.call_tool("execute", {**call, "select": ["issues.key", "total"]}))
+        assert keys["status"] == "ok" and len(keys["data"]["issues"]) == 400
+        assert keys["data"]["issues"][0] == {"key": "PAY-0"}
+        # No limit: handed over whole, as before.
+        librarian.settings.mcp_max_result_bytes = 0
+        whole = data(await session.call_tool("execute", call))
+        assert whole["status"] == "ok" and len(whole["data"]["issues"]) == 400
 
 
 async def test_policy_refusals_are_tool_errors(connect: Connect) -> None:
@@ -290,3 +334,45 @@ async def test_onboard_from_documentation_over_mcp(
         )
     assert result["learned_from"] == "docs"
     assert result["read_operations"] == 3
+
+
+async def test_a_registry_that_cannot_be_written_to_is_said_in_words(
+    connect: Connect, librarian: Librarian, router: Router, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a database, what librarian learns goes into its registry folder. Where that
+    is mounted read-only (a ConfigMap, a checkout) there is nowhere to keep it: the agent
+    is told so, with what to change, instead of an error with no reason."""
+    from librarian.docs import build_extractor
+    from tests.test_learning import (
+        BASE_URL,
+        DOCS,
+        INDEX_HTML,
+        REFERENCE,
+        REFERENCE_HTML,
+        by_page,
+        extractor_model,
+    )
+
+    html = {"content-type": "text/html"}
+    router.add("GET", DOCS, lambda r: httpx.Response(200, text=INDEX_HTML, headers=html))
+    router.add("GET", REFERENCE, lambda r: httpx.Response(200, text=REFERENCE_HTML, headers=html))
+    librarian.source_client_factory = lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(router)
+    )
+    model, _ = extractor_model(by_page)
+    librarian.extractor = build_extractor(model)
+    librarian.settings.callers[0].apis.append("widgets")
+
+    def read_only(self: Path, *args: Any, **kwargs: Any) -> int:
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(Path, "write_text", read_only)
+    async with connect() as session:
+        refused = await session.call_tool(
+            "onboard", {"api": "widgets", "docs_url": DOCS, "base_url": BASE_URL}
+        )
+    assert refused.is_error
+    said = " ".join(getattr(part, "text", "") for part in refused.content)
+    assert "cannot save API 'widgets'" in said and "Read-only file system" in said
+    assert "database_url" in said and "registry_overlay_dir" in said
+    assert librarian.registry.get("widgets") is None

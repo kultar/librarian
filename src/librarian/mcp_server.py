@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pydantic_core
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -37,6 +38,16 @@ from librarian.service import (
     WriteNotEnabled,
     WriteOutcome,
 )
+from librarian.shaping import outline
+
+
+def sent_bytes(answer: dict[str, Any]) -> int:
+    """How large a tool result is on its way to the agent. An MCP server sends a
+    structured answer twice: as structured content, and (for clients that only read
+    text) as the same JSON, indented, in a text block."""
+    text = pydantic_core.to_json(answer, fallback=str, indent=2).decode()
+    return len(pydantic_core.to_json(answer, fallback=str)) + len(pydantic_core.to_json(text))
+
 
 INSTRUCTIONS = """\
 librarian gives you read access to registered APIs (Jira, GitHub, internal services, ...)
@@ -105,7 +116,10 @@ def build_mcp(librarian: Librarian) -> MCPServer:
     ) -> dict[str, Any]:
         """Run one read operation. `select` keeps only these dotted paths (lists are
         traversed: ["issues.key", "issues.fields.summary"]). Returns the data plus
-        provenance, or `credential_pending` if a human must first provide access."""
+        provenance, or `credential_pending` if a human must first provide access. An
+        answer too large for one tool result comes back as `too_large` with an `outline`
+        of its fields instead of the data: call again with `select` for the fields you
+        need."""
         try:
             request = CallRequest(
                 api=api,
@@ -134,7 +148,24 @@ def build_mcp(librarian: Librarian) -> MCPServer:
             raise ToolError(f"refused: {exc.reason}") from exc
         except LibrarianError as exc:  # e.g. the API gave no answer: say so, in its words
             raise ToolError(str(exc)) from exc
-        return {"status": "ok", **result.model_dump(mode="json")}
+        answer = {"status": "ok", **result.model_dump(mode="json")}
+        limit = librarian.settings.mcp_max_result_bytes
+        if limit and (size := sent_bytes(answer)) > limit:
+            # Megabytes are no use to a model, and on the way to it a gateway or the MCP
+            # client would refuse them with an error that says nothing. Say what is there.
+            return {
+                **answer,
+                "status": "too_large",
+                "data": None,
+                "outline": outline(result.data),
+                "message": (
+                    f"The answer is too large for one tool result ({size:,} bytes as sent; "
+                    f"the limit is {limit:,}). Ask for less: name the fields you need in "
+                    "`select` (the outline shows what there is), narrow the request with "
+                    "the operation's arguments, or read fewer pages."
+                ),
+            }
+        return answer
 
     if librarian.planner is not None:
 

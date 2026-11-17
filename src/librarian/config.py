@@ -422,6 +422,13 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 60
     request_timeout_seconds: float = 30
     max_response_bytes: int = 2_000_000
+    # The largest MCP tool result `execute` sends, in bytes as sent: an answer travels
+    # twice in one, as structured content and as text, so this is about twice the data.
+    # A larger one is answered with its outline (the fields, how many items) and how to
+    # ask for less, instead of megabytes no model can use and that the way there refuses:
+    # an MCP client reading the result as one event stops at 1 MiB, and agentgateway holds
+    # at most 2 MiB of one. 0: no limit.
+    mcp_max_result_bytes: int = Field(default=1_000_000, ge=0)
     allow_provisional: bool = True
     # Let onboarding and provisional entries reach private/internal addresses.
     # Keep off unless every caller is trusted (SSRF protection).

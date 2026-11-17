@@ -10,7 +10,7 @@ from librarian.calls import Caller, CallRequest
 from librarian.registry import Pagination
 from librarian.secrets import FileSecretStore
 from librarian.service import Librarian
-from librarian.shaping import get_path, select, set_path
+from librarian.shaping import OUTLINE_FIELDS, get_path, outline, select, set_path
 from tests.conftest import BASE, Router
 
 DOC: dict[str, Any] = {
@@ -150,3 +150,44 @@ async def test_max_pages_is_respected(librarian: Librarian, router: Router) -> N
     )
     assert result.data == {"items": [1, 1, 1], "next": "x"}
     assert len(router.requests) == 3
+
+
+def test_an_outline_says_what_is_there_without_the_content() -> None:
+    data = {
+        "issues": [
+            {"key": "PAY-1", "open": True, "fields": {"summary": "s" * 500, "votes": 3}},
+            {"key": "PAY-2", "open": False, "fields": {"summary": "short", "votes": 0.5}},
+        ],
+        "next": None,
+        "empty": [],
+        "matrix": [[1, 2], [3, 4]],
+    }
+    assert outline(data) == {
+        "issues": {
+            "list of": 2,
+            "each": {
+                "key": "text",
+                "open": "true or false",
+                "fields": {"summary": "text of 500 characters", "votes": "number"},
+            },
+        },
+        "next": "nothing",
+        "empty": "empty list",
+        "matrix": {"list of": 2, "each": {"list of": 2, "each": "number"}},
+    }
+    # The paths in it are the ones `select` takes.
+    assert select(data, ["issues.fields.votes"]) == {
+        "issues": [{"fields": {"votes": 3}}, {"fields": {"votes": 0.5}}]
+    }
+
+
+def test_an_outline_stays_small_itself() -> None:
+    wide = {f"field{n}": n for n in range(OUTLINE_FIELDS + 15)}
+    shown = outline(wide)
+    assert len(shown) == OUTLINE_FIELDS + 1 and shown["..."] == "15 fields more"
+    deep: dict[str, Any] = {"a": {"b": {"c": {"d": {"e": {"f": 1, "g": 2}}}}}}
+    assert outline(deep) == {"a": {"b": {"c": {"d": "object with 1 field"}}}}
+    assert outline({"a": {"b": {"c": {"d": {"x": 1, "y": 2}}}}}) == {
+        "a": {"b": {"c": {"d": "object with 2 fields"}}}
+    }
+    assert outline("plain") == "text" and outline(7) == "number"

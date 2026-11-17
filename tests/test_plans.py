@@ -763,9 +763,7 @@ def forge_api(router: Router) -> Forge:
 
 async def gone(replica: Librarian) -> None:
     """Stop a replica as a stopped process is stopped: what it was doing in the
-    background ends with it."""
-    for task in list(replica._background):  # pyright: ignore[reportPrivateUsage]
-        task.cancel()
+    background ends with it, unfinished."""
     await replica.aclose()
 
 

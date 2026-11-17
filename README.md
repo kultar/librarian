@@ -241,6 +241,12 @@ The JSONL audit log is separate and always on.
 - **Operation search.** Requests are matched to operations with BM25 ranking over operation ids
   (split into words: `getIssueWatchers` -> issue, watch), tags, paths and summaries. On Jira's
   620-operation API, "who is watching an issue" finds `getIssueWatchers` first.
+- **Answers an agent can take.** `select` keeps only the fields an agent names
+  (`["issues.key", "issues.fields.summary"]`). Over MCP, an answer that would make a tool
+  result of more than `mcp_max_result_bytes` (1 MB as sent, about 480 KB of data) is not
+  handed over at all: megabytes are no use to a model, and MCP clients and gateways on the
+  way refuse them with errors that say nothing. The agent gets `too_large` with an
+  **outline** instead (the fields, how many items a list has), and asks again with `select`.
 - **Glossary.** Registry entries can declare `discovery` reads that teach instance-specific
   names, e.g. Jira's `/field` maps `customfield_10020` to "Sprint". They run after a credential
   is approved (or `librarian discover <api>`), and the planner sees the relevant entries.
@@ -894,6 +900,7 @@ name in capitals, with `__` between the levels (`writes.max_grant_days` is
 | `rate_limit_per_minute` | `60` | Reads one agent may make on one API in a minute |
 | `request_timeout_seconds` | `30` | How long connecting to an API, or waiting for the next part of its answer, may take. One request as a whole may take twice this |
 | `max_response_bytes` | `2000000` | An answer longer than this is cut off and marked `truncated` |
+| `mcp_max_result_bytes` | `1000000` | The largest MCP tool result `execute` sends, in bytes as sent (an answer travels twice in one, as structured content and as text). A larger one comes back as its outline and how to ask for less; `0`: no limit |
 | `allow_provisional` | `true` | Whether a learned API can be read from before a person has approved it |
 | `onboarding_enabled` | `true` | Whether agents may teach librarian new APIs at all |
 | `allow_private_networks` | `false` | Let learned APIs reach private addresses. For a laptop; otherwise use `internal_hosts` |

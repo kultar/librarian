@@ -505,6 +505,60 @@ async def test_detached_write_runs_exactly_once_across_replicas(
     await b.aclose()
 
 
+async def test_stopping_ends_what_waits_in_the_background_while_the_database_is_there(
+    tmp_path: Any, router: Router, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write asked for without waiting is waited for by a task that keeps asking the
+    database. Stopping ends that task itself, and waits until it has ended, before it
+    closes the database. Left to the closing event loop, a task that is in the middle of
+    asking can be cancelled twice and then waits for ever on a connection that is gone
+    (SQLite): the process does not exit."""
+    from tests.test_state import replica
+
+    first = replica(tmp_path, router)
+    await first.start()
+    await first.secrets.put("tracker/write", "w")
+    given_up = asyncio.Event()
+
+    async def in_the_middle_of_asking(approval_id: str) -> WriteApproval:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # a database call takes a moment to give up
+            given_up.set()
+            raise
+        raise AssertionError("not reached")
+
+    monkeypatch.setattr(first.approvals, "wait", in_the_middle_of_asking)
+    pending = await first.request_write(comment("PAY-1"), KIM)
+    assert isinstance(pending, WriteApproval)
+    waiting = list(first._background)  # pyright: ignore[reportPrivateUsage]
+    assert len(waiting) == 1 and not waiting[0].done()
+    await asyncio.sleep(0)  # the task has started, and is asking
+
+    await first.aclose()
+    ended = (given_up.is_set(), [task.cancelled() for task in waiting])
+    for task in waiting:  # had it not ended: end it, so that this fails instead of hanging
+        if not task.cancelling():
+            task.cancel()
+    await asyncio.wait(waiting, timeout=5)
+    assert ended == (True, [True])
+    assert not first._background  # pyright: ignore[reportPrivateUsage]
+
+    # Nothing is lost by it: the next start waits again, and makes the write once approved.
+    second = replica(tmp_path, router)
+    await second.start()
+    await second.approvals.approve(pending.id, "kim@x.test")
+    final = pending
+    for _ in range(200):
+        final = await second.approvals.load(pending.id) or final
+        if final.state is ApprovalState.EXECUTED:
+            break
+        await asyncio.sleep(0.02)
+    assert final.state is ApprovalState.EXECUTED, final.note
+    await second.aclose()
+
+
 async def test_only_one_replica_can_claim_an_approved_write(tmp_path: Any, router: Router) -> None:
     from tests.test_state import replica
 
