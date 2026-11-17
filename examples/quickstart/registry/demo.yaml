@@ -27,3 +27,7 @@ operations:
     accepts_body: true
     summary: Comment on a record
     parameters: [{name: id, in: path}]
+    body:                           # what agents are told the body holds; not checked
+      fields:
+        - {name: text, type: string, required: true, description: The comment}
+        - {name: seen, type: string, description: Something this comment answers}

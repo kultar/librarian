@@ -100,6 +100,18 @@ characters is left alone; replacing it would mangle ordinary data.)
 
 ## 4. A write waits for a person
 
+An agent does not have to guess what a write takes. Asked about one operation, librarian
+says what each argument is and what the body holds:
+
+```bash
+./ask '{"skill":"capabilities","api":"demo","operation":"addComment"}'
+# "args": [{"name": "id", "in": "path", ...}],
+# "body": {"fields": [{"name": "text", "type": "string", "required": true, "description": "The comment"}, ...]}
+```
+
+For an API learned from its OpenAPI description librarian reads this from there; for the demo
+API it is written in [its entry](../examples/quickstart/registry/demo.yaml). Now the write:
+
 ```bash
 ./ask '{"skill":"write","api":"demo","operation":"addComment","args":{"id":"42"},"body":{"text":"Looks good"},"reason":"Trying out write approvals"}'
 # "state": "TASK_STATE_AUTH_REQUIRED"

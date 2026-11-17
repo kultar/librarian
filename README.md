@@ -21,7 +21,7 @@ credential out.
                                └── planner (Pydantic AI, optional) ──► any model / LiteLLM
 ```
 
-> Status: **alpha (v0.22)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
+> Status: **alpha (v0.23)**. Expect breaking changes. Website: [librarian-agent.com](https://librarian-agent.com/).
 
 <!-- mcp-name: io.github.kultar/librarian -->
 
@@ -84,7 +84,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
 uvx librarian-a2a serve                    # or run it without installing (same CLI)
-docker pull ghcr.io/kultar/librarian:0.22.2
+docker pull ghcr.io/kultar/librarian:0.23.0
 ```
 
 ### What happens on a request
@@ -1337,6 +1337,15 @@ uv run pytest
   `capabilities` takes `api` for one API's operations; with a query the API that fits best
   keeps its matches; and an API named another way (`GitHub` for `github`) is answered with
   the one that exists
+- **v0.23**: an agent is told what a request body holds. librarian reads it from the API's
+  OpenAPI or Swagger description and keeps it with the operation (`body` in an entry).
+  `capabilities` with `api` names the first fields of each body, and with `api` and
+  `operation` gives that operation in full: every argument, and every field of the body
+  with its type, the values it takes and what it is for. Nothing is checked against it.
+  The console's API page shows it. An API learned before gets it when its description
+  next changes or when a person asks for a re-check, as an update that touches nothing
+  else about the operations. On five large APIs, 1,343 of the 1,497 operations that take
+  a body are described
 
 ### Next
 
