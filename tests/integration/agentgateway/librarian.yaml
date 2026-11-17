@@ -1,0 +1,21 @@
+host: 0.0.0.0
+port: 8080
+public_url: http://localhost:18601
+registry_dir: /registry
+database_url: ""
+callers:
+  - agent: release-notes             # an agent with a key of its own
+    key_ref: librarian/callers/release-notes
+    write_apis: [echo]
+    owner: ops@example.com
+  - agent: agentgateway              # the gateway, calling for the people it signed in
+    key_ref: librarian/callers/agentgateway
+    write_apis: [echo]
+principals:
+  mode: optional                     # a person is who their token says, when there is one
+  issuers:
+    - issuer: http://localhost:18680/realms/lib
+      audience: librarian
+      claim: email
+      jwks_url: http://keycloak:18680/realms/lib/protocol/openid-connect/certs
+approvers: {mode: token}

@@ -1,7 +1,7 @@
 name: integration
 
-# Real services in Docker (Postgres, LocalStack, Keycloak, oauth2-proxy). Heavier than CI,
-# so it runs on demand and weekly.
+# Real services in Docker (Postgres, LocalStack, Keycloak, oauth2-proxy, LiteLLM,
+# agentgateway). Heavier than CI, so it runs on demand and weekly.
 on:
   workflow_dispatch:
   schedule:
@@ -20,6 +20,7 @@ jobs:
           - {name: identity, project: libid, test: test_identity.py}
           - {name: litellm, project: liblite, test: test_litellm.py}
           - {name: credentials, project: libcred, test: test_credentials.py}
+          - {name: agentgateway, project: libagw, test: test_agentgateway.py}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

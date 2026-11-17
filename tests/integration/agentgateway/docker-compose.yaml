@@ -1,0 +1,62 @@
+# librarian behind agentgateway, as an MCP server and as an A2A agent, in the two ways a
+# gateway is used: passing an agent's own key through, and signing people in itself
+# (Keycloak) and telling librarian who they are.
+services:
+  librarian:
+    build: ../../..
+    image: librarian:integration
+    command: [serve, --config, /config/librarian.yaml]
+    ports: ["18601:8080"]
+    environment:
+      LIBRARIAN_SECRET_LIBRARIAN_CALLERS_RELEASE_NOTES: key-agent
+      LIBRARIAN_SECRET_LIBRARIAN_CALLERS_AGENTGATEWAY: key-gateway
+      LIBRARIAN_SECRET_ECHO_READ: read-1
+      LIBRARIAN_SECRET_SERVICE_ECHO_WRITE_TOKEN: w-agentgateway
+    volumes:
+      - ./librarian.yaml:/config/librarian.yaml:ro
+      - ./registry:/registry:ro
+    depends_on: {keycloak: {condition: service_healthy}}
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.7.0
+    command: ["-f", "/config/agentgateway.yaml"]
+    ports:
+      - "18600:3000"    # an agent's own key passes through
+      - "18602:3001"    # the gateway signs people in
+    volumes:
+      - ./agentgateway.yaml:/config/agentgateway.yaml:ro
+      - ./librarian-key:/secrets/librarian-key:ro
+    depends_on: {keycloak: {condition: service_healthy}}
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: [start-dev, --import-realm]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: "18680"
+      KC_HOSTNAME: http://localhost:18680   # the issuer in every token, inside and outside
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ../identity/realm.json:/opt/keycloak/data/import/realm.json:ro
+    ports: ["18680:18680"]
+    healthcheck:
+      test: [CMD-SHELL, "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 3s
+      retries: 60
+  httpbin:
+    image: mccutchen/go-httpbin:latest
+  # An API with two answers: one (1.2 MB of JSON) that is more than an agent can be handed
+  # in one piece and more than the gateway passes on, and one (0.4 MB, a tool result of
+  # just under 1 MB) that is as much as librarian hands over.
+  big:
+    image: librarian:integration
+    entrypoint: [python, -c]
+    command:
+      - |
+        import http.server, json, os
+        os.makedirs("/tmp/srv", exist_ok=True)
+        os.chdir("/tmp/srv")
+        for name, count in (("rows", 12000), ("most", 3800)):
+            rows = [{"id": n, "note": "x" * 80} for n in range(count)]
+            json.dump({"rows": rows, "total": count}, open(f"{name}.json", "w"))
+        http.server.test(HandlerClass=http.server.SimpleHTTPRequestHandler, port=8080, bind="0.0.0.0")
+    depends_on: [librarian]

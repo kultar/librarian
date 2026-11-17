@@ -1,0 +1,10 @@
+# A test API with one large answer (see the `big` service of this stack).
+id: big
+name: Big answers
+description: A test API whose answer is larger than an agent can be handed in one piece.
+base_url: http://big:8080
+status: verified
+auth: {type: none}
+operations:
+  - {id: getRows, method: GET, path: /rows.json, access: read, summary: Twelve thousand rows}
+  - {id: getMost, method: GET, path: /most.json, access: read, summary: As many rows as fit in one answer}

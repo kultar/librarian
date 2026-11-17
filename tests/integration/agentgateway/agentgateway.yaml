@@ -1,0 +1,95 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+# agentgateway v1.7 in front of librarian, two ways.
+config:
+  logging:
+    format: json
+binds:
+# 1. librarian authenticates. The agent's own key passes through; the gateway routes and
+#    observes. Nothing about librarian is configured here beyond where it is.
+- port: 3000
+  listeners:
+  - routes:
+    - name: librarian-mcp
+      matches:
+      - path:
+          exact: /mcp
+      backends:
+      - mcp:
+          statefulMode: stateless        # librarian keeps no MCP sessions
+          targets:
+          - name: librarian
+            mcp:
+              host: http://librarian:8080/mcp
+    - name: librarian-a2a
+      matches:
+      - path:
+          pathPrefix: /
+      policies:
+        a2a: {}                          # rewrites the agent card to this address
+      backends:
+      - host: librarian:8080
+# 2. the gateway signs people in. It checks each person's token, calls librarian with its
+#    own key, and passes the token on so that librarian can check it too: librarian then
+#    knows the person with proof, not on the gateway's word.
+- port: 3001
+  listeners:
+  - routes:
+    - name: librarian-mcp-people
+      matches:
+      - path:
+          exact: /mcp
+      - path:
+          exact: /.well-known/oauth-protected-resource/mcp
+      - path:
+          exact: /.well-known/oauth-authorization-server/mcp
+      policies:
+        mcpAuthentication:
+          mode: strict
+          issuer: http://localhost:18680/realms/lib
+          audiences: [librarian]
+          jwks:
+            url: http://keycloak:18680/realms/lib/protocol/openid-connect/certs
+          provider:
+            keycloak: {}
+          resourceMetadata:
+            resource: http://localhost:18602/mcp
+            scopesSupported: [openid, email]
+        mcpAuthorization:
+          rules:
+          # People read and write through librarian; teaching it new APIs is not for them.
+          - 'mcp.tool.name != "onboard"'
+        transformations:
+          request:
+            set:
+              x-principal-token: jwt.rawToken.unredacted()
+        backendAuth:
+          key:
+            file: /secrets/librarian-key
+      backends:
+      - mcp:
+          statefulMode: stateless
+          targets:
+          - name: librarian
+            mcp:
+              host: http://librarian:8080/mcp
+    - name: librarian-a2a-people
+      matches:
+      - path:
+          pathPrefix: /
+      policies:
+        a2a: {}
+        jwtAuth:
+          mode: strict
+          issuer: http://localhost:18680/realms/lib
+          audiences: [librarian]
+          jwks:
+            url: http://keycloak:18680/realms/lib/protocol/openid-connect/certs
+        transformations:
+          request:
+            set:
+              x-principal-token: jwt.rawToken.unredacted()
+        backendAuth:
+          key:
+            file: /secrets/librarian-key
+      backends:
+      - host: librarian:8080
