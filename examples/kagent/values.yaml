@@ -1,0 +1,37 @@
+# librarian beside kagent, to try it on a cluster of your own (see the README beside this file).
+# Not for a cluster other people use: nothing signs people in before the approval pages.
+
+publicUrl: http://localhost:8081      # where the guide forwards librarian's pages
+
+config:
+  notifier:
+    type: log                         # nobody is messaged: requests show on the console
+  approvers:
+    console: open                     # no sign-in in front of the console and the pages
+  allow_private_networks: true        # the demo API is a Service in this cluster
+
+# The demo API's keys; it takes any value. For a real API a person types the key into a page
+# when an agent first needs it, and it is never written in a file like this one.
+env:
+  - {name: LIBRARIAN_SECRET_DEMO_READ, value: demo-read-key}
+  - {name: LIBRARIAN_SECRET_DEMO_WRITE, value: demo-write-key}
+
+# What the demo API offers is written by hand in this repository
+# (examples/quickstart/registry/demo.yaml), and read from it as it would be from a
+# repository of your own.
+registry:
+  gitSync:
+    enabled: true
+    repo: https://github.com/kultar/librarian.git
+    ref: v0.23.1
+    path: examples/quickstart/registry
+
+# kagent's agents hold no key for librarian. The platform signs every call for the session
+# that makes it, librarian asks kagent which Agent that is, and the first rule that matches
+# says what it may do. An Agent no rule matches is refused.
+substrate:
+  enabled: true
+  rules:
+    - match: {namespace: kagent, name: librarian-demo}
+      write_apis: [demo]              # may ask for changes there; a person decides each one
+      owner: you@example.com          # that person

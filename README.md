@@ -77,6 +77,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 | I want to... | Go to |
 |---|---|
 | Try it on my laptop (10 minutes, Docker) | [docs/getting-started.md](docs/getting-started.md) |
+| Try it with kagent (10 minutes, a kind cluster or your own) | [examples/kagent](examples/kagent) |
 | Run it for my team (Kubernetes, step by step) | [docs/deploy.md](docs/deploy.md) (no internet exposure needed: [network](docs/deploy.md#network-what-must-reach-what)) |
 | Connect agents (LiteLLM, agentgateway, kagent and Agent Substrate, MCP clients, A2A) | [docs/integrations.md](docs/integrations.md) |
 | Fix something | [docs/troubleshooting.md](docs/troubleshooting.md) |
@@ -231,14 +232,15 @@ with `substrate.enabled`.
 
 ## Gateways and agent platforms
 
-librarian is one more server behind whatever already carries your agents' traffic. Each of
-these is tested, and [docs/integrations.md](docs/integrations.md) has the configuration:
+librarian is one more server behind whatever already carries your agents' traffic.
+[docs/integrations.md](docs/integrations.md) has the configuration, and the last column says
+how each is tested:
 
 | | What works | Tested |
 |---|---|---|
 | **[LiteLLM](docs/integrations.md#litellm-agent-gateway)** | librarian as an MCP server and an A2A agent behind the gateway, which holds one key for librarian; LiteLLM as librarian's own model gateway | Every week against a real LiteLLM (`tests/integration/litellm`), and in a real deployment |
 | **[agentgateway](docs/integrations.md#agentgateway)** | librarian as an MCP server and an A2A agent behind it, two ways: each agent's own key passes through, or the gateway signs people in and librarian checks the same token itself. On Kubernetes the Helm chart attaches librarian to your Gateway (`agentgateway.enabled`) | Every week against agentgateway v1.7.0 (`tests/integration/agentgateway`); the chart option by hand on kind |
-| **[kagent and Agent Substrate](docs/integrations.md#agent-substrate-and-kagent)** | Agents call librarian's tools with no key of their own (above); the chart registers librarian as a `RemoteMCPServer`. Rules per Agent, plans, a subset of the tools per agent, kagent's own approval in front of librarian's | By hand on kind with kagent 1.0.1 and Agent Substrate 1.0.0 ([the recipe](tests/integration/substrate)) |
+| **[kagent and Agent Substrate](docs/integrations.md#agent-substrate-and-kagent)** | Agents call librarian's tools with no key of their own (above); the chart registers librarian as a `RemoteMCPServer`. Rules per Agent, plans, a subset of the tools per agent, kagent's own approval in front of librarian's | By hand, not on a schedule: [the ten-minute path](examples/kagent) on 2026-11-17 with kagent 1.0.1 and Agent Substrate 1.0.0 on kind, and [a longer run](tests/integration/substrate) before it. With every commit: the token checks and the rules, against a stand-in. [What is and is not tested](docs/integrations.md#how-this-is-tested) |
 
 Three things keep it well-behaved behind any of them:
 
@@ -1291,7 +1293,7 @@ uv run pytest
   egress gateway signs each request with the actor's identity, librarian verifies it against
   the cluster's issuer, resolves the session to its kagent Agent, and applies the rule for
   that agent (`substrate.rules`); the chart registers librarian as a `RemoteMCPServer`
-  (`substrate.enabled`). Tested on kagent 1.0.1 with Agent Substrate 1.0.
+  (`substrate.enabled`). Tested by hand on kagent 1.0.1 with Agent Substrate 1.0.
   A credential an API sends back (an echo, a link that repeats the query string, an error that
   names the key) is removed from the answer before it reaches the agent, a model, the audit
   trail or the stored result of a write. Whitespace around a stored key (the line break at the

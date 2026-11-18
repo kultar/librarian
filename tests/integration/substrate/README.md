@@ -1,8 +1,12 @@
 # librarian on kagent and Agent Substrate
 
 A manual run, not part of CI: it needs a cluster with the feature gates Agent Substrate uses
-and a model key for the test agents. Last run on kind v0.33 (Kubernetes 1.35.0) with kagent
-1.0.1, which installs Agent Substrate 1.0.0.
+and a model key for the test agents. Its parts were last run on 2026-11-16 and 17, on the
+librarian versions from 0.20.0 to 0.22.0, on kind v0.33 (Kubernetes 1.35.0) with kagent 1.0.1,
+which installs Agent Substrate 1.0.0. It has not been repeated in full since.
+
+For a first look, [`examples/kagent`](../../../examples/kagent) is shorter: one agent, a read
+and a write, on the published chart. This run is the long one, from a checkout.
 
 What it shows:
 
@@ -28,6 +32,7 @@ cd tests/integration/substrate
 # 1. A cluster with pod certificates and cluster trust bundles.
 kind create cluster --name lib-substrate --config kind-config.yaml \
   --image kindest/node:v1.35.0 --kubeconfig ./kubeconfig --wait 180s
+#   (Kubernetes 1.37 needs no config: --image kindest/node:v1.37.0, as examples/kagent does)
 export KUBECONFIG=$PWD/kubeconfig
 
 # 2. kagent, which brings Agent Substrate and PostgreSQL. The key is for the test agents' model.

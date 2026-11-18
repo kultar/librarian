@@ -500,7 +500,8 @@ and add the key. That is the whole loop.
 - **On kagent or Agent Substrate**: set `substrate.enabled: true` and `substrate.rules` in the
   values file. Agents then need no key for librarian: the platform's gateway signs each call,
   and a rule says what each agent may do:
-  [integrations](integrations.md#agent-substrate-and-kagent).
+  [integrations](integrations.md#agent-substrate-and-kagent). To try it on a cluster of
+  your own first: [`examples/kagent`](../examples/kagent).
 - **Directly**: A2A at `http://librarian.librarian.svc:8080/`, MCP at `.../mcp`, with
   `Authorization: Bearer <caller key>`.
 

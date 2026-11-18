@@ -299,6 +299,36 @@ librarian             1. verifies the token: issuer, signature, audience "librar
 the API, with the key only librarian holds
 ```
 
+To see it run, [`examples/kagent`](../examples/kagent) takes an empty cluster to an agent
+whose write you approve, in about ten minutes.
+
+### How this is tested
+
+By hand, and not on a schedule. The weekly run that covers LiteLLM and agentgateway has no
+kagent in it: a run needs a cluster with Agent Substrate and a key for a model. What stands
+behind this section:
+
+| | What | When |
+|---|---|---|
+| With every commit | The token checks (issuer, signature, audience, an actor and not a worker), the lookup of the Agent, the rules, the refusals with their reasons, and a write that waits for its owner: against a stand-in for the cluster's issuer and for kagent's controller ([`tests/test_actors.py`](../tests/test_actors.py)). What the chart renders, and that the files of the example fit each other | Each change |
+| By hand: [the ten-minute path](../examples/kagent) | From an empty kind cluster: the chart's `RemoteMCPServer` accepted, an Agent with the tools and the skill ready, a read, a write approved on its page while the agent waits, a write approved after the agent stopped waiting, and a grant used from a second conversation | 2026-11-17, with librarian 0.23.1 as published, kagent 1.0.1, Agent Substrate 1.0.0, on Kubernetes 1.37.0 and on 1.35.0 with its feature gates (kind 0.33) |
+| By hand: [the longer run](../tests/integration/substrate) | Learning an API, a grant used from a second session, a plan approved once and waited for, an agent with only some of the tools, kagent's own approval in front of librarian's, the Claude-based harness (`claude-default`), and the refusals (no rule, a token for another audience) | In parts on 2026-11-16 and 17, on the versions from 0.20.0 to 0.22.0, on Kubernetes 1.35.0. Not repeated in full since |
+
+Not run on a cluster at all:
+
+- **Agent Substrate without kagent** ([below](#plain-agent-substrate)): only the tests of the
+  first row.
+- **A managed Kubernetes** (EKS, GKE, AKS). Agent Substrate needs pod certificates and
+  cluster trust bundles, which Kubernetes 1.37 has switched on
+  ([kagent's installation guide](https://kagent.dev/docs/kagent/1.x/setup/installation/)
+  asks for it). Before 1.37 they are feature gates of the control plane, which a managed
+  one may not let you switch.
+- kagent's `codex-default` harness, kagent installed with Helm instead of its CLI, and any
+  kagent other than 1.0.1.
+
+Nothing tries librarian against a new kagent release until one of the two runs is repeated:
+the dates say how old they are.
+
 ### With kagent (Helm)
 
 ```yaml
@@ -317,14 +347,6 @@ controller at `http://kagent-controller.kagent.svc:8083`), mounts the cluster si
 bundle so librarian can fetch the issuer's keys, and creates a `RemoteMCPServer` named
 `librarian` that any namespace's Agents may use. kagent's controller must watch the namespace
 it is in (`substrate.kagent.remoteMCPServer.namespace`, by default librarian's).
-
-Tested end to end on kind (Kubernetes 1.35) with kagent 1.0.1 and Agent Substrate 1.0.0: an
-agent learning an API and reading from it, a write approved by the rule's owner, a second
-session of the same agent writing under the grant that approval created, a plan of two writes
-approved once and waited for in one tool call, an agent given only some of the tools, kagent's
-own approval in front of librarian's, and the refusals below; on kagent's default harness, and
-the read and the plan on its Claude-based one (`claude-default`) as well. The steps and
-manifests are in [`tests/integration/substrate`](../tests/integration/substrate).
 
 Give an agent the tools by naming the server in its template:
 

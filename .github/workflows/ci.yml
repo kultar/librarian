@@ -77,6 +77,16 @@ jobs:
           plain="$(helm template t deploy/helm/librarian --set substrate.enabled=true,substrate.kagent.enabled=false)"
           if echo "$plain" | grep -q 'RemoteMCPServer\|kagent_url'; then echo "kagent rendered while off"; exit 1; fi
           if helm template t deploy/helm/librarian | grep -q 'substrate'; then echo "substrate rendered while off"; exit 1; fi
+      - name: The kagent example registers the server its Agent names
+        run: |
+          # As the guide installs it: release and namespace `librarian`, with the
+          # example's values. (That its files fit each other: tests/test_kagent_example.py.)
+          out="$(helm template librarian deploy/helm/librarian --namespace librarian -f examples/kagent/values.yaml)"
+          echo "$out" | grep -A3 'kind: RemoteMCPServer' | grep -q '  name: librarian$' || { echo "$out" | grep -A3 'kind: RemoteMCPServer'; exit 1; }
+          echo "$out" | grep -A3 'kind: RemoteMCPServer' | grep -q '  namespace: librarian$' || { echo "$out" | grep -A3 'kind: RemoteMCPServer'; exit 1; }
+          echo "$out" | grep -q 'url: http://librarian.librarian.svc.cluster.local:8080/mcp' || { echo "$out" | grep 'url:'; exit 1; }
+          echo "$out" | grep -q 'registry_dir: /git/current/examples/quickstart/registry' || { echo "$out" | grep registry_dir; exit 1; }
+          echo "$out" | grep -q 'name: librarian-demo' || { echo "no rule for the demo agent"; exit 1; }
       - name: Behind agentgateway
         run: |
           out="$(helm template t deploy/helm/librarian --set agentgateway.enabled=true,agentgateway.gateway.name=agents,agentgateway.gateway.namespace=gw)"

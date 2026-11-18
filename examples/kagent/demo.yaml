@@ -1,0 +1,51 @@
+# A stand-in for an internal API that needs a key (go-httpbin, which answers with the request
+# it was sent), and a kagent Agent that reaches it only through librarian.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: demo-api, namespace: librarian}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: demo-api}}
+  template:
+    metadata: {labels: {app: demo-api}}
+    spec:
+      containers:
+        - name: httpbin
+          image: mccutchen/go-httpbin:v2.15.0
+          ports: [{containerPort: 8080}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: demo-api, namespace: librarian}
+spec:
+  selector: {app: demo-api}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata:
+  name: librarian-demo
+  namespace: kagent
+spec:
+  harnessRef:
+    name: kagent-default
+  template:
+    inline:
+      modelConfig:
+        name: default-model-config
+      systemPrompt: |
+        You look things up and change things in web APIs for the person you talk to. You hold
+        no keys and call no API yourself: everything goes through the librarian tools. Say
+        what they returned in a few plain sentences, with any link or id they gave you.
+      # librarian's tools. Nothing else is needed: kagent lets the agent reach librarian and
+      # has the platform sign its calls.
+      tools:
+        - mcp:
+            server: {kind: RemoteMCPServer, name: librarian, namespace: librarian}
+      # How to use them well, from librarian's own image. kagent takes a skill by digest
+      # only; each release's notes name its digest, and an older one keeps working.
+      skills:
+        - name: librarian
+          source:
+            oci: ghcr.io/kultar/librarian@sha256:159bb5ccaeb8fddfe11d3e24b9ee399cfd5046c46e1b127f34b6563f4355ffc5
+            path: skills/librarian

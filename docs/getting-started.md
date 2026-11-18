@@ -169,7 +169,8 @@ Over MCP nothing blocks on a person unless the agent asks: a write (or a plan,
 (`write_status` reports the result, and with `wait_seconds` waits for it).
 
 For agents behind the **LiteLLM** gateway, or running on **kagent / Agent Substrate** (where
-they need no key at all), see [docs/integrations.md](integrations.md).
+they need no key at all), see [docs/integrations.md](integrations.md). kagent has a
+walkthrough of its own, on a cluster: [`examples/kagent`](../examples/kagent).
 
 ## Using a model
 

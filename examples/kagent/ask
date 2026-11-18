@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Ask the demo agent something (needs the kagent CLI and the forward to its controller).
+#   ./ask "What does record 42 of the demo API say?"       a new conversation
+#   SESSION=<id> ./ask "Has it been approved?"             the same conversation again
+set -euo pipefail
+agent="${AGENT:-librarian-demo}"
+if [[ -z "${SESSION:-}" ]]; then
+  SESSION=$(kagent agent session create --agent "$agent" -o json |
+    tr -d '\n' | sed -n 's/.*"session"[^{]*{[^}]*"id"[^"]*"\([^"]*\)".*/\1/p')
+  [[ -n "$SESSION" ]] || { echo "no conversation could be started with agent '$agent'" >&2; exit 1; }
+  echo "conversation $SESSION" >&2
+fi
+# --stream: the answer appears as the agent writes it, also while it waits for a person.
+kagent agent invoke --session "$SESSION" --stream --task "$*"

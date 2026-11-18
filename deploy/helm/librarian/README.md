@@ -248,7 +248,9 @@ Every value of the chart. `config` is librarian's own configuration: its setting
 The chart is exercised on a local kind cluster with git-sync and oauth2-proxy enabled: helm test,
 onboarding (surviving pod replacement), A2A port refusing the pages even with
 forged identity headers, proxy redirecting unauthenticated browsers to sign-in, and the pages
-listener unreachable from other pods. With `substrate.enabled`, on kind with kagent 1.0.1 and
-Agent Substrate 1.0.0 (see [`tests/integration/substrate`](../../../tests/integration/substrate)).
+listener unreachable from other pods. With `substrate.enabled`, by hand on kind with kagent
+1.0.1 and Agent Substrate 1.0.0: [`examples/kagent`](../../../examples/kagent) is the short
+path, and [what is and is not tested](../../../docs/integrations.md#how-this-is-tested) has
+the dates.
 With `agentgateway.enabled`, on kind with agentgateway v1.7.0 and Gateway API v1.6.3: MCP and
 A2A calls through the Gateway.
