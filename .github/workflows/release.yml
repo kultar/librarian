@@ -39,6 +39,9 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
       - run: uv sync --frozen --all-extras
       - run: uv run pytest -q
+      - name: Links in the README that work on PyPI's page
+        # After the tests, which read the README as it is in the repository.
+        run: python3 .github/scripts/pypi_readme.py "$TAG"
       - run: uv build
       - uses: actions/upload-artifact@v4
         with:

@@ -11,7 +11,7 @@ services:
     depends_on: [librarian]
 
   librarian:
-    image: ghcr.io/kultar/librarian:0.23.1
+    image: ghcr.io/kultar/librarian:0.23.2
     ports: ["8080:8080"]                   # the pages, for the person who approves
     command: [serve, --config, /config/librarian.yaml]
     environment:

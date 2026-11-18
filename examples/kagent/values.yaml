@@ -23,7 +23,7 @@ registry:
   gitSync:
     enabled: true
     repo: https://github.com/kultar/librarian.git
-    ref: v0.23.1
+    ref: v0.23.2
     path: examples/quickstart/registry
 
 # kagent's agents hold no key for librarian. The platform signs every call for the session

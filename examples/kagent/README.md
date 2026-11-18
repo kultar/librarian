@@ -37,7 +37,7 @@ kagent's agents think with; librarian needs no model here.
 ## 1. Install librarian
 
 ```bash
-helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.23.1 \
+helm install librarian oci://ghcr.io/kultar/charts/librarian --version 0.23.2 \
   --namespace librarian --create-namespace -f values.yaml
 kubectl -n librarian rollout status deploy/librarian
 kubectl -n librarian get remotemcpservers
@@ -201,8 +201,7 @@ seconds for each question. Each step on this page was run, the clean-up included
 with every commit and what does not.
 
 The clip on this page and the video on the site were recorded the same day, on a build of
-`main` and not of the published 0.23.1: with 0.23.1 an agent now and then stops instead of
-waiting for the approval, as step 4 says. Nothing in them is re-enacted: the terminal is
+what was then released as 0.23.2. Nothing in them is re-enacted: the terminal is
 drawn from what a real shell printed, and the browser is a headless Chrome on librarian's
 own pages, clicked with real input events (the pointer is drawn in, because a headless
 browser shows none). Pauses in which the model thinks are cut to 0.7 seconds.

@@ -93,7 +93,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 ```bash
 pip install librarian-a2a                  # the CLI and import are `librarian`
 uvx librarian-a2a serve                    # or run it without installing (same CLI)
-docker pull ghcr.io/kultar/librarian:0.23.1
+docker pull ghcr.io/kultar/librarian:0.23.2
 ```
 
 ### What happens on a request
@@ -651,6 +651,9 @@ No Slack? `notifier.type: webhook` posts JSON events you can route anywhere.
 
 ## What it looks like
 
+In motion: [a minute from a real run](https://librarian-agent.com/#run), with an agent on
+kagent, an API learned on the spot and a change approved on its page. In stills:
+
 <p align="center">
 <img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/screens/console-overview.png" alt="The console overview: tiles for APIs, what waits on a person, grants and signed-in people, then the waiting list and recently changed APIs" width="760"><br>
 <em>The console: what librarian knows, and what waits on a person.</em>
@@ -1193,6 +1196,10 @@ uv run pyright          # strict mode
 uv run pytest
 ```
 
+This README is also the package's page on PyPI, where a link to a file of the repository
+would lead nowhere: the release points those links at GitHub, at the release's tag, before
+it builds the package (`.github/scripts/pypi_readme.py`).
+
 ## Roadmap
 
 ### Done
@@ -1374,6 +1381,15 @@ uv run pytest
   description says it takes one (Stripe's API): a field inside another in brackets, a
   list as that description writes lists (`body.lists` in an entry), and the approval page
   shows the fields as they go over the wire
+- **v0.23.2**: from running on kagent with its default model. An agent that found its
+  operation in a search of the catalogue made the body's field up, and one whose write was
+  waiting ended its turn instead of waiting. The tools now say what a body holds where the
+  operation is listed (among several APIs wherever the answer has room for it) and what to
+  do while a write waits. [`examples/kagent`](examples/kagent) and
+  [`examples/agentgateway`](examples/agentgateway) run librarian in those stacks in ten and
+  five minutes, the docs show a recording of a real run, and
+  [In the stack you already run](#in-the-stack-you-already-run) says for each way in what
+  you add, what to run and how it is tested
 
 ### Next
 

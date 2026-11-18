@@ -95,3 +95,39 @@ def test_the_skill_is_one_an_agent_platform_accepts_and_is_in_the_image() -> Non
     assert "\nCOPY skills /skills\n" in (ROOT / "Dockerfile").read_text("utf-8")
     guide = (ROOT / "docs" / "integrations.md").read_text("utf-8")
     assert "path: skills/librarian" in guide
+
+
+def test_the_readme_on_pypi_has_no_link_that_leads_nowhere() -> None:
+    """The README is the package's page on PyPI, where a link to a file of the repository
+    is looked for on pypi.org and not found: forty of them, the docs and the examples
+    among them. The release points them at GitHub, at its tag, before it builds."""
+    import importlib.util
+
+    script = ROOT / ".github" / "scripts" / "pypi_readme.py"
+    spec = importlib.util.spec_from_file_location("pypi_readme", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    readme = (ROOT / "README.md").read_text("utf-8")
+    before = re.findall(r'(?:\]\(|href=")(?!https?://|mailto:|#)([^)"\s]+)', readme)
+    assert len(before) > 30  # there is something to do
+    on_pypi: str = module.absolute(readme, "v9.9.9", ROOT)
+    assert not re.findall(r'(?:\]\(|href=")(?!https?://|mailto:|#)([^)"\s]+)', on_pypi)
+    made = re.findall(
+        r"https://github\.com/kultar/librarian/(blob|tree)/v9\.9\.9/([^)\"\s#]+)", on_pypi
+    )
+    assert len(made) == len(before)
+    for kind, path in made:  # each is a file or a folder that is there, named as GitHub does
+        assert (ROOT / path).exists(), path
+        assert (kind == "tree") == (ROOT / path).is_dir(), path
+    # Nothing else is touched: the page's own anchors, web addresses, and what names the server.
+    assert on_pypi.count("](#") == readme.count("](#")
+    assert f"mcp-name: {NAME}" in on_pypi
+    assert len(on_pypi.splitlines()) == len(readme.splitlines())
+
+    # The release does it after its tests (which read the README as it is) and before it builds.
+    release = (ROOT / ".github" / "workflows" / "release.yml").read_text("utf-8")
+    assert (
+        release.index("uv run pytest") < release.index("pypi_readme.py") < release.index("uv build")
+    )
