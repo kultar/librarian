@@ -1378,7 +1378,9 @@ class Librarian:
         With `api`, that API alone, and its operations say what their bodies hold. With
         `api` and `operation`, that operation in full. With a `query`, the ten APIs that
         fit it best and of each the operations that fit; without one, every API and the
-        first operations of each. The answer stays under `capabilities_max_bytes` and
+        first operations of each. Among several APIs the operations say what their
+        bodies hold where the whole answer has room for that, and otherwise only that
+        they take one. The answer stays under `capabilities_max_bytes` and
         under what `fits` allows (the MCP endpoint passes what a tool result may hold):
         its lists of operations are cut until it does, and the note says how to see what
         was left out.
@@ -1411,9 +1413,10 @@ class Librarian:
                 return ops[:FIRST]
             return rank(entry, query, ops, limit=MATCHES) or ops[:MATCHES]
 
-        def told(op: Operation) -> dict[str, Any]:
+        def told(op: Operation, names: bool) -> dict[str, Any]:
             """One operation as an agent needs it to call it: its name, what it does, and
-            the arguments it takes (`team?` is one that may be left out)."""
+            the arguments it takes (`team?` is one that may be left out); with `names`,
+            what its body holds, by the names of its first fields."""
             said: dict[str, Any] = {
                 "operation": op.id,
                 "summary": op.summary[:160],
@@ -1421,13 +1424,11 @@ class Librarian:
             }
             if op.accepts_body:
                 said["body"] = True
-            if api and op.body is not None:
-                # Asked about this API: what the body holds, by name. (Among several
-                # APIs it would take the room of the operations themselves.)
+            if names and op.body is not None:
                 said |= body_names(op.body)
             return said
 
-        def listed(entry: ApiEntry) -> Listed:
+        def listed(entry: ApiEntry, names: bool) -> Listed:
             # Its limits may leave some out. The writes are the changes this caller may
             # ask for: asking is all it may do, each one still needs a person's approval
             # or a grant. They are named so that an agent does not have to guess an
@@ -1445,10 +1446,10 @@ class Librarian:
                     "status": entry.status.value,
                     "base_url": entry.base_url,
                 },
-                reads=[told(op) for op in in_order(entry, reads)],
+                reads=[told(op, names) for op in in_order(entry, reads)],
                 total_reads=len(reads),
                 writes=[
-                    {**told(op), "enabled": op.writable and entry.write_auth is not None}
+                    {**told(op, names), "enabled": op.writable and entry.write_auth is not None}
                     for op in in_order(entry, writes)
                 ]
                 if writes
@@ -1461,8 +1462,19 @@ class Librarian:
                 },
             )
 
+        if not api and entries:
+            # Among several APIs: what the bodies hold as well, where all of it fits. An
+            # agent that searched and found its operation here goes straight on to the
+            # write, and told only "it takes a body" it made the field up (`comment` for
+            # `text`, in live runs). Where there is no room, the operations come first.
+            whole = {"apis": [listed(e, True).told(FIRST) for e in entries]}
+            if small_enough(whole):
+                return whole
         return shortened(
-            [listed(e) for e in entries], small_enough, searched=bool(query), one=bool(api)
+            [listed(e, bool(api)) for e in entries],
+            small_enough,
+            searched=bool(query),
+            one=bool(api),
         )
 
     def as_form(self, approval: WriteApproval) -> list[tuple[str, str]] | None:

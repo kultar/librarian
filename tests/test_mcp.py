@@ -93,6 +93,20 @@ async def test_tools_are_listed_with_hints(connect: Connect) -> None:
     assert write is not None and write.destructive_hint is True
 
 
+async def test_the_tools_that_take_a_body_say_where_its_fields_are_told(connect: Connect) -> None:
+    """A search of the catalogue says of an operation only that it takes a body. Asked for
+    a change after one, a small model made the field up (`comment`, where the entry names
+    `text`) in 7 of 12 live runs. With this said by `write` itself it asked about the
+    operation first in 12 of 12: a model reads the description of the tool it is about to
+    call, so that is where it has to be."""
+    async with connect() as session:
+        tools = {t.name: t.description or "" for t in (await session.list_tools()).tools}
+    for name in ("write", "write_plan"):
+        said = " ".join(tools[name].split())
+        assert "`capabilities`" in said and "`api` and `operation`" in said, name
+        assert "not guess" in said, name
+
+
 async def test_unauthenticated_clients_are_refused(server: str) -> None:
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -156,7 +170,9 @@ async def test_an_agent_is_told_what_an_operation_takes_and_does_not_have_to_gue
         assert reads["searchIssues"] == {
             "operation": "searchIssues", "summary": "", "args": [], "body": True
         }  # fmt: skip
-        assert writes["addComment"]["args"] == ["key"] and writes["addComment"]["body"] is True
+        assert writes["addComment"]["args"] == ["key"]
+        # what its body holds, by name: the catalogue is small enough to say so here
+        assert writes["addComment"]["body"] == ["body", "visibility?", "mentions?"]
 
         # Words that fit the API and none of its operations: they are listed all the same.
         found = data(await session.call_tool("capabilities", {"query": "example tracker"}))
@@ -230,13 +246,15 @@ async def test_capabilities_for_one_api_and_never_more_than_a_tool_result_holds(
 
 
 async def test_an_agent_about_to_write_asks_what_the_body_holds(connect: Connect) -> None:
-    """Told only that an operation takes a body, an agent guesses what goes in it. With
-    the API it gets the names; with the operation, everything the description says."""
+    """Told only that an operation takes a body, an agent guesses what goes in it. Where
+    the operation is listed it gets the names (among several APIs where the answer has
+    room for them, with the API always); with the operation, everything the description
+    says."""
     async with connect() as session:
         everything = data(await session.call_tool("capabilities", {}))
         tracker = next(a for a in everything["apis"] if a["api"] == "tracker")
         among_all = {op["operation"]: op for op in tracker["write_operations"]}
-        assert among_all["addComment"]["body"] is True  # no room for more among all APIs
+        assert among_all["addComment"]["body"] == ["body", "visibility?", "mentions?"]
 
         listed = data(await session.call_tool("capabilities", {"api": "tracker"}))
         writes = {op["operation"]: op for op in listed["apis"][0]["write_operations"]}
@@ -428,8 +446,13 @@ async def test_write_status_waits_for_the_outcome_when_asked_to(
     async with connect() as session:
         pending = data(await session.call_tool("write", COMMENT))
         assert pending["status"] == "pending_approval"
-        # The answer itself says how: an agent does not have to know librarian's manual.
-        assert "with wait_seconds (up to 50) it waits for the decision" in pending["message"]
+        # The answer itself says what to do next, in so many words: an agent does not have
+        # to know librarian's manual. Told only that `write_status` can wait, a small model
+        # ended its turn instead and asked its user whether it should (8 of 10 live runs
+        # with only the tools); told to wait once now, it did in 12 of 12.
+        said = pending["message"]
+        assert "Now call write_status with this approval id and wait_seconds 45" in said
+        assert "once before you answer" in said and "nothing is sent until they do" in said
         asked = {"approval": pending["approval"], "wait_seconds": 20}
         waiting = asyncio.create_task(session.call_tool("write_status", asked))
         await asyncio.sleep(0.3)

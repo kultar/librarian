@@ -114,6 +114,17 @@ async def test_agent_card_lists_skills(http: httpx.AsyncClient) -> None:
     assert "bearer" in card["securitySchemes"]
 
 
+async def test_the_skills_that_take_a_body_say_where_its_fields_are_told(
+    http: httpx.AsyncClient,
+) -> None:
+    """As for the MCP tools: an agent that is not told where a body's fields are named
+    makes them up."""
+    card = (await http.get("/.well-known/agent-card.json")).json()
+    skills = {s["id"]: " ".join(s["description"].split()) for s in card["skills"]}
+    for name in ("write", "plan"):
+        assert "capabilities skill, asked with api and operation" in skills[name], name
+
+
 async def test_unauthenticated_calls_are_rejected(
     librarian: Librarian, http: httpx.AsyncClient
 ) -> None:

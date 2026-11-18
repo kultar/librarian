@@ -82,17 +82,21 @@ def _write_outcome(outcome: WriteOutcome | WriteApproval, librarian: Librarian) 
             else f"this {outcome.operation} on {outcome.api_name}"
         )
         wait = librarian.settings.mcp_max_wait_seconds
+        # What to do next, in so many words. Told only that `write_status` can wait, a
+        # small model ended its turn and asked its user whether it should (8 of 10 live
+        # runs with only the tools, 1 in 5 on kagent with the skill).
+        then = (
+            f"Now call write_status with this approval id and wait_seconds {min(45, wait)}: "
+            "it answers as soon as they have decided. Do that once before you answer; if "
+            "it is still pending then, say that it waits for approval."
+            if wait
+            else "Call write_status with this approval id later to get the result."
+        )
         return {
             "status": "pending_approval",
             "approval": outcome.id,
             "message": (
-                f"A human must approve {what}. Call write_status with this approval id to "
-                "get the result"
-                + (
-                    f": with wait_seconds (up to {wait}) it waits for the decision."
-                    if wait
-                    else "."
-                )
+                f"A person has been asked to approve {what}; nothing is sent until they do. {then}"
             ),
             **{k: v for k, v in librarian.write_status(outcome).items() if k != "approval"},
         }
@@ -126,8 +130,9 @@ def build_mcp(librarian: Librarian) -> MCPServer:
         before a `write` whose body you would otherwise have to guess.
 
         In a list, each operation names its arguments (`args`; a trailing ? marks one
-        that may be left out) and says when it takes a `body`: with `api`, by the names
-        of its first fields (`author.name` is a field inside another).
+        that may be left out) and says when it takes a `body`: by the names of its first
+        fields (`author.name` is a field inside another) where the answer has room for
+        them, and always with `api`. `body: true` says only that it takes one.
         Where you may ask for changes, the operations that write are listed too
         (`write_operations`): use them with `write` or `write_plan`. `enabled: false`
         means nobody has allowed writes through that operation yet; asking for one asks
@@ -244,7 +249,10 @@ def build_mcp(librarian: Librarian) -> MCPServer:
         idempotency_key: str | None = None,
         also_needs: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Request a change (e.g. add a comment). Runs at once under a standing grant;
+        """Request a change (e.g. add a comment). Give `body` as an object of the fields
+        the operation takes, under the names `capabilities` gave you. Where it said only
+        `body: true`, ask it with `api` and `operation` first: it names every field. Do
+        not guess them. Runs at once under a standing grant;
         otherwise returns `pending_approval` and a human decides. Give a clear `reason`:
         the approver sees it. Use `idempotency_key` to make retries safe. If the
         operation is not enabled for writes yet, returns `write_not_enabled`: the
@@ -292,7 +300,9 @@ def build_mcp(librarian: Librarian) -> MCPServer:
         """Request several writes on one API as one plan: a human sees all of them
         together and approves once, then librarian makes them in order. Each step is
         {"id": "blob", "operation": "...", "args": {...}, "body": {...}}; `id` is a short
-        name of your choosing. Where a later step needs what an earlier one returned,
+        name of your choosing. What a `body` holds is told by `capabilities` with `api`
+        and `operation`: ask it for each operation before you plan, and do not guess the
+        fields. Where a later step needs what an earlier one returned,
         write {"$from": "<step id>.<field>"} as the value, in `args` or anywhere in
         `body` (e.g. {"sha": {"$from": "blob.sha"}}). Only writes go in a plan: read what
         you need first with `execute` and write the values in. A DELETE step must have

@@ -298,21 +298,25 @@ The JSONL audit log is separate and always on.
   writes). Without one: every API the agent may use, with the first 50 of each. With `api`:
   that API alone. Each operation comes with the arguments it takes, and
   `total_read_operations` and `total_write_operations` say how many there are. On GitHub's
-  API, an answer to a query is about 3 KB for an agent that only reads and 7 KB for one that
-  may also ask for writes.
+  API, an answer to a query is about 3 KB for an agent that only reads and 7 to 8 KB for one
+  that may also ask for writes.
 - **What a request body holds.** An agent that is told only that an operation takes a body
   has to guess what goes in it: from what it knows of a public API, from nothing for an
-  internal one. librarian reads it from the API's description and tells it. Asked about one
-  API (`api`), each operation names the first fields of its body: `"body": ["head", "base",
+  internal one. librarian reads it from the API's description and tells it. Where
+  operations are listed, each names the first fields of its body: `"body": ["head", "base",
   "title?", "labels?", "author.name?"]` (`?`: may be left out; a dot: a field inside
-  another), with `body_more` when there are more than ten. Asked about one operation
+  another), with `body_more` when there are more than ten. It does so always when asked
+  about one API (`api`), and among several APIs where the whole answer has room for it: a
+  few small APIs are told with it, and among large ones an operation says `body: true`
+  there. Asked about one operation
   (`api` and `operation`), it gets all of it: every argument with its type and description,
   and every field of the body with its type (`list of string` for a list), the values it
   takes and what it is for (up to 40 fields, three levels deep). A field is named by the
   keys that lead to it, as an agent writes them: where `items` is a `list of object`,
   `items.price` is the price of each item. Nothing is checked against this: the API accepts or refuses
-  a body, and descriptions leave fields out. `body: true` means the operation takes a body
-  and the description does not say what is in it. Three limits to know:
+  a body, and descriptions leave fields out. `body: true` says only that the operation takes
+  a body: in a list because the names had no room there, and asked about the one operation
+  because its description does not say what is in it. Three limits to know:
   - It is read from OpenAPI and Swagger descriptions, not from documentation pages or a
     model's knowledge, and you can write it into an entry by hand
     ([the format](docs/registry.md)).

@@ -138,7 +138,9 @@ def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) 
             description=(
                 "Change data through an API, subject to human approval (or a standing grant). "
                 'Send {"skill":"write","api":"jira","operation":"addComment","args":{...},'
-                '"body":{...},"reason":"why","idempotency_key":"optional"}. The task waits in '
+                '"body":{...},"reason":"why","idempotency_key":"optional"}. What the body '
+                "holds is told by the capabilities skill, asked with api and operation: do "
+                "not guess its fields. The task waits in "
                 "AUTH_REQUIRED until an approver decides; poll or subscribe for the result. "
                 "If nobody has enabled that operation for writes yet, the task is rejected "
                 "with a message saying the approvers were asked to enable it; retry later."
@@ -156,7 +158,9 @@ def build_agent_card(librarian: Librarian, *, require_auth: bool | None = None) 
                 '"steps":[{"id":"blob","operation":"git_create-blob","args":{...},"body":{...}},'
                 '{"id":"tree","operation":"git_create-tree","args":{...},"body":{"tree":[{"sha":'
                 '{"$from":"blob.sha"}}]}}]}. {"$from":"<step>.<field>"} stands for a value an '
-                "earlier step returned. The first step that fails ends the plan; what was "
+                "earlier step returned. What each body holds is told by the capabilities "
+                "skill, asked with api and operation. The first step that fails ends the "
+                "plan; what was "
                 "made before it is not undone. The result lists every step."
             ),
             tags=["api", "write", "approval"],

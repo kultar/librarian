@@ -15,7 +15,8 @@ with where it came from. What it refuses, you cannot get another way, and should
 1. `capabilities` shows the APIs you may use and their read operations. Give it a `query` in
    a few words ("jira issue comments") to get the best matches first. Each operation names
    the arguments it takes in `args` (`team?` is one you may leave out) and says when it takes
-   a `body`: use those names exactly, do not guess them.
+   a `body`, by the names of its first fields where the answer has room for them: use those
+   names exactly, do not guess them.
    - With `api` (an API's id) it shows that API alone; add a `query` to get its operations
      that fit what you need. Use this once you know which API you want.
    - `total_read_operations` and `total_write_operations` say how many operations an API
@@ -48,8 +49,9 @@ fact came from when it matters.
   `list of string` wants a list; where `items` is a `list of object`, `items.price` is the
   `price` of each item: `{"items": [{"price": "..."}]}`. Do this before the write
   instead of guessing the fields: a person should not be asked to approve a body the API
-  will refuse. `body: true` means the body's fields are not known to librarian; then use
-  what you know of the API, and say so in the `reason`.
+  will refuse. `body: true` in that answer means the body's fields are not known to
+  librarian; then use what you know of the API, and say so in the `reason`. (In a list of
+  operations, `body: true` only means that the names had no room there: ask.)
 - Always give `body` as an object of the fields, nested where a field is inside another.
   Where the API takes a form (`"sent_as": "form"`), librarian writes it as one: do not
   encode it yourself, and do not write names like `metadata[order]`.

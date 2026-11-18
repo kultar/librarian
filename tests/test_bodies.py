@@ -503,13 +503,31 @@ async def test_an_agent_is_told_what_a_body_holds_where_it_asks_about_the_api(
     librarian: Librarian,
 ) -> None:
     await saved(librarian, FORGE, EntryStatus.VERIFIED)
-    # Among all the APIs there is no room for it: an operation says that it takes one.
-    everything = librarian.capabilities(None, WRITER)["apis"]
-    forge = next(a for a in everything if a["api"] == "forge")
+    # Among all the APIs it is named too, where the whole answer has room for it: an agent
+    # that found its operation in a search goes straight on to the write, and told only
+    # that the operation takes a body it made the field up (in live runs, `comment` for
+    # `text`, in four of six writes).
+    everything = librarian.capabilities(None, WRITER)
+    forge = next(a for a in everything["apis"] if a["api"] == "forge")
+    writes = {op["operation"]: op for op in forge["write_operations"]}
+    assert writes["createPull"]["body"][:3] == ["head", "base", "title?"]
+    assert writes["createPull"]["body_more"] == 7 and "note" not in everything
+    searched = librarian.capabilities("forge pull", WRITER)["apis"][0]
+    found = {op["operation"]: op for op in searched["write_operations"]}
+    assert found["createPull"]["body"][:3] == ["head", "base", "title?"]
+
+    # Where there is no room for the names, the operations come first: each still says
+    # that it takes a body, and nothing else of the answer is cut for it.
+    full = size(everything)
+    tight = librarian.capabilities(None, WRITER, fits=lambda answer: size(answer) < full)
+    listed = set(writes)
+    forge = next(a for a in tight["apis"] if a["api"] == "forge")
     writes = {op["operation"]: op for op in forge["write_operations"]}
     assert writes["createPull"]["body"] is True and "body_more" not in writes["createPull"]
+    assert "note" not in tight and set(writes) == listed
+    assert [a["api"] for a in tight["apis"]] == [a["api"] for a in everything["apis"]]
 
-    # Asked about this API, its operations name what goes in.
+    # Asked about this API, its operations always name what goes in.
     one = librarian.capabilities(None, WRITER, api="forge")["apis"][0]
     writes = {op["operation"]: op for op in one["write_operations"]}
     assert writes["createPull"]["body"] == [
