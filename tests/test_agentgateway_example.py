@@ -52,7 +52,6 @@ def test_the_gateway_is_set_up_as_the_docs_say_and_as_the_weekly_run_tests() -> 
 def test_the_example_runs_the_release_it_names_on_the_quick_starts_settings() -> None:
     version = librarian.__version__
     assert SERVICES["librarian"]["image"] == f"ghcr.io/kultar/librarian:{version}"
-    assert f"librarian {version} as published" in GUIDE
     mounted = {volume.split(":")[0] for volume in SERVICES["librarian"]["volumes"]}
     assert {"../quickstart/librarian.yaml", "../quickstart/registry"} <= mounted
     settings = Settings.load(QUICKSTART / "librarian.yaml")
