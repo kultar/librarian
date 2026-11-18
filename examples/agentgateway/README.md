@@ -107,4 +107,5 @@ This configuration, and the one in which the gateway signs people in, run every 
 agentgateway v1.7.0 with librarian built from `main`
 ([`tests/integration/agentgateway`](../../tests/integration/agentgateway)): tools listed and
 called, a write and a plan approved and finished, the agent card, a task followed through the
-gateway. This page was run by hand on 2026-11-17 with librarian 0.23.1 as published.
+gateway. This page was run by hand on 2026-11-17, from a clone of the `v0.23.2` tag with
+librarian 0.23.2 as published.

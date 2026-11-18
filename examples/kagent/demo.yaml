@@ -47,5 +47,5 @@ spec:
       skills:
         - name: librarian
           source:
-            oci: ghcr.io/kultar/librarian@sha256:159bb5ccaeb8fddfe11d3e24b9ee399cfd5046c46e1b127f34b6563f4355ffc5
+            oci: ghcr.io/kultar/librarian@sha256:84a51695c96c34aad2dec16e092a02cd3dcefc5c31589b814fe148df0a596c1d
             path: skills/librarian

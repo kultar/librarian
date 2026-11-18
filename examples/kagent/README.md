@@ -79,7 +79,7 @@ These are the lines that give a kagent Agent librarian:
       skills:                         # optional: how to use the tools well
         - name: librarian
           source:
-            oci: ghcr.io/kultar/librarian@sha256:159bb5cc...
+            oci: ghcr.io/kultar/librarian@sha256:84a51695...
             path: skills/librarian
 ```
 
@@ -193,10 +193,12 @@ kubectl delete namespace librarian
 ## How this is tested
 
 By hand. No automated run covers it, because it needs a cluster with Agent Substrate and a
-key for a model. It was last run from an empty kind cluster on 2026-11-17, with librarian
-0.23.1 as published, kagent 1.0.1 (Agent Substrate 1.0.0), kind 0.33 and Kubernetes 1.37.0:
-a little over a minute for the cluster, three for kagent, a minute for steps 1 and 2, and
-seconds for each question. Each step on this page was run, the clean-up included.
+key for a model. It was last run from an empty kind cluster on 2026-11-17, from a clone of
+the `v0.23.2` tag with librarian 0.23.2 as published, kagent 1.0.1 (Agent Substrate 1.0.0),
+kind 0.33 and Kubernetes 1.37.0: about a minute for the cluster, three for kagent, a minute
+for steps 1 and 2, and seconds for each question. Each step on this page was run, the
+clean-up included. In nine writes asked for that day the agent sent the body the API takes
+and waited for the approval every time.
 [How kagent support is tested](../../docs/integrations.md#how-this-is-tested) says what runs
 with every commit and what does not.
 
