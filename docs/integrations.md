@@ -1,5 +1,21 @@
 # Integrations
 
+librarian is one more server in the stack you already run. Nothing in that stack has to
+change to try it: agents are given one address and one key, or no key at all where the
+platform signs for them. Each section below says what you add, has something to run, and
+says how it is tested and what does not work.
+
+| Your agents run on | Start here | To run |
+|---|---|---|
+| Any MCP client (Claude Code, an IDE, your own harness) | [Any MCP client](#any-mcp-client) | [Getting started](getting-started.md#5-connect-a-real-agent), on your laptop |
+| Any A2A client | [Any A2A client](#any-a2a-client) | [`examples/client`](../examples/client/ask_librarian.py) |
+| LiteLLM | [LiteLLM](#litellm-agent-gateway) | [The weekly run's stack](../tests/integration/litellm) |
+| agentgateway | [agentgateway](#agentgateway) | [`examples/agentgateway`](../examples/agentgateway): five minutes with Docker |
+| kagent, Agent Substrate | [Agent Substrate and kagent](#agent-substrate-and-kagent) | [`examples/kagent`](../examples/kagent): ten minutes on kind |
+
+How each is tested, by what and how often, is in one table in the
+[README](../README.md#in-the-stack-you-already-run).
+
 ## Any A2A client
 
 librarian is a standard A2A 1.0 agent (JSON-RPC). Fetch the card at
@@ -140,6 +156,10 @@ in front are tested against agentgateway v1.7.0
 ([`tests/integration/agentgateway`](../tests/integration/agentgateway), in the weekly
 integration run). (Agent Substrate's egress is agentgateway too: for agents that run in
 kagent, see [the next section](#agent-substrate-and-kagent).)
+
+To see it run, [`examples/agentgateway`](../examples/agentgateway) starts the gateway,
+librarian and a demo API with Docker, and sends an agent's calls through the gateway: five
+minutes. It is the configuration below.
 
 ### librarian authenticates: each agent's key passes through
 
@@ -300,7 +320,13 @@ the API, with the key only librarian holds
 ```
 
 To see it run, [`examples/kagent`](../examples/kagent) takes an empty cluster to an agent
-whose write you approve, in about ten minutes.
+whose write you approve, in about ten minutes. This is that write, from a real run
+([the full minute](https://librarian-agent.com/#run)):
+
+<p align="center"><a href="https://librarian-agent.com/#run"><picture>
+<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/demo/kagent-change-dark.gif">
+<img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/demo/kagent-change.gif" alt="An agent on kagent with no credentials asks librarian for a change; a person approves it on librarian's page; the agent reports it done" width="760">
+</picture></a></p>
 
 ### How this is tested
 

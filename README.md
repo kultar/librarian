@@ -12,6 +12,13 @@ documentation when there is no spec), asks a human for a
 credential (once, out of band), and from then on serves every agent, without ever handing the
 credential out.
 
+<p align="center"><a href="https://librarian-agent.com/#run"><picture>
+<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/demo/kagent-change-dark.gif">
+<img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/demo/kagent-change.gif" alt="An agent on kagent with no credentials asks librarian for a change; a person approves it on librarian's page; the agent reports it done" width="760">
+</picture></a></p>
+
+<p align="center"><em>A real run: an agent on <a href="examples/kagent">kagent</a> that holds no credentials asks for a change, a person approves it on librarian's page, and the agent is told it is done. <a href="https://librarian-agent.com/#run">The full minute</a> also shows librarian learning an API on the spot.</em></p>
+
 ```
  your agents ──A2A / MCP──► librarian ──(policy engine)──► Jira, GitHub, internal APIs, ...
                                │
@@ -78,6 +85,7 @@ and whether a model was involved, so a week of real traffic shows the split.
 |---|---|
 | Try it on my laptop (10 minutes, Docker) | [docs/getting-started.md](docs/getting-started.md) |
 | Try it with kagent (10 minutes, a kind cluster or your own) | [examples/kagent](examples/kagent) |
+| Try it behind agentgateway (5 minutes, Docker) | [examples/agentgateway](examples/agentgateway) |
 | Run it for my team (Kubernetes, step by step) | [docs/deploy.md](docs/deploy.md) (no internet exposure needed: [network](docs/deploy.md#network-what-must-reach-what)) |
 | Connect agents (LiteLLM, agentgateway, kagent and Agent Substrate, MCP clients, A2A) | [docs/integrations.md](docs/integrations.md) |
 | Fix something | [docs/troubleshooting.md](docs/troubleshooting.md) |
@@ -135,7 +143,7 @@ turn asks `write_status` with `wait_seconds`: it answers as soon as the write ha
 after that time (at most `mcp_max_wait_seconds`, 50) with where it stands. librarian
 works behind the **LiteLLM** and **agentgateway** gateways as both an MCP server and an A2A
 agent, and as the tool server of **kagent** agents: see
-[Gateways and agent platforms](#gateways-and-agent-platforms).
+[In the stack you already run](#in-the-stack-you-already-run).
 
 Results are A2A artifacts with the data plus **provenance**: which API and operation, the URL
 (secrets redacted), when, for which calling agent and principal, and which credential reference.
@@ -230,17 +238,19 @@ substrate:
 See [integrations](docs/integrations.md#agent-substrate-and-kagent); the Helm chart sets it up
 with `substrate.enabled`.
 
-## Gateways and agent platforms
+## In the stack you already run
 
-librarian is one more server behind whatever already carries your agents' traffic.
-[docs/integrations.md](docs/integrations.md) has the configuration, and the last column says
-how each is tested:
+librarian is one more server behind whatever already carries your agents' traffic. Nothing
+in that stack changes to try it, and what you add is small. For each way agents reach it
+there is something to run, and the last column says how it is tested: by what, and how often.
 
-| | What works | Tested |
-|---|---|---|
-| **[LiteLLM](docs/integrations.md#litellm-agent-gateway)** | librarian as an MCP server and an A2A agent behind the gateway, which holds one key for librarian; LiteLLM as librarian's own model gateway | Every week against a real LiteLLM (`tests/integration/litellm`), and in a real deployment |
-| **[agentgateway](docs/integrations.md#agentgateway)** | librarian as an MCP server and an A2A agent behind it, two ways: each agent's own key passes through, or the gateway signs people in and librarian checks the same token itself. On Kubernetes the Helm chart attaches librarian to your Gateway (`agentgateway.enabled`) | Every week against agentgateway v1.7.0 (`tests/integration/agentgateway`); the chart option by hand on kind |
-| **[kagent and Agent Substrate](docs/integrations.md#agent-substrate-and-kagent)** | Agents call librarian's tools with no key of their own (above); the chart registers librarian as a `RemoteMCPServer`. Rules per Agent, plans, a subset of the tools per agent, kagent's own approval in front of librarian's | By hand, not on a schedule: [the ten-minute path](examples/kagent) on 2026-11-17 with kagent 1.0.1 and Agent Substrate 1.0.0 on kind, and [a longer run](tests/integration/substrate) before it. With every commit: the token checks and the rules, against a stand-in. [What is and is not tested](docs/integrations.md#how-this-is-tested) |
+| Your agents run on | What you add | Try it | How it is tested |
+|---|---|---|---|
+| **[Any MCP client](docs/integrations.md#any-mcp-client)** (Claude Code, an IDE, your own harness) | One MCP server: librarian's address and the agent's key | [Getting started](docs/getting-started.md#5-connect-a-real-agent), on your laptop | With every commit, by the official MCP SDK's client over HTTP |
+| **[Any A2A client](docs/integrations.md#any-a2a-client)** | The address of librarian's agent card and the agent's key | [`examples/client`](examples/client/ask_librarian.py) | With every commit, by the official A2A SDK's client |
+| **[LiteLLM](docs/integrations.md#litellm-agent-gateway)** | An `mcp_servers` entry, an agent entry, or both; the gateway holds one key for librarian. LiteLLM can be librarian's own model gateway too | [The weekly run's stack](tests/integration/litellm); as a model gateway, [`examples/compose`](examples/compose) | Every week against a real LiteLLM (`tests/integration/litellm`), and in a real deployment |
+| **[agentgateway](docs/integrations.md#agentgateway)** | Two routes. Each agent's own key passes through, or the gateway signs people in and librarian checks the same token itself. On Kubernetes the Helm chart attaches librarian to your Gateway (`agentgateway.enabled`) | [`examples/agentgateway`](examples/agentgateway): five minutes with Docker | Every week against agentgateway v1.7.0 (`tests/integration/agentgateway`); the chart option by hand on kind |
+| **[kagent and Agent Substrate](docs/integrations.md#agent-substrate-and-kagent)** | `substrate.enabled` and a rule per Agent in librarian's chart, which registers librarian as a `RemoteMCPServer`; one `tools` entry in the Agent. Agents hold no key at all (above). Plans, a subset of the tools per agent, kagent's own approval in front of librarian's | [`examples/kagent`](examples/kagent): ten minutes on kind | By hand, not on a schedule: [the ten-minute path](examples/kagent) on 2026-11-17 with kagent 1.0.1 and Agent Substrate 1.0.0 on kind, and [a longer run](tests/integration/substrate) before it. With every commit: the token checks and the rules, against a stand-in. [What is and is not tested](docs/integrations.md#how-this-is-tested) |
 
 Three things keep it well-behaved behind any of them:
 

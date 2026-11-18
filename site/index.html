@@ -23,11 +23,13 @@
     librarian
   </a>
   <nav class="nav" aria-label="Sections">
+    <a href="#run">See it run</a>
     <a href="#how">How it works</a>
     <a href="#access">How access is held</a>
     <a href="#see">What people see</a>
     <a href="#save">What agents save</a>
     <a href="#safe">Why it's safe</a>
+    <a href="#stack">In your stack</a>
     <a href="#start">Get started</a>
     <a href="#docs">Docs</a>
     <a href="https://github.com/kultar/librarian">GitHub</a>
@@ -86,6 +88,21 @@ docker pull ghcr.io/kultar/librarian:0.23.1</code></pre></div>
     </g>
   </svg>
 </div>
+
+<section id="run">
+  <div class="wrap">
+    <h2>See it run</h2>
+    <p class="measure">One minute, from a real run on kagent. The agent's sandbox holds no credentials. It has librarian learn an API nobody set up, then asks for a change, which waits until a person approves it on librarian's page. <span class="muted">Pauses while the model thinks are shortened; nothing is re-enacted.</span></p>
+    <div class="clip">
+      <video class="light" controls muted playsinline preload="none" poster="assets/demo/kagent-poster.png" src="assets/demo/kagent.mp4" aria-label="A terminal and a browser: an agent on kagent reads through librarian, asks for a change, a person approves it, and the agent reports it done"></video>
+      <video class="dark" controls muted playsinline preload="none" poster="assets/demo/kagent-poster-dark.png" src="assets/demo/kagent-dark.mp4" aria-label="A terminal and a browser: an agent on kagent reads through librarian, asks for a change, a person approves it, and the agent reports it done"></video>
+    </div>
+    <div class="actions">
+      <a class="btn" href="https://github.com/kultar/librarian/tree/main/examples/kagent">Run it yourself in ten minutes</a>
+      <a class="btn quiet" href="https://github.com/kultar/librarian/tree/main/examples/agentgateway">Or behind agentgateway, in five</a>
+    </div>
+  </div>
+</section>
 
 <section id="how">
   <div class="wrap">
@@ -158,6 +175,20 @@ docker pull ghcr.io/kultar/librarian:0.23.1</code></pre></div>
       <div><dt>Approval pages are locked down</dt><dd>A separate listener behind your SSO proxy, one-time HMAC links that expire, a strict content security policy with no external resources, and every decision recorded with who made it. The console on the same listener shows credential references only, and every action there is audited too.</dd></div>
     </dl>
     <p style="margin-top:24px">The full <a href="https://github.com/kultar/librarian/blob/main/docs/threat-model.md">threat model</a> lists each threat and its mitigation.</p>
+  </div>
+</section>
+
+<section id="stack">
+  <div class="wrap">
+    <h2>In the stack you already run</h2>
+    <p class="measure">librarian is one more server behind whatever already carries your agents' traffic. Nothing in that stack changes to try it, each way in has something to run, and the docs say how each is tested: by what, and how often.</p>
+    <ul class="docs">
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md#any-mcp-client">Any MCP client</a><span>You add one MCP server: librarian's address and the agent's key. Tested with every commit, by the official MCP SDK's client.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md#any-a2a-client">Any A2A client</a><span>You add the address of librarian's agent card and the agent's key. Tested with every commit, by the official A2A SDK's client.</span></li>
+      <li><a href="https://github.com/kultar/librarian/blob/main/docs/integrations.md#litellm-agent-gateway">LiteLLM</a><span>You add an MCP server entry, an agent entry, or both. Tested every week against a real LiteLLM, and in a real deployment.</span></li>
+      <li><a href="https://github.com/kultar/librarian/tree/main/examples/agentgateway">agentgateway</a><span>You add two routes, or one value in librarian's chart on Kubernetes. Five minutes to try with Docker. Tested every week against agentgateway v1.7.0.</span></li>
+      <li><a href="https://github.com/kultar/librarian/tree/main/examples/kagent">kagent and Agent Substrate</a><span>You add a rule per Agent and one tools entry; agents hold no key at all. Ten minutes to try on kind. Tested by hand, with dates and versions in the docs.</span></li>
+    </ul>
   </div>
 </section>
 

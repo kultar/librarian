@@ -1,0 +1,34 @@
+# librarian behind agentgateway: agents use the gateway's address, people use librarian's
+# pages. See the README beside this file.
+name: librarian-agentgateway
+services:
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.7.0
+    command: ["-f", "/config/agentgateway.yaml"]
+    ports: ["3000:3000"]                   # what agents are given
+    volumes:
+      - ./agentgateway.yaml:/config/agentgateway.yaml:ro
+    depends_on: [librarian]
+
+  librarian:
+    image: ghcr.io/kultar/librarian:0.23.1
+    ports: ["8080:8080"]                   # the pages, for the person who approves
+    command: [serve, --config, /config/librarian.yaml]
+    environment:
+      # The key the demo agent calls with. It passes through the gateway to librarian.
+      LIBRARIAN_SECRET_LIBRARIAN_CALLERS_DEMO_AGENT: demo-agent-key
+      # The demo API's keys. Only librarian holds them.
+      LIBRARIAN_SECRET_DEMO_READ: demo-read-key
+      LIBRARIAN_SECRET_DEMO_WRITE: demo-write-key
+    volumes:
+      - ../quickstart/librarian.yaml:/config/librarian.yaml:ro   # the quick start's settings
+      - ../quickstart/registry:/registry:ro                      # and its demo API
+      - librarian-data:/data
+    depends_on: [demo-api]
+
+  # go-httpbin answers with the request it was sent: a stand-in for an internal API.
+  demo-api:
+    image: mccutchen/go-httpbin:v2.15.0
+
+volumes:
+  librarian-data:

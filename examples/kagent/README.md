@@ -7,6 +7,14 @@ without giving it a key of its own, and asks you before the change is made.
 Most of the ten minutes is kagent starting. On a cluster that already runs kagent 1.0 it is
 a Helm release, one manifest and two questions.
 
+<p align="center"><a href="https://librarian-agent.com/#run"><picture>
+<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/demo/kagent-change-dark.gif">
+<img src="https://raw.githubusercontent.com/kultar/librarian/main/site/assets/demo/kagent-change.gif" alt="An agent on kagent with no credentials asks librarian for a change; a person approves it on librarian's page; the agent reports it done" width="760">
+</picture></a></p>
+
+This is step 4 below, from a real run. [The full minute](https://librarian-agent.com/#run)
+has the rest: the agent's one tool server, an API learned on the spot, and who called.
+
 ## You need
 
 - `kubectl`, `helm` and the `kagent` CLI
@@ -191,3 +199,10 @@ a little over a minute for the cluster, three for kagent, a minute for steps 1 a
 seconds for each question. Each step on this page was run, the clean-up included.
 [How kagent support is tested](../../docs/integrations.md#how-this-is-tested) says what runs
 with every commit and what does not.
+
+The clip on this page and the video on the site were recorded the same day, on a build of
+`main` and not of the published 0.23.1: with 0.23.1 an agent now and then stops instead of
+waiting for the approval, as step 4 says. Nothing in them is re-enacted: the terminal is
+drawn from what a real shell printed, and the browser is a headless Chrome on librarian's
+own pages, clicked with real input events (the pointer is drawn in, because a headless
+browser shows none). Pauses in which the model thinks are cut to 0.7 seconds.

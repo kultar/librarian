@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+# agentgateway in front of librarian. librarian authenticates: each agent's own key passes
+# through, and the gateway routes, observes and limits. Nothing about librarian is
+# configured here beyond where it is.
+binds:
+- port: 3000
+  listeners:
+  - routes:
+    - name: librarian-mcp
+      matches:
+      - path: {exact: /mcp}
+      backends:
+      - mcp:
+          statefulMode: stateless        # librarian keeps no MCP sessions
+          targets:
+          - name: librarian
+            mcp: {host: http://librarian:8080/mcp}
+    - name: librarian-a2a
+      matches:
+      - path: {pathPrefix: /}
+      policies:
+        a2a: {}                          # rewrites the agent card to the gateway's address
+      backends:
+      - host: librarian:8080

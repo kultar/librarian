@@ -67,6 +67,12 @@ section>.wrap>h2+p{max-width:64ch}
 .shots img{width:100%;height:auto;border:1px solid var(--line);border-radius:var(--radius);background:#fff}
 .shots figcaption{color:var(--muted);font-size:.93rem;margin-top:8px}
 
+/* the recording: one clip per colour scheme, the other never loaded */
+.clip{margin:20px 0}
+.clip video{display:block;width:100%;height:auto;aspect-ratio:16/9;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+.clip .dark{display:none}
+@media (prefers-color-scheme:dark){.clip .light{display:none}.clip .dark{display:block}}
+
 /* why it's safe: a two-column definition list, no cards */
 .rules{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px 40px;margin:24px 0 0}
 .rules div{padding:14px 0;border-top:1px solid var(--line)}
